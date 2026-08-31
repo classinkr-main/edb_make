@@ -476,19 +476,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned Inno Setup installation failed with exit code $LASTEXITCODE."
           }
-          # Verify the real compiler, not the chocolatey shim. Exe metadata is
-          # unreliable across Inno builds (ProductVersion can be 0.0.0.0), so
-          # accept either the CLI banner or the FileVersion; the .nupkg itself
-          # is already pinned by SHA256 above.
+          # The compiler must exist, and chocolatey must report exactly the
+          # pinned package version. Exe metadata is unreliable across Inno
+          # builds (ProductVersion/FileVersion read 0.0.0.0) and the CLI
+          # banner omits the version, so the SHA256-pinned nupkg plus choco's
+          # installed-version record is the deterministic check.
           $isccPath = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
           if (-not (Test-Path -LiteralPath $isccPath)) {
             $isccPath = (Get-Command ISCC.exe -ErrorAction Stop).Source
           }
-          $banner = ((& $isccPath 2>&1 | Select-Object -First 2) -join ' ')
-          $global:LASTEXITCODE = 0
-          $fileVersion = "$((Get-Item -LiteralPath $isccPath).VersionInfo.FileVersion)"
-          if (-not (($banner -match [regex]::Escape($innoVersion)) -or $fileVersion.StartsWith($innoVersion, [System.StringComparison]::Ordinal))) {
-            throw "Unexpected Inno Setup compiler version: banner='$banner' fileVersion='$fileVersion'"
+          $installedPackage = (choco list innosetup --exact --limit-output | Select-Object -First 1)
+          if ("$installedPackage".ToLowerInvariant() -ne "innosetup|$innoVersion") {
+            throw "Unexpected Inno Setup package version: '$installedPackage' (expected innosetup|$innoVersion)"
           }
 
       - name: Build Windows installer
