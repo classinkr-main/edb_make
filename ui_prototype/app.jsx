@@ -7122,9 +7122,17 @@ function BoardStage({
         setPlacement?.(drag.id, drag.pendingPlacement);
       }
     }
-    drag.tile.style.transform = '';
-    drag.tile.style.zIndex = '';
-    drag.tile.style.transition = '';
+    {
+      // Any leftover transform delta after the pre-applied final position is
+      // an overshoot past the allowed range: ease it back deliberately (a
+      // slow-feeling 120ms hover transition re-arming at random was the old
+      // rubber-band bug), then restore the default transition afterwards.
+      const tileEl = drag.tile;
+      tileEl.style.transition = 'transform .18s ease';
+      tileEl.style.transform = '';
+      tileEl.style.zIndex = '';
+      window.setTimeout(() => { tileEl.style.transition = ''; }, 220);
+    }
     removePositionDragWindowListeners(drag);
     const captureTarget = drag.captureTarget || evt.currentTarget;
     captureTarget?.releasePointerCapture?.(evt.pointerId);
@@ -7141,7 +7149,10 @@ function BoardStage({
     if (!drag || drag.pointerId !== evt.pointerId) return;
     drag.tile.style.transform = '';
     drag.tile.style.zIndex = '';
-    drag.tile.style.transition = '';
+    {
+      const tileEl = drag.tile;
+      window.requestAnimationFrame(() => { tileEl.style.transition = ''; });
+    }
     removePositionDragWindowListeners(drag);
     drag.captureTarget?.releasePointerCapture?.(evt.pointerId);
     positionDragRef.current = null;
