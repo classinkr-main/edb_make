@@ -6,6 +6,7 @@ import base64
 import io
 import shutil
 import threading
+import sys
 import unittest
 import zipfile
 from pathlib import Path
@@ -283,6 +284,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
         )
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_windows_preview_crop_path_stays_below_legacy_max_path_boundary(self):
         handler = object.__new__(app_server.AppRequestHandler)
         runtime_dir = Path(
@@ -306,6 +308,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
         )
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_long_onedrive_hangul_root_dynamically_budgets_preview_and_publish(self):
         handler = object.__new__(app_server.AppRequestHandler)
         runtime_dir = Path(
@@ -341,6 +344,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
         )
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_long_onedrive_root_budgets_upload_digest_and_hangul_filename(self):
         upload_dir = Path(
             "C:/Users/"
@@ -361,6 +365,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             app_server.WINDOWS_MANAGED_PATH_MAX_UNITS,
         )
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_long_runtime_root_budgets_export_and_publish_descendants(self):
         handler = object.__new__(app_server.AppRequestHandler)
         runtime_dir = Path(

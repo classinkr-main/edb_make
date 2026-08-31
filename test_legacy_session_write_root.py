@@ -1,4 +1,5 @@
 import errno
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -35,6 +36,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             }],
         }
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_managed_long_root_uses_stable_recovery_without_moving_source(self):
         with TemporaryDirectory() as raw_tmp:
             runtime_dir = Path(raw_tmp) / ".app_runtime"
@@ -82,6 +84,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             self.assertEqual(custom.resolve(), selected)
             self.assertFalse(recovered)
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_custom_long_root_raises_typed_error_instead_of_redirecting(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
@@ -101,6 +104,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             self.assertEqual(custom.resolve(), raised.exception.path.resolve())
             self.assertFalse((runtime_dir / "outputs" / "recovered").exists())
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_split_reads_old_source_and_writes_only_to_recovered_root(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
@@ -124,6 +128,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
                 self.assertTrue(crop_path.is_file())
                 self.assertTrue(app_server._path_is_within(crop_path, recovered_root))
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_split_rejects_custom_long_root_without_writing(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
@@ -139,6 +144,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             self.assertEqual(str(custom), session["output_dir"])
             self.assertFalse(custom.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_manual_crop_writes_to_recovered_root(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
@@ -162,6 +168,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             self.assertTrue(app_server._path_is_within(crop_path, recovered_root))
             self.assertFalse(legacy_root.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_merge_writes_to_recovered_root(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
@@ -188,6 +195,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             self.assertTrue(app_server._path_is_within(crop_path, recovered_root))
             self.assertFalse(legacy_root.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_image_enhancement_adopts_recovered_root_only_after_applied_output(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
@@ -236,6 +244,7 @@ class TestLegacySessionWriteRoot(unittest.TestCase):
             self.assertTrue(app_server._path_is_within(enhanced_path, recovered_root))
             self.assertFalse(legacy_root.exists())
 
+    @unittest.skipUnless(sys.platform.startswith("win"), "exercises Windows MAX_PATH budgeting, which app_server only enables on win32")
     def test_image_enhancement_rejects_custom_long_root_without_writing(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
