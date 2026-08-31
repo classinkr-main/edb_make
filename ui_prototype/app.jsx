@@ -6962,6 +6962,61 @@ function BoardStage({
 
   useEffect(() => () => removePositionDragWindowListeners(), []);
 
+  // Corner-drag resize on a board tile: scales the placement live while
+  // dragging, clamped to the same limits as the side-panel zoom buttons.
+  const tileResizeDragRef = useRef(null);
+  const beginTileResizeDrag = (evt, item, maxScale) => {
+    if (evt.button !== 0) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    const tile = evt.currentTarget.closest?.('.stage-tile');
+    const rect = tile?.getBoundingClientRect?.();
+    if (!rect?.width) return;
+    const startScale = normalizePlacementScaleRatio(item.placementScaleRatio, maxScale);
+    const drag = {
+      id: item.id,
+      pointerId: evt.pointerId,
+      startX: evt.clientX,
+      startWidth: rect.width,
+      startScale,
+      maxScale,
+      lastScale: startScale,
+      moved: false,
+    };
+    drag.onMove = (event) => {
+      if (event.pointerId !== drag.pointerId) return;
+      const dx = event.clientX - drag.startX;
+      if (!drag.moved && Math.abs(dx) < 3) return;
+      drag.moved = true;
+      event.preventDefault();
+      const factor = (drag.startWidth + dx) / Math.max(1, drag.startWidth);
+      const next = normalizePlacementScaleRatio(drag.startScale * factor, drag.maxScale);
+      if (Math.abs(next - drag.lastScale) >= 0.01) {
+        drag.lastScale = next;
+        setPlacement?.(drag.id, { scaleRatio: next });
+      }
+    };
+    drag.onEnd = (event) => {
+      if (event.pointerId !== drag.pointerId) return;
+      if (drag.moved) {
+        setPlacement?.(drag.id, { scaleRatio: drag.lastScale });
+        suppressClickRef.current = drag.id;
+        window.setTimeout(() => {
+          if (suppressClickRef.current === drag.id) suppressClickRef.current = null;
+        }, 0);
+      }
+      window.removeEventListener('pointermove', drag.onMove);
+      window.removeEventListener('pointerup', drag.onEnd);
+      window.removeEventListener('pointercancel', drag.onEnd);
+      tileResizeDragRef.current = null;
+    };
+    tileResizeDragRef.current = drag;
+    setActive(item.id);
+    window.addEventListener('pointermove', drag.onMove, { passive: false });
+    window.addEventListener('pointerup', drag.onEnd, { passive: false });
+    window.addEventListener('pointercancel', drag.onEnd, { passive: false });
+  };
+
   const beginPositionDrag = (evt, item, placement) => {
     if (evt.button !== 0 || !contentRef.current) return;
     evt.preventDefault();
@@ -7343,10 +7398,10 @@ function BoardStage({
                       aria-label={`${i + 1}번 ${problemDisplayName(it, i)}. 드래그하여 배치 또는 순서 이동`}
                       aria-pressed={selectedIds?.has(String(it.id)) ? 'true' : 'false'}
                       style={tileStyle}
+                      onPointerDown={e => beginPositionDrag(e, it, p)}
                     >
                       <div
                         className="tile-hd"
-                        onPointerDown={e => beginPositionDrag(e, it, p)}
                       >
                         <span className="tile-grip-icon" aria-hidden="true">{Icon.grip}</span>
                         <span className="n">{String(i+1).padStart(2,'0')}</span>
@@ -7380,6 +7435,12 @@ function BoardStage({
                       <div className="tile-art">
                         <TileImage item={it} previewMaxDimension={CENTER_PANEL_PREVIEW_MAX_DIMENSION} />
                       </div>
+                      <span
+                        className="tile-resize-handle"
+                        title="드래그해서 크기 조절"
+                        onPointerDown={e => beginTileResizeDrag(e, it, maxScale)}
+                        aria-hidden="true"
+                      />
                     </button>
                   );
                 })}

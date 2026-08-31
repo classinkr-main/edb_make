@@ -1089,6 +1089,24 @@
     color: var(--chalk);
     touch-action: none;
   }
+  .stage-tile{ touch-action: none; }
+  .stage-tile .tile-resize-handle{
+    position: absolute;
+    right: -2px; bottom: -2px;
+    width: 16px; height: 16px;
+    cursor: nwse-resize;
+    touch-action: none;
+    z-index: 5;
+    border-right: 2px solid rgba(255,255,255,.45);
+    border-bottom: 2px solid rgba(255,255,255,.45);
+    border-bottom-right-radius: 4px;
+    opacity: 0;
+    transition: opacity .12s ease;
+  }
+  .stage-tile:hover .tile-resize-handle,
+  .stage-tile.active .tile-resize-handle{
+    opacity: 1;
+  }
   .stage-tile .tile-grip-icon{
     display: inline-grid;
     place-items: center;
@@ -7245,6 +7263,6 @@
 <script src="review_filters.js?v=review-mode-copy-20260818"></script>
 <script src="publish_summary.js?v=layout-diagnostics-edb-split-20260702"></script>
 <script src="publish_guard.js?v=preflight-passage-envelope-20260803"></script>
-<script src="app.bundle.js?v=frontend-bundle-2e464381fbe127865a18c1584f9aee9c96b422fcb712da70977c1d0c62fd8efc"></script>
+<script src="app.bundle.js?v=frontend-bundle-c01379807c5dda3118ca3dfa53b8f91bc555d66626fbf89acf4d16afd39b9e26"></script>
 </body>
 </html>
