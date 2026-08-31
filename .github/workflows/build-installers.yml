@@ -469,7 +469,10 @@ jobs:
           if ($actualSha256 -ne $expectedNupkgSha256) {
             throw "Inno Setup package checksum mismatch: $actualSha256"
           }
-          choco install innosetup --version $innoVersion --source $packageDir --no-progress -y
+          # --force: runner images may ship Inno Setup preinstalled without the
+          # choco shim, which makes ISCC.exe unresolvable; force reinstalling
+          # the pinned package restores the shim deterministically.
+          choco install innosetup --version $innoVersion --source $packageDir --no-progress -y --force
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned Inno Setup installation failed with exit code $LASTEXITCODE."
           }

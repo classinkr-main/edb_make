@@ -3561,6 +3561,37 @@ function ReviewStage({
       },
     };
   };
+  // Direct box adjust: grab an existing recognized box (edges/corners to
+  // resize, inside to move) without entering edit mode; the crop applies on
+  // release. A sub-threshold drag still behaves as a plain click/select.
+  const beginDirectBoxAdjust = (evt, page, prob, adjustMode) => {
+    if (evt.button !== 0 || boxEdit || manualSplit || mutating) return;
+    const canvas = evt.currentTarget.closest?.('.review-page-canvas');
+    const rect = canvas?.getBoundingClientRect?.();
+    if (!rect?.width || !rect?.height || !prob?.bbox?.width || !prob?.bbox?.height) return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    boxEditDragRef.current = {
+      mode: 'direct-adjust',
+      adjust: adjustMode,
+      problemId: prob.id,
+      canvas,
+      page,
+      startX: evt.clientX,
+      startY: evt.clientY,
+      initialBox: clampReviewBox(prob.bbox, page),
+      pageWidth: Number(page?.width) || 1,
+      pageHeight: Number(page?.height) || 1,
+      scaleX: (Number(page?.width) || 1) / rect.width,
+      scaleY: (Number(page?.height) || 1) / rect.height,
+      moved: false,
+      applyDirectCrop: (box) => {
+        if (setActive) setActive(prob.id);
+        setSelectedIds(new Set([prob.id]));
+        void mutateSession?.('crop', { problemId: prob.id, cropBox: box });
+      },
+    };
+  };
   const beginBoxDrag = (evt, mode, page, segmentId = null) => {
     if (!boxEdit?.box || evt.button !== 0) return;
     evt.preventDefault();
@@ -3814,6 +3845,42 @@ function ReviewStage({
     const onMove = (evt) => {
       const drag = boxEditDragRef.current;
       if (!drag) return;
+      if (drag.mode === 'direct-adjust') {
+        const liveRect = drag.canvas?.getBoundingClientRect?.();
+        const scaleX = liveRect?.width ? drag.pageWidth / liveRect.width : drag.scaleX;
+        const scaleY = liveRect?.height ? drag.pageHeight / liveRect.height : drag.scaleY;
+        const dx = (evt.clientX - drag.startX) * scaleX;
+        const dy = (evt.clientY - drag.startY) * scaleY;
+        drag.moved = drag.moved
+          || Math.hypot(evt.clientX - drag.startX, evt.clientY - drag.startY) >= MANUAL_SPLIT_DRAW_THRESHOLD_PX;
+        const minWidth = Math.min(drag.pageWidth, Math.max(12, Math.min(36, drag.pageWidth * 0.02)));
+        const minHeight = Math.min(drag.pageHeight, Math.max(12, Math.min(36, drag.pageHeight * 0.02)));
+        const initial = drag.initialBox;
+        let left = initial.left;
+        let top = initial.top;
+        let right = initial.left + initial.width;
+        let bottom = initial.top + initial.height;
+        if (drag.adjust === 'move') {
+          const nextLeft = Math.max(0, Math.min(drag.pageWidth - initial.width, initial.left + dx));
+          const nextTop = Math.max(0, Math.min(drag.pageHeight - initial.height, initial.top + dy));
+          left = nextLeft;
+          top = nextTop;
+          right = nextLeft + initial.width;
+          bottom = nextTop + initial.height;
+        } else {
+          if (drag.adjust.includes('w')) left = Math.max(0, Math.min(right - minWidth, initial.left + dx));
+          if (drag.adjust.includes('e')) right = Math.min(drag.pageWidth, Math.max(left + minWidth, initial.left + initial.width + dx));
+          if (drag.adjust.includes('n')) top = Math.max(0, Math.min(bottom - minHeight, initial.top + dy));
+          if (drag.adjust.includes('s')) bottom = Math.min(drag.pageHeight, Math.max(top + minHeight, initial.top + initial.height + dy));
+        }
+        const bbox = clampReviewBox(
+          { left, top, width: right - left, height: bottom - top },
+          { width: drag.pageWidth, height: drag.pageHeight }
+        );
+        drag.latestBox = bbox;
+        setBoxEditDraftBox({ pageId: drag.page.id, bbox });
+        return;
+      }
       if (drag.mode === 'draw-segment' || drag.mode === 'draw-direct-crop') {
         const point = manualSplitPointFromClient(evt.clientX, evt.clientY, drag.page, drag.rect);
         const bbox = manualSplitBoxFromPoints(drag.startPoint, point, drag.page);
@@ -3869,6 +3936,16 @@ function ReviewStage({
     };
     const onUp = () => {
       const drag = boxEditDragRef.current;
+      if (drag?.mode === 'direct-adjust') {
+        if (drag.moved && drag.latestBox) {
+          suppressReviewBoxClickRef.current = true;
+          window.setTimeout(() => { suppressReviewBoxClickRef.current = false; }, 0);
+          drag.applyDirectCrop?.(drag.latestBox);
+        }
+        setBoxEditDraftBox(null);
+        boxEditDragRef.current = null;
+        return;
+      }
       if (drag?.mode === 'draw-direct-crop') {
         const box = drag.latestBox;
         // Require a deliberate drag (threshold + minimum source-pixel size)
@@ -4965,7 +5042,9 @@ function ReviewStage({
                         }}
                         onMouseDown={isEditing
                           ? (evt) => beginBoxDrag(evt, 'move', page, boxEdit.multi ? segment.id : null)
-                          : undefined}
+                          : (!boxEdit && !manualSplit
+                              ? (evt) => beginDirectBoxAdjust(evt, page, prob, 'move')
+                              : undefined)}
                         onClick={(evt) => {
                           if (isEditing) {
                             evt.stopPropagation();
@@ -4983,6 +5062,15 @@ function ReviewStage({
                             ? <span className="review-bbox-risk">페이지 장식</span>
                             : isRisky && <span className="review-bbox-risk">{statusMeta.shortLabel}</span>}
                         </div>
+                        {!isEditing && !boxEdit && !manualSplit && (
+                          ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map(mode => (
+                            <div
+                              key={`direct-${mode}`}
+                              className={`direct-adjust-zone direct-adjust-${mode}`}
+                              onMouseDown={(evt) => beginDirectBoxAdjust(evt, page, prob, mode)}
+                            />
+                          ))
+                        )}
                         {isEditing && segmentSelected && (
                           <>
                             <div className="crop-frame-label">{boxEdit.multi ? `${segment.order || segmentIndex + 1}번째 영역` : '영역 조정'}</div>
@@ -12668,6 +12756,25 @@ function applyProblemCounts(session, problems = null){
   return counts;
 }
 
+// Pick the right Korean particle for a word's final sound (digits included:
+// 0영 1일 2이 3삼 4사 5오 6육 7칠 8팔 9구). `pair` is [받침O, 받침X] like
+// ['으로','로'] or ['을','를']; final ㄹ takes '로' for the 로/으로 pair.
+function koreanParticle(word, pair){
+  const [withFinal, withoutFinal] = pair;
+  const text = String(word || '').trim();
+  const last = text[text.length - 1] || '';
+  let final = null; // jongseong index, 0 = none
+  if (last >= '가' && last <= '힣') {
+    final = (last.charCodeAt(0) - 0xAC00) % 28;
+  } else if (last >= '0' && last <= '9') {
+    final = [21, 8, 0, 16, 0, 0, 1, 8, 8, 0][Number(last)]; // 영일이삼사오육칠팔구 받침
+  }
+  if (final === null) return withoutFinal;
+  if (final === 0) return withoutFinal;
+  if (final === 8 && withoutFinal === '로') return withoutFinal; // ㄹ + 로/으로 → 로
+  return withFinal;
+}
+
 function formatProblemCount(counts){
   const core = Number(counts?.core ?? counts?.problems ?? counts?.total ?? 0);
   const supplemental = Number(counts?.supplemental ?? counts?.supplementalItems ?? 0);
@@ -14826,7 +14933,7 @@ function App(){
         settleBackgroundJob(job.id, {
           status: 'done',
           label: isPassageOnly ? '공통 지문 추출 완료' : '문제 인식 완료',
-          hint: isPassageOnly ? `공통 지문 ${summary.problems}개를 찾았습니다.` : `${summary.problemLabel}을 찾았습니다.`,
+          hint: isPassageOnly ? `공통 지문 ${summary.problems}개를 찾았습니다.` : `${summary.problemLabel}${koreanParticle(summary.problemLabel, ['을', '를'])} 찾았습니다.`,
         });
         setRecognitionReview({
           id: `review-${job.id}`,
@@ -14834,8 +14941,8 @@ function App(){
           title: isPassageOnly
             ? `${files.length === 1 ? files[0].name || '파일' : `${files.length}개 파일`} · 공통 지문 ${summary.problems}개를 찾았어요`
             : files.length === 1
-              ? `${files[0].name || '파일'} · ${summary.problemLabel}로 인식했어요`
-              : `${summary.problemLabel}로 인식했어요`,
+              ? `${files[0].name || '파일'} · ${summary.problemLabel}${koreanParticle(summary.problemLabel, ['으로', '로'])} 인식했어요`
+              : `${summary.problemLabel}${koreanParticle(summary.problemLabel, ['으로', '로'])} 인식했어요`,
           subtitle: isPassageOnly
             ? '문제 목록에 적용하기 전에 긴 지문 경계와 여러 열·페이지 연결 순서를 페이지별로 확인합니다.'
             : '문제는 미리 분할했습니다. 문제 목록에 적용하기 전에 원본 페이지를 한 장씩 확인하세요.',

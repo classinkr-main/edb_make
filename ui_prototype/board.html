@@ -5360,7 +5360,25 @@
     cursor: crosshair;
   }
   .review-page-canvas.direct-crop-armed .review-bbox{
-    cursor: crosshair;
+    cursor: move;
+  }
+  /* Invisible grab zones on every recognized box: edges/corners resize the
+     crop directly, dragging the body moves it, all without edit mode. */
+  .direct-adjust-zone{
+    position: absolute;
+    z-index: 7;
+    background: transparent;
+  }
+  .direct-adjust-n{ top: -4px; left: 12px; right: 12px; height: 10px; cursor: ns-resize; }
+  .direct-adjust-s{ bottom: -4px; left: 12px; right: 12px; height: 10px; cursor: ns-resize; }
+  .direct-adjust-w{ left: -4px; top: 12px; bottom: 12px; width: 10px; cursor: ew-resize; }
+  .direct-adjust-e{ right: -4px; top: 12px; bottom: 12px; width: 10px; cursor: ew-resize; }
+  .direct-adjust-nw{ top: -5px; left: -5px; width: 14px; height: 14px; cursor: nwse-resize; }
+  .direct-adjust-se{ bottom: -5px; right: -5px; width: 14px; height: 14px; cursor: nwse-resize; }
+  .direct-adjust-ne{ top: -5px; right: -5px; width: 14px; height: 14px; cursor: nesw-resize; }
+  .direct-adjust-sw{ bottom: -5px; left: -5px; width: 14px; height: 14px; cursor: nesw-resize; }
+  .review-page-canvas.direct-crop-armed .review-bbox:hover .direct-adjust-zone{
+    background: rgba(47,111,237,.10);
   }
   .review-bbox.editing.passage-segment-box{
     box-shadow: 0 0 0 2px rgba(47,111,237,.28);
@@ -7227,6 +7245,6 @@
 <script src="review_filters.js?v=review-mode-copy-20260818"></script>
 <script src="publish_summary.js?v=layout-diagnostics-edb-split-20260702"></script>
 <script src="publish_guard.js?v=preflight-passage-envelope-20260803"></script>
-<script src="app.bundle.js?v=frontend-bundle-5540fc87c4368045ccb0b8d08b51ccdd5cf45938b7a8f1e4d90f8b793a8f2d39"></script>
+<script src="app.bundle.js?v=frontend-bundle-2e464381fbe127865a18c1584f9aee9c96b422fcb712da70977c1d0c62fd8efc"></script>
 </body>
 </html>
