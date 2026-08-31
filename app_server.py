@@ -5145,7 +5145,7 @@ MANUAL_CROP_RATIO_KEYS = {
     "topRatio": ("topRatio", "top", "cropTopRatio", "crop_top_ratio"),
     "bottomRatio": ("bottomRatio", "bottom", "cropBottomRatio", "crop_bottom_ratio"),
 }
-MANUAL_CROP_EDGE_MAX = 0.45
+MANUAL_CROP_EDGE_MAX = 0.85
 MANUAL_CROP_OUTSET_MAX = 0.60
 
 
@@ -5366,6 +5366,11 @@ def _mutate_crop(session: dict[str, Any], problem_id: str, raw_crop: Any) -> dic
                 image_height=page_image.height,
             )
         crop = _manual_crop_from_bbox(base_bbox, next_bbox)
+        # Keep the stored ratios and the rendered bbox consistent: if the
+        # ratio clamp altered the request, re-derive the bbox from the
+        # clamped ratios so a later re-crop cannot jump to a different region
+        # than what this crop actually rendered.
+        next_bbox = _bbox_with_manual_crop(base_bbox, crop)
     else:
         crop = _coerce_manual_crop_ratios(crop_payload)
         next_bbox = _bbox_with_manual_crop(base_bbox, crop)

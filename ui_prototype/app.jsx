@@ -306,7 +306,7 @@ const BOARD_DRAG_AUTOSCROLL_EDGE_PX = 58;
 const BOARD_DRAG_AUTOSCROLL_MAX_PX = 22;
 const RAIL_DRAG_AUTOSCROLL_EDGE_PX = 72;
 const RAIL_DRAG_AUTOSCROLL_MAX_PX = 18;
-const MANUAL_CROP_EDGE_MAX = 0.45;
+const MANUAL_CROP_EDGE_MAX = 0.85;
 const MANUAL_CROP_OUTSET_MAX = 0.60;
 const MANUAL_CROP_EDGE_STEP = 0.01;
 const MANUAL_SPLIT_ROW_TOLERANCE_RATIO = 0.03;
@@ -3534,6 +3534,7 @@ function ReviewStage({
     boxEditDragRef.current = {
       mode,
       segmentId: segment?.id || null,
+      canvas,
       startX: evt.clientX,
       startY: evt.clientY,
       initialBox: { ...initialBox },
@@ -3779,8 +3780,15 @@ function ReviewStage({
         setBoxEditDraftBox({ pageId: drag.page.id, bbox });
         return;
       }
-      const dx = (evt.clientX - drag.startX) * drag.scaleX;
-      const dy = (evt.clientY - drag.startY) * drag.scaleY;
+      // Re-read the canvas rect every move: the box-edit layout swap, zoom
+      // changes, or lazy image loads can resize the canvas mid-drag, and a
+      // scale captured once at mousedown would then cut or stretch the crop
+      // by hundreds of source pixels.
+      const liveRect = drag.canvas?.getBoundingClientRect?.();
+      const scaleX = liveRect?.width ? drag.pageWidth / liveRect.width : drag.scaleX;
+      const scaleY = liveRect?.height ? drag.pageHeight / liveRect.height : drag.scaleY;
+      const dx = (evt.clientX - drag.startX) * scaleX;
+      const dy = (evt.clientY - drag.startY) * scaleY;
       const minWidth = Math.min(drag.pageWidth, Math.max(12, Math.min(36, drag.pageWidth * 0.02)));
       const minHeight = Math.min(drag.pageHeight, Math.max(12, Math.min(36, drag.pageHeight * 0.02)));
       const initial = drag.initialBox;
@@ -10062,16 +10070,24 @@ function materializeSessionForItems(rawSession, items, fileName, boardColumns = 
   const orderedProblems = reflowedItems
     .filter(item => byId.has(item.id))
     .map(item => applyItemStateToProblem(byId.get(item.id), item));
-  const activeIds = new Set(orderedProblems.map(problem => problem.id));
-  snapshot.problems = orderedProblems;
-  applyProblemCounts(snapshot, orderedProblems);
+  const orderedIds = new Set(orderedProblems.map(problem => problem.id));
+  // Never drop session problems the board list lost track of (a React state
+  // race could momentarily omit one): this snapshot is POSTed to
+  // /api/session/restore before every mutate, so a dropped problem would be
+  // silently and permanently deleted server-side. Exclusion goes through the
+  // explicit server-side exclude action instead.
+  const strandedProblems = snapshot.problems.filter(problem => !orderedIds.has(problem.id));
+  const mergedProblems = orderedProblems.concat(strandedProblems);
+  const activeIds = new Set(mergedProblems.map(problem => problem.id));
+  snapshot.problems = mergedProblems;
+  applyProblemCounts(snapshot, mergedProblems);
   snapshot.session_name = fileName || snapshot.session_name || '새 세션';
   snapshot.edb_path = null;
   snapshot.edb_file_uri = null;
   snapshot.edbPath = null;
   snapshot.edbFileUri = null;
   if (Array.isArray(snapshot.pages)) {
-    const orderIndex = new Map(orderedProblems.map((problem, index) => [problem.id, index]));
+    const orderIndex = new Map(mergedProblems.map((problem, index) => [problem.id, index]));
     snapshot.pages = snapshot.pages.map(page => ({
       ...page,
       problemIds: (page.problemIds || page.problem_ids || [])
