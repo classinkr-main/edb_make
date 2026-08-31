@@ -55,6 +55,79 @@ HWP_NORMALIZED_CACHE_VERSION = 5
 HWP_FAST_TEXT_SIGNAL_GOOD_ENOUGH = 20
 
 
+def _configured_path(value: str | Path) -> Path:
+    """Normalize a user-configured path without requiring shell expansion.
+
+    Windows environment variables are commonly copied from registry or shell
+    examples with surrounding quotes and ``%NAME%`` references. Passing those
+    strings directly to :class:`Path` makes an otherwise valid executable look
+    missing.
+    """
+
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    text = re.sub(
+        r"%([^%]+)%",
+        lambda match: os.environ.get(match.group(1), match.group(0)),
+        text,
+    )
+    return Path(os.path.expandvars(os.path.expanduser(text)))
+
+
+def _path_identity(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _windows_application_roots() -> list[Path]:
+    if not sys.platform.startswith("win"):
+        return []
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        raw_root = os.environ.get(env_name, "").strip()
+        if not raw_root:
+            continue
+        root = _configured_path(raw_root)
+        key = _path_identity(root)
+        if key not in seen:
+            roots.append(root)
+            seen.add(key)
+    return roots
+
+
+def _iter_libreoffice_executables() -> list[Path]:
+    raw_candidates: list[str | Path | None] = [
+        shutil.which("soffice"),
+        shutil.which("libreoffice"),
+        Path("/Applications/LibreOffice.app/Contents/MacOS/soffice"),
+    ]
+    for root in _windows_application_roots():
+        raw_candidates.append(root / "LibreOffice" / "program" / "soffice.exe")
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        raw_candidates.append(
+            _configured_path(local_app_data)
+            / "Programs"
+            / "LibreOffice"
+            / "program"
+            / "soffice.exe"
+        )
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    for raw_candidate in raw_candidates:
+        if not raw_candidate:
+            continue
+        candidate = _configured_path(raw_candidate)
+        key = _path_identity(candidate)
+        if key in seen or not candidate.is_file():
+            continue
+        candidates.append(candidate)
+        seen.add(key)
+    return candidates
+
+
 @dataclass(slots=True)
 class PreprocessOptions:
     dpi: int = 160
@@ -359,8 +432,8 @@ def _iter_external_pymupdf_python_candidates() -> list[Path]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
-        key = str(candidate).lower()
+        candidate = _configured_path(raw_candidate)
+        key = _path_identity(candidate)
         if key in seen:
             continue
         seen.add(key)
@@ -490,14 +563,14 @@ def _iter_rhwp_converter_commands() -> list[list[str]]:
     for raw_candidate in rhwp_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen:
             continue
         seen.add(key)
-        candidates.append([key])
+        candidates.append([str(candidate)])
     return candidates
 
 
@@ -517,8 +590,8 @@ def _iter_rhwp_core_node_module_dirs() -> list[Path]:
         for raw_part in str(raw_candidate).split(os.pathsep):
             if not raw_part:
                 continue
-            candidate = Path(raw_part)
-            key = str(candidate)
+            candidate = _configured_path(raw_part)
+            key = _path_identity(candidate)
             if key in seen:
                 continue
             seen.add(key)
@@ -536,22 +609,18 @@ def _iter_rhwp_core_renderer_commands() -> list[list[str]]:
     script_path = Path(__file__).resolve().parent / "scripts" / "render_hwp_with_rhwp_core.mjs"
     if not node or not script_path.exists():
         return []
+    node_path = _configured_path(node)
     return [
-        [str(node), str(script_path), "--node-modules", str(module_dir)]
+        [str(node_path), str(script_path), "--node-modules", str(module_dir)]
         for module_dir in _iter_rhwp_core_node_module_dirs()
     ]
 
 
 def _iter_hwp_pdf_converter_commands() -> list[list[str]]:
-    candidates: list[list[str]] = []
-    for executable in ("soffice", "libreoffice"):
-        resolved = shutil.which(executable)
-        if resolved:
-            candidates.append([resolved, "--headless"])
-
-    mac_soffice = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
-    if mac_soffice.exists():
-        candidates.append([str(mac_soffice), "--headless"])
+    candidates: list[list[str]] = [
+        [str(executable), "--headless"]
+        for executable in _iter_libreoffice_executables()
+    ]
 
     hwp5pdf = shutil.which("hwp5pdf")
     if hwp5pdf:
@@ -568,7 +637,7 @@ def _iter_hwp_pdf_converter_commands() -> list[list[str]]:
     for raw_candidate in airun_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if candidate.exists():
             candidates.append([str(candidate)])
 
@@ -719,13 +788,14 @@ def _iter_hwp_hwpx_converter_commands() -> list[list[str]]:
         base_dir / ".app_runtime" / "hwpilot-src" / "dist" / "src" / "cli" / "main.js",
         base_dir / ".app_runtime" / "hwpilot" / "node_modules" / "hwpilot" / "dist" / "src" / "cli" / "main.js",
     ]
-    node = shutil.which("node")
+    raw_node = shutil.which("node")
+    node = str(_configured_path(raw_node)) if raw_node else None
     commands: list[list[str]] = []
     seen: set[str] = set()
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
         if candidate.suffix.lower() == ".js":
@@ -756,10 +826,10 @@ def _iter_pyhwp_html_converter_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen:
             continue
         seen.add(key)
@@ -781,10 +851,10 @@ def _iter_pyhwp_text_converter_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen:
             continue
         seen.add(key)
@@ -809,14 +879,14 @@ def _iter_kordoc_text_converter_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen:
             continue
         seen.add(key)
-        candidates.append([key])
+        candidates.append([str(candidate)])
     return candidates
 
 
@@ -950,10 +1020,10 @@ def _iter_unhwp_text_converter_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen or not _python_can_import_unhwp(candidate):
             continue
         seen.add(key)
@@ -974,10 +1044,10 @@ def _iter_hwp_hwpx_parser_text_converter_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen or not _python_can_import_hwp_hwpx_parser(candidate):
             continue
         seen.add(key)
@@ -1000,10 +1070,10 @@ def _iter_rhwp_python_text_converter_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen or not _python_can_import_rhwp_python(candidate):
             continue
         seen.add(key)
@@ -1026,10 +1096,10 @@ def _iter_rhwp_python_renderer_commands() -> list[list[str]]:
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen or not _python_can_import_rhwp_python(candidate):
             continue
         seen.add(key)
@@ -1056,16 +1126,33 @@ def _iter_chrome_pdf_commands() -> list[list[str]]:
         shutil.which("google-chrome"),
         shutil.which("chromium"),
         shutil.which("chrome"),
+        shutil.which("msedge"),
     ]
+    for root in _windows_application_roots():
+        raw_candidates.extend(
+            [
+                root / "Google" / "Chrome" / "Application" / "chrome.exe",
+                root / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            ]
+        )
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        local_root = _configured_path(local_app_data)
+        raw_candidates.extend(
+            [
+                local_root / "Programs" / "Google" / "Chrome" / "Application" / "chrome.exe",
+                local_root / "Programs" / "Microsoft" / "Edge" / "Application" / "msedge.exe",
+            ]
+        )
     candidates: list[list[str]] = []
     seen: set[str] = set()
     for raw_candidate in raw_candidates:
         if not raw_candidate:
             continue
-        candidate = Path(raw_candidate)
+        candidate = _configured_path(raw_candidate)
         if not candidate.exists():
             continue
-        key = str(candidate)
+        key = _path_identity(candidate)
         if key in seen:
             continue
         seen.add(key)
@@ -1103,16 +1190,24 @@ def _stage_airun_hwp_source(source_path: Path, target_dir: Path) -> Path:
 
 
 def _airun_hwp_env(target_dir: Path) -> dict[str, str] | None:
+    if sys.platform.startswith("win"):
+        # airun-hwp invokes the literal ``libreoffice`` command with
+        # subprocess and shell=False. A .cmd shim is therefore not a valid
+        # CreateProcess target on Windows. Standard Windows LibreOffice
+        # installations are handled earlier by the direct soffice.exe
+        # converter; leave airun's own fallback selection unchanged here.
+        return None
+
     libreoffice = shutil.which("libreoffice")
     if libreoffice:
         return None
 
     soffice = shutil.which("soffice")
-    mac_soffice = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
-    if not soffice and mac_soffice.exists():
-        soffice = str(mac_soffice)
-    if not soffice:
+    installations = _iter_libreoffice_executables() if not soffice else []
+    if not soffice and not installations:
         return None
+    if not soffice:
+        soffice = str(installations[0])
 
     shim_dir = target_dir / "_airun_bin"
     shim_dir.mkdir(parents=True, exist_ok=True)
@@ -2805,8 +2900,12 @@ def _run_hwp_pdf_converter_commands(
                 str(target_dir),
                 str(source_path),
             ]
-        before_mtime_ns = {
-            candidate: candidate.stat().st_mtime_ns
+        before_signature = {
+            candidate: (
+                candidate.stat().st_mtime_ns,
+                candidate.stat().st_size,
+                _file_sha1(candidate),
+            )
             for candidate in _hwp_pdf_candidates(target_dir, source_path)
             if candidate.exists()
         }
@@ -2828,8 +2927,13 @@ def _run_hwp_pdf_converter_commands(
         for pdf_path in _hwp_pdf_candidates(target_dir, source_path):
             if not pdf_path.exists():
                 continue
-            previous_mtime_ns = before_mtime_ns.get(pdf_path)
-            if previous_mtime_ns is None or pdf_path.stat().st_mtime_ns != previous_mtime_ns:
+            current_signature = (
+                pdf_path.stat().st_mtime_ns,
+                pdf_path.stat().st_size,
+                _file_sha1(pdf_path),
+            )
+            previous_signature = before_signature.get(pdf_path)
+            if previous_signature is None or current_signature != previous_signature:
                 return pdf_path, errors
         output = " ".join(
             part for part in [result.stdout.strip(), result.stderr.strip()] if part

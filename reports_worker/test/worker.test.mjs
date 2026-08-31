@@ -44,9 +44,9 @@ class FakeStatement {
   }
 
   async first() {
-    if (this.sql.includes("sqlite_master")) {
+    if (this.sql.includes("schema_ready")) {
       this.database.healthProbeCount += 1;
-      return this.database.healthTableName ? { name: this.database.healthTableName } : null;
+      return { schema_ready: this.database.healthSchemaReady ? 1 : 0 };
     }
     if (!this.sql.includes("WHERE payload_hash = ?")) {
       throw new Error(`unexpected first() query: ${this.sql}`);
@@ -64,10 +64,10 @@ class FakeStatement {
 
 
 class FakeD1 {
-  constructor({ healthTableName = "bug_reports" } = {}) {
+  constructor({ healthSchemaReady = true } = {}) {
     this.rows = [];
     this.healthProbeCount = 0;
-    this.healthTableName = healthTableName;
+    this.healthSchemaReady = healthSchemaReady;
   }
 
   prepare(sql) {
@@ -160,7 +160,7 @@ test("health endpoint fails readiness when a required binding is missing", async
 
 test("health endpoint fails closed for wrong D1 or throwing/malformed limiter bindings", async () => {
   const environments = [
-    readyEnvironment(new FakeD1({ healthTableName: "other_table" })),
+    readyEnvironment(new FakeD1({ healthSchemaReady: false })),
     {
       REPORTS_DB: new FakeD1(),
       REPORT_RATE_LIMITER: { async limit() { throw new Error("limiter unavailable"); } },

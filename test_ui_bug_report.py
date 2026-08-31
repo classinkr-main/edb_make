@@ -182,6 +182,7 @@ process.stdout.write(JSON.stringify({ active, dismissed, cleared, conflict, conf
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         payload = json.loads(result.stdout)
         self.assertEqual("recognition_failed", payload["active"]["recovery"]["error"]["code"])
@@ -221,6 +222,7 @@ process.stdout.write(JSON.stringify({
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         payload = json.loads(result.stdout)
         self.assertEqual("session_conflict", payload["code"])
@@ -267,6 +269,7 @@ process.stdout.write(JSON.stringify({ history, latest }));
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         payload = json.loads(result.stdout)
         self.assertEqual("서버 최신 이름", payload["history"][0]["session_name"])

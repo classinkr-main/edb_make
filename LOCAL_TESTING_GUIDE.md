@@ -140,10 +140,11 @@ python scripts/clean_local_artifacts.py --yes
 ```
 
 By default this removes root-level `dist*`, `build`, and `tmp_validation_*`
-artifacts, plus stale legacy UI bridge files such as
-`.app_runtime/generated_session.js`. It does not remove generated EDB exports
-or the local `.app_runtime` folder unless you explicitly pass
-`--include-edb-exports` or `--include-runtime`.
+artifacts, plus stale legacy UI bridge files under `ui_prototype`. The local
+`.app_runtime` folder and everything inside it are always protected; generated
+EDB exports require `--include-edb-exports`. The command is a dry run unless
+`--yes` is present, and it refuses targets outside the Git worktree root,
+Git-tracked content, or paths that are not ignored by Git.
 
 ## Structured JSON Only
 

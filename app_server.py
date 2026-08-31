@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -113,6 +114,27 @@ def _publish_failure_payload(
 
 def _publish_stage_failure_payload(stage: str, exc: BaseException) -> dict[str, Any]:
     text = str(exc).lower()
+    if stage == "prepare" and (
+        isinstance(exc, SessionWritePathTooLong)
+        or isinstance(exc, OSError) and exc.errno == errno.ENAMETOOLONG
+    ):
+        return _publish_failure_payload(
+            code="publish_path_too_long",
+            message="EDB 제작 경로가 너무 깁니다",
+            exc=exc,
+            retryable=False,
+            recovery_steps=[
+                "사용자 지정 출력 폴더라면 더 짧은 경로를 선택해 주세요.",
+                "관리 경로에서도 반복되면 EDB_APP_HOME을 더 짧은 폴더로 설정해 주세요.",
+            ],
+        )
+    if stage == "prepare" and isinstance(exc, FileNotFoundError):
+        return _publish_failure_payload(
+            code="publish_output_unavailable",
+            message="EDB 제작 파일을 저장할 폴더를 준비하지 못했습니다",
+            exc=exc,
+            retryable=True,
+        )
     if isinstance(exc, FileNotFoundError):
         return _publish_failure_payload(
             code="publish_asset_missing",
@@ -144,6 +166,48 @@ def _publish_stage_failure_payload(stage: str, exc: BaseException) -> dict[str, 
     }
     code, message = definitions.get(stage, ("publish_failed", "EDB 제작에 실패했습니다"))
     return _publish_failure_payload(code=code, message=message, exc=exc)
+
+
+def _recognition_retry_path_failure_payload(exc: SessionWritePathTooLong) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": f"AI 재인식 결과를 저장할 경로가 너무 깁니다: {exc.path}",
+        "code": "recognition_retry_path_too_long",
+        "operation": "session_retry_ai",
+        "retryable": False,
+        "recoverySteps": [
+            "사용자 지정 출력 폴더라면 더 짧은 경로를 선택해 주세요.",
+            "관리 경로에서도 반복되면 EDB_APP_HOME을 더 짧은 폴더로 설정해 주세요.",
+        ],
+    }
+
+
+def _session_mutation_path_failure_payload(exc: SessionWritePathTooLong) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": f"편집 결과를 저장할 경로가 너무 깁니다: {exc.path}",
+        "code": "session_mutation_path_too_long",
+        "operation": "session_mutate",
+        "retryable": False,
+        "recoverySteps": [
+            "사용자 지정 출력 폴더라면 더 짧은 경로를 선택해 주세요.",
+            "관리 경로에서도 반복되면 EDB_APP_HOME을 더 짧은 폴더로 설정해 주세요.",
+        ],
+    }
+
+
+def _image_enhancement_path_failure_payload(exc: SessionWritePathTooLong) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": f"고화질 이미지 결과를 저장할 경로가 너무 깁니다: {exc.path}",
+        "code": "image_enhancement_path_too_long",
+        "operation": "session_enhance_image",
+        "retryable": False,
+        "recoverySteps": [
+            "사용자 지정 출력 폴더라면 더 짧은 경로를 선택해 주세요.",
+            "관리 경로에서도 반복되면 EDB_APP_HOME을 더 짧은 폴더로 설정해 주세요.",
+        ],
+    }
 
 
 @lru_cache(maxsize=None)
@@ -380,11 +444,36 @@ def is_frozen_app() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _windows_documents_directory() -> Path | None:
+    """Return the redirected Windows Documents known folder when available."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+
+        # CSIDL_PERSONAL remains supported and, unlike ``Path.home() / Documents``,
+        # follows OneDrive and administrator-configured known-folder redirection.
+        buffer = ctypes.create_unicode_buffer(32_768)
+        result = ctypes.windll.shell32.SHGetFolderPathW(None, 0x0005, None, 0, buffer)
+        if result == 0 and buffer.value.strip():
+            return Path(buffer.value).resolve()
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    user_profile = os.environ.get("USERPROFILE", "").strip()
+    if user_profile:
+        return (Path(user_profile).expanduser() / "Documents").resolve()
+    return None
+
+
 def default_frozen_app_home() -> Path:
     configured = os.environ.get("EDB_APP_HOME", "").strip()
     if configured:
-        return Path(configured).expanduser().resolve()
-    return (Path.home() / "Documents" / "ClassInEDBMVP").resolve()
+        return Path(os.path.expandvars(configured)).expanduser().resolve()
+    documents_directory = _windows_documents_directory()
+    if documents_directory is None:
+        documents_directory = (Path.home() / "Documents").resolve()
+    return (documents_directory / "ClassInEDBMVP").resolve()
 
 
 def app_root() -> Path:
@@ -439,6 +528,19 @@ class ArtifactCleanupBusy(RuntimeError):
 
 class SessionRevisionConflict(RuntimeError):
     """Raised when a destructive request no longer targets the current session."""
+
+
+class SessionWritePathTooLong(OSError):
+    """Raised when a session's configured write root cannot safely be extended."""
+
+    def __init__(self, operation: str, path: str | Path) -> None:
+        self.operation = operation
+        self.path = Path(path)
+        super().__init__(
+            errno.ENAMETOOLONG,
+            f"{operation} output path is too long; choose a shorter output directory",
+            str(path),
+        )
 
 
 def default_output_root() -> Path:
@@ -1453,7 +1555,11 @@ def _local_server_is_healthy(host: str, port: int, *, timeout: float = 0.35) -> 
             payload = json.loads(response.read().decode("utf-8"))
     except Exception:
         return False
-    return bool(isinstance(payload, dict) and payload.get("ok"))
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("ok") is True
+        and payload.get("app") == APP_NAME
+    )
 
 
 def _coerce_bool(value: Any, *, default: bool = False) -> bool:
@@ -1702,6 +1808,18 @@ def _export_error_payload(exc: Exception) -> dict[str, Any]:
         "error": message,
         "errorKind": "export_failed",
     }
+    if isinstance(exc, FileNotFoundError) and (
+        "problem_crops" in message or "problem_cutouts" in message
+    ):
+        payload.update({
+            "code": "recognition_asset_missing",
+            "operation": "session_export",
+            "retryable": True,
+            "recoverySteps": [
+                "같은 원본 파일로 문제 인식을 다시 시도해 주세요.",
+                "계속 실패하면 페이지 PNG로 등록한 뒤 오류 정보를 복사해 신고해 주세요.",
+            ],
+        })
     if (
         "HWP/HWPX" in message
         or "valid HWP" in message
@@ -1780,7 +1898,88 @@ _WINDOWS_RESERVED_PATH_COMPONENTS = {
 }
 SAFE_PATH_COMPONENT_MAX_BYTES = 240
 EDB_FILE_STEM_MAX_BYTES = 220
-UPLOAD_FILE_NAME_MAX_BYTES = 180
+# Keep managed paths comfortably below the legacy Windows MAX_PATH boundary.
+# Windows counts UTF-16 code units for this limit; UTF-8 byte limits alone do
+# not account for a long user profile or a redirected OneDrive Documents path.
+WINDOWS_MANAGED_PATH_MAX_UNITS = 239
+UPLOAD_FILE_NAME_MAX_BYTES = 96
+MANAGED_OUTPUT_DIR_NAME_MAX_BYTES = 96
+MANAGED_GENERATION_DIR_NAME_MAX_BYTES = 32
+MANAGED_PATH_COMPONENT_MIN_BYTES = 12
+MANAGED_GENERATION_PLACEHOLDER = "g" * MANAGED_GENERATION_DIR_NAME_MAX_BYTES
+MANAGED_CROP_RELATIVE_PATH = Path("problem_crops") / "problem_999999_ffffffff.png"
+MANAGED_PREVIEW_RESERVED_DESCENDANTS = (
+    MANAGED_CROP_RELATIVE_PATH,
+    Path(".publish-staging") / MANAGED_GENERATION_PLACEHOLDER / "classin_handoff.json",
+)
+MANAGED_OUTPUT_RESERVED_DESCENDANTS = (
+    Path(".export-staging") / MANAGED_GENERATION_PLACEHOLDER / MANAGED_CROP_RELATIVE_PATH,
+    Path(".publish-staging") / MANAGED_GENERATION_PLACEHOLDER / "classin_handoff.json",
+)
+MANAGED_RETRY_RESERVED_DESCENDANTS = (
+    Path("ai_retries") / MANAGED_GENERATION_PLACEHOLDER / MANAGED_CROP_RELATIVE_PATH,
+)
+MANAGED_MUTATION_RESERVED_DESCENDANTS = (MANAGED_CROP_RELATIVE_PATH,)
+MANAGED_IMAGE_RECONSTRUCTION_FILE_MAX_BYTES = 100
+MANAGED_IMAGE_RECONSTRUCTION_PLACEHOLDER = "i" * MANAGED_IMAGE_RECONSTRUCTION_FILE_MAX_BYTES
+MANAGED_IMAGE_RECONSTRUCTION_RESERVED_DESCENDANTS = (
+    Path("ai_image_reconstructions") / MANAGED_IMAGE_RECONSTRUCTION_PLACEHOLDER,
+)
+MANAGED_PUBLISH_RESERVED_DESCENDANTS = (
+    Path("classin_handoff.json"),
+    Path("generated_session.js"),
+)
+# Keep ample headroom even if a future export policy allows far more parts
+# than today's ClassIn page limit.
+EDB_PART_SUFFIX_RESERVED_BYTES = len("_part999999999999.edb".encode("utf-8"))
+
+
+def _windows_path_units(value: str | Path) -> int:
+    """Return Windows path length in UTF-16 code units on every host OS."""
+    return len(str(value).encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _absolute_path_text_for_budget(value: str | Path) -> str:
+    raw = str(value)
+    if re.match(r"^[A-Za-z]:[\\/]", raw) or raw.startswith(("\\\\", "//")):
+        return raw.rstrip("\\/")
+    return str(Path(value).resolve()).rstrip("\\/")
+
+
+def _managed_path_component_max_bytes(
+    parent_dir: str | Path,
+    *,
+    reserved_descendants: tuple[str | Path, ...] = (),
+    max_bytes: int = SAFE_PATH_COMPONENT_MAX_BYTES,
+    minimum_bytes: int = MANAGED_PATH_COMPONENT_MIN_BYTES,
+) -> int:
+    """Budget one managed component against its complete future path.
+
+    A UTF-8 byte budget is deliberately capped by the available UTF-16 unit
+    budget. This is conservative for Hangul and emoji while being exact for
+    the ASCII characters that make up generated hashes and timestamps.
+    """
+    if not sys.platform.startswith("win"):
+        return int(max_bytes)
+
+    parent_text = _absolute_path_text_for_budget(parent_dir)
+    descendants = reserved_descendants or ("",)
+    available_units: list[int] = []
+    for descendant in descendants:
+        descendant_text = str(descendant).strip("\\/")
+        fixed_units = _windows_path_units(parent_text) + 1
+        if descendant_text:
+            fixed_units += 1 + _windows_path_units(descendant_text)
+        available_units.append(WINDOWS_MANAGED_PATH_MAX_UNITS - fixed_units)
+    budget = min(int(max_bytes), min(available_units))
+    if budget < int(minimum_bytes):
+        raise OSError(
+            errno.ENAMETOOLONG,
+            "managed runtime path is too long even after compact naming; "
+            "configure EDB_APP_HOME to a shorter directory",
+            parent_text,
+        )
+    return budget
 
 
 def _is_windows_reserved_path_component(value: str | None) -> bool:
@@ -1825,7 +2024,17 @@ def sanitize_output_dir_name(
     safe = _sanitize_path_component_token(raw)
     suffix_token = _sanitize_path_component_token(suffix)
     if suffix_token:
-        suffix_tail = _truncate_utf8_bytes(f"_{suffix_token}", max_bytes)
+        suffix_tail = f"_{suffix_token}"
+        if len(suffix_tail.encode("utf-8")) > max_bytes:
+            # Preserve collision resistance when a long runtime root leaves no
+            # room for the readable timestamp/UUID suffix itself.
+            compact_digest = hashlib.sha256(
+                suffix_token.encode("utf-8", errors="surrogatepass")
+            ).hexdigest()
+            suffix_tail = _truncate_utf8_bytes(
+                f"_{compact_digest}",
+                max_bytes,
+            )
         available_bytes = max(0, max_bytes - len(suffix_tail.encode("utf-8")))
         safe = f"{_truncate_utf8_bytes(safe, available_bytes).rstrip(' ._')}{suffix_tail}"
     safe = _finalize_safe_path_component(safe, max_bytes=max_bytes)
@@ -1839,7 +2048,11 @@ def _unique_artifact_stamp() -> str:
     return f"{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns()}_{uuid.uuid4().hex[:12]}"
 
 
-def sanitize_upload_file_name(value: str | None) -> str:
+def sanitize_upload_file_name(
+    value: str | None,
+    *,
+    max_bytes: int = UPLOAD_FILE_NAME_MAX_BYTES,
+) -> str:
     raw = Path(value or "upload.bin").name
     invalid = '<>:"/\\|?*'
     safe = "".join(ch if ch not in invalid and ord(ch) >= 32 else "_" for ch in raw).strip(" .")
@@ -1851,17 +2064,27 @@ def sanitize_upload_file_name(value: str | None) -> str:
     stem = path.stem or "upload"
     digest = hashlib.sha1(safe.encode("utf-8", errors="ignore")).hexdigest()[:10]
     suffix_tail = f"_{digest}{extension}"
-    available_bytes = max(1, UPLOAD_FILE_NAME_MAX_BYTES - len(suffix_tail.encode("utf-8")))
+    available_bytes = max(1, max_bytes - len(suffix_tail.encode("utf-8")))
     trimmed_stem = _truncate_utf8_bytes(stem, available_bytes).rstrip(" ._") or "upload"
     if _is_windows_reserved_path_component(trimmed_stem):
         trimmed_stem = f"_{_truncate_utf8_bytes(trimmed_stem, max(1, available_bytes - 1))}"
     return _truncate_utf8_bytes(
         f"{trimmed_stem}{suffix_tail}",
-        UPLOAD_FILE_NAME_MAX_BYTES,
+        max_bytes,
     ).rstrip(" .")
 
 
-def sanitize_edb_file_name(value: str | None, *, fallback_stem: str = "classin") -> str:
+def sanitize_edb_file_name(
+    value: str | None,
+    *,
+    fallback_stem: str = "classin",
+    max_bytes: int = SAFE_PATH_COMPONENT_MAX_BYTES,
+) -> str:
+    stem_max_bytes = min(
+        EDB_FILE_STEM_MAX_BYTES,
+        max(1, int(max_bytes) - EDB_PART_SUFFIX_RESERVED_BYTES),
+    )
+
     def _clean_stem(raw: str | None, fallback: str) -> str:
         candidate = Path(str(raw or "")).name.strip()
         if candidate.lower().endswith(".edb"):
@@ -1871,16 +2094,238 @@ def sanitize_edb_file_name(value: str | None, *, fallback_stem: str = "classin")
             return fallback
         safe = sanitize_output_dir_name(
             candidate,
-            max_bytes=EDB_FILE_STEM_MAX_BYTES,
+            max_bytes=stem_max_bytes,
         ).strip(" ._")
-        safe = _truncate_utf8_bytes(safe, EDB_FILE_STEM_MAX_BYTES).rstrip(" ._") or fallback
+        safe = _truncate_utf8_bytes(safe, stem_max_bytes).rstrip(" ._") or fallback
         if _is_windows_reserved_path_component(safe):
-            safe = f"_{_truncate_utf8_bytes(safe, EDB_FILE_STEM_MAX_BYTES - 1)}"
-        return _finalize_safe_path_component(safe, max_bytes=EDB_FILE_STEM_MAX_BYTES)
+            safe = f"_{_truncate_utf8_bytes(safe, max(1, stem_max_bytes - 1))}"
+        return _finalize_safe_path_component(safe, max_bytes=stem_max_bytes)
 
     fallback = _clean_stem(fallback_stem, "classin")
     stem = _clean_stem(value, fallback) if value is not None else fallback
     return f"{stem}.edb"
+
+
+def _managed_upload_target_name(
+    value: str | None,
+    content_digest: str,
+    *,
+    upload_dir: str | Path,
+) -> str:
+    digest_prefix = f"{content_digest}_"
+    component_budget = _managed_path_component_max_bytes(
+        upload_dir,
+        max_bytes=255,
+        minimum_bytes=len(digest_prefix.encode("utf-8")) + 20,
+    )
+    safe_name = sanitize_upload_file_name(
+        value,
+        max_bytes=min(
+            UPLOAD_FILE_NAME_MAX_BYTES,
+            component_budget - len(digest_prefix.encode("utf-8")),
+        ),
+    )
+    return f"{digest_prefix}{safe_name}"
+
+
+def _managed_output_dir_name(
+    value: str | None,
+    *,
+    parent_dir: str | Path,
+    suffix: str | None = None,
+    reserved_descendants: tuple[str | Path, ...] = MANAGED_OUTPUT_RESERVED_DESCENDANTS,
+) -> str:
+    budget = _managed_path_component_max_bytes(
+        parent_dir,
+        reserved_descendants=reserved_descendants,
+        max_bytes=MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
+    )
+    return sanitize_output_dir_name(value, suffix=suffix, max_bytes=budget)
+
+
+def _managed_generation_dir_name(
+    value: str | None,
+    *,
+    parent_dir: str | Path,
+    reserved_descendants: tuple[str | Path, ...],
+) -> str:
+    unique_digest = hashlib.sha256(
+        _unique_artifact_stamp().encode("utf-8", errors="surrogatepass")
+    ).hexdigest()[:16]
+    budget = _managed_path_component_max_bytes(
+        parent_dir,
+        reserved_descendants=reserved_descendants,
+        max_bytes=MANAGED_GENERATION_DIR_NAME_MAX_BYTES,
+    )
+    return sanitize_output_dir_name(value, suffix=unique_digest, max_bytes=budget)
+
+
+def _managed_export_generation_paths(output_dir: str | Path) -> tuple[Path, Path]:
+    output_path = Path(output_dir).resolve()
+    staging_parent = output_path / ".export-staging"
+    generation_name = _managed_generation_dir_name(
+        "export",
+        parent_dir=staging_parent,
+        reserved_descendants=(MANAGED_CROP_RELATIVE_PATH,),
+    )
+    return (
+        staging_parent / generation_name,
+        output_path / "exports" / generation_name,
+    )
+
+
+def _managed_publish_artifact_paths(
+    output_dir: str | Path,
+    requested_edb_name: str | None,
+    *,
+    fallback_stem: str,
+) -> tuple[str, Path, Path]:
+    output_path = Path(output_dir).resolve()
+    raw_name = requested_edb_name or fallback_stem
+    generation_name = _managed_generation_dir_name(
+        Path(raw_name).stem,
+        parent_dir=output_path / ".publish-staging",
+        reserved_descendants=MANAGED_PUBLISH_RESERVED_DESCENDANTS,
+    )
+    staging_dir = output_path / ".publish-staging" / generation_name
+    final_dir = output_path / "published" / generation_name
+    edb_name_budget = _managed_path_component_max_bytes(
+        staging_dir,
+        max_bytes=SAFE_PATH_COMPONENT_MAX_BYTES,
+        minimum_bytes=EDB_PART_SUFFIX_RESERVED_BYTES + 1,
+    )
+    edb_name = sanitize_edb_file_name(
+        requested_edb_name,
+        fallback_stem=fallback_stem,
+        max_bytes=edb_name_budget,
+    )
+    return edb_name, staging_dir, final_dir
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    """Return whether path is inside root, including Windows case folding."""
+    try:
+        path_text = os.path.normcase(str(path.resolve()))
+        root_text = os.path.normcase(str(root.resolve()))
+        return os.path.commonpath((path_text, root_text)) == root_text
+    except (OSError, ValueError):
+        return False
+
+
+def _session_configured_output_dir(session: dict[str, Any]) -> Path | None:
+    raw_value = session.get("output_dir") or session.get("outputDir")
+    return decode_file_reference(str(raw_value)) if raw_value else None
+
+
+def _session_recovery_output_dir(
+    session: dict[str, Any],
+    *,
+    operation: str,
+    reserved_descendants: tuple[str | Path, ...],
+) -> Path:
+    recovery_parent = default_output_root() / "recovered"
+    identity = "|".join(
+        (
+            str(session.get("output_dir") or session.get("outputDir") or ""),
+            str(session.get("generated_at") or session.get("generatedAt") or ""),
+            str(session.get("session_name") or session.get("sessionName") or ""),
+            "|".join(str(value) for value in (session.get("input_files") or session.get("inputFiles") or [])),
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
+    try:
+        component = _managed_output_dir_name(
+            f"session_{digest}",
+            parent_dir=recovery_parent,
+            reserved_descendants=reserved_descendants,
+        )
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise SessionWritePathTooLong(operation, recovery_parent) from exc
+        raise
+    return (recovery_parent / component).resolve()
+
+
+def _session_write_paths_fit(
+    output_dir: Path,
+    reserved_descendants: tuple[str | Path, ...],
+) -> bool:
+    if not sys.platform.startswith("win"):
+        return True
+    base_text = _absolute_path_text_for_budget(output_dir)
+    for descendant in reserved_descendants:
+        descendant_text = str(descendant).strip("\\/")
+        candidate = f"{base_text}{os.sep}{descendant_text}" if descendant_text else base_text
+        if _windows_path_units(candidate) > WINDOWS_MANAGED_PATH_MAX_UNITS:
+            return False
+    return True
+
+
+def _select_session_write_root(
+    session: dict[str, Any],
+    *,
+    operation: str,
+    reserved_descendants: tuple[str | Path, ...],
+) -> tuple[Path, bool]:
+    """Choose a write root without moving any legacy session artifacts.
+
+    Only paths already below the app-managed output root may be redirected.
+    Paths outside that root are treated as deliberate user choices.
+    """
+    configured = _session_configured_output_dir(session)
+    managed_root = default_output_root().resolve()
+    if configured is None:
+        return (
+            _session_recovery_output_dir(
+                session,
+                operation=operation,
+                reserved_descendants=reserved_descendants,
+            ),
+            True,
+        )
+
+    configured = configured.resolve()
+    if _session_write_paths_fit(configured, reserved_descendants):
+        return configured, False
+    if not _path_is_within(configured, managed_root):
+        raise SessionWritePathTooLong(operation, configured)
+
+    recovered = _session_recovery_output_dir(
+        session,
+        operation=operation,
+        reserved_descendants=reserved_descendants,
+    )
+    if not _session_write_paths_fit(recovered, reserved_descendants):
+        raise SessionWritePathTooLong(operation, recovered)
+    return recovered, True
+
+
+def _managed_retry_dir(output_dir: Path, target_id: str, stamp: str) -> Path:
+    retry_parent = output_dir / "ai_retries"
+    suffix = hashlib.sha256(
+        f"{stamp}|{target_id}".encode("utf-8", errors="surrogatepass")
+    ).hexdigest()[:16]
+    budget = _managed_path_component_max_bytes(
+        retry_parent,
+        reserved_descendants=(MANAGED_CROP_RELATIVE_PATH,),
+        max_bytes=MANAGED_GENERATION_DIR_NAME_MAX_BYTES,
+    )
+    component = sanitize_output_dir_name(target_id, suffix=suffix, max_bytes=budget)
+    return retry_parent / component
+
+
+def _adopt_recovered_output_dir_after_success(
+    session: dict[str, Any],
+    output_dir: Path,
+    *,
+    recovered: bool,
+    summaries: list[dict[str, Any]],
+) -> bool:
+    if not recovered or not any(summary.get("status") == "applied" for summary in summaries):
+        return False
+    session["output_dir"] = str(output_dir)
+    session["outputDir"] = str(output_dir)
+    return True
 
 
 def validate_edb_file(path: str | Path, *, expected_min_records: int = 1) -> dict[str, Any]:
@@ -4222,12 +4667,18 @@ def _next_problem_id(session: dict[str, Any], base: str, suffix: str) -> str:
 
 
 def _crop_dir_for_session(session: dict[str, Any]) -> Path:
-    out = session.get("output_dir")
-    if out:
-        target = Path(str(out)) / "problem_crops"
-    else:
-        target = RUNTIME_DIR / "mutated_crops"
+    selected_output_dir, recovered_output = _select_session_write_root(
+        session,
+        operation="session_mutate",
+        reserved_descendants=MANAGED_MUTATION_RESERVED_DESCENDANTS,
+    )
+    target = selected_output_dir / "problem_crops"
     target.mkdir(parents=True, exist_ok=True)
+    if recovered_output:
+        # Request handlers persist their cloned session only after the mutation
+        # completes and wins the session CAS, so failed edits never adopt this.
+        session["output_dir"] = str(selected_output_dir)
+        session["outputDir"] = str(selected_output_dir)
     return target
 
 
@@ -6519,13 +6970,15 @@ def _replace_single_problem(session: dict[str, Any], old_problem_id: str, replac
     _refresh_session_problem_counts(session)
 
 
-def _image_reconstruction_dir(session: dict[str, Any]) -> Path:
-    if session.get("output_dir"):
-        target = Path(str(session["output_dir"])).resolve() / "ai_image_reconstructions"
-    else:
-        target = RUNTIME_DIR / "ai_image_reconstructions"
+def _image_reconstruction_dir(session: dict[str, Any]) -> tuple[Path, Path, bool]:
+    selected_output_dir, recovered_output = _select_session_write_root(
+        session,
+        operation="session_enhance_image",
+        reserved_descendants=MANAGED_IMAGE_RECONSTRUCTION_RESERVED_DESCENDANTS,
+    )
+    target = selected_output_dir / "ai_image_reconstructions"
     target.mkdir(parents=True, exist_ok=True)
-    return target
+    return target, selected_output_dir, recovered_output
 
 
 def _payload_bool(payload: dict[str, Any], camel_key: str, snake_key: str, default: bool) -> bool:
@@ -6732,9 +7185,16 @@ def _image_attempt_summary(result: Any, *, attempt: int, mode: str) -> dict[str,
 def _image_generation_output_path(output_dir: Path, problem_id: str, suffix: str) -> Path:
     problem_token = problem_id or "problem"
     problem_digest = hashlib.sha1(problem_token.encode("utf-8", errors="surrogatepass")).hexdigest()[:10]
+    component_budget = _managed_path_component_max_bytes(
+        output_dir,
+        max_bytes=MANAGED_IMAGE_RECONSTRUCTION_FILE_MAX_BYTES,
+        minimum_bytes=24,
+    )
+    stem_budget = max(20, component_budget - len(".png".encode("utf-8")))
     stem = sanitize_output_dir_name(
         problem_token,
         suffix=f"{problem_digest}_{suffix}",
+        max_bytes=stem_budget,
     )
     return output_dir / f"{stem}.png"
 
@@ -6861,7 +7321,7 @@ def _mutate_enhance_image(session: dict[str, Any], payload: dict[str, Any]) -> d
     timeout_ms = int(payload.get("timeoutMs") or payload.get("timeout_ms") or 120000)
     transparent_background = _payload_bool(payload, "transparentBackground", "transparent_background", True)
     sharpen = _payload_bool(payload, "sharpen", "sharpen", True)
-    output_dir = _image_reconstruction_dir(session)
+    output_dir, selected_output_dir, recovered_output = _image_reconstruction_dir(session)
     stamp = _unique_artifact_stamp()
     summaries: list[dict[str, Any]] = []
     preserve_results = _content_safe_primary_batch(
@@ -7143,6 +7603,12 @@ def _mutate_enhance_image(session: dict[str, Any], payload: dict[str, Any]) -> d
         })
 
     session["ai_image_reconstruction_summary"] = summaries
+    _adopt_recovered_output_dir_after_success(
+        session,
+        selected_output_dir,
+        recovered=recovered_output,
+        summaries=summaries,
+    )
     return session
 
 
@@ -7316,11 +7782,11 @@ def _payload_crop_box_for_problem(payload: dict[str, Any], problem_id: str) -> A
 
 def _mutate_retry_ai_partial(session: dict[str, Any], payload: dict[str, Any], problem_ids: list[str]) -> dict[str, Any]:
     stamp = _unique_artifact_stamp()
-    session_output_dir = session.get("output_dir")
-    if session_output_dir:
-        output_root = Path(session_output_dir).resolve() / "ai_retries"
-    else:
-        output_root = (RUNTIME_DIR / "ai_retries").resolve()
+    selected_output_dir, recovered_output = _select_session_write_root(
+        session,
+        operation="session_retry_ai",
+        reserved_descendants=MANAGED_RETRY_RESERVED_DESCENDANTS,
+    )
     ai_config = session.get("ai_fallback") if isinstance(session.get("ai_fallback"), dict) else {}
     summaries: list[dict[str, Any]] = []
 
@@ -7343,7 +7809,7 @@ def _mutate_retry_ai_partial(session: dict[str, Any], payload: dict[str, Any], p
                     image_width=source_image.width,
                     image_height=source_image.height,
                 )
-            retry_dir = output_root / sanitize_output_dir_name(problem_id, suffix=stamp)
+            retry_dir = _managed_retry_dir(selected_output_dir, problem_id, stamp)
             partial_source_path = retry_dir / "partial_source.png"
             _crop_image_by_bbox(source_path, crop_box, partial_source_path)
             result = run_problem_export(
@@ -7432,6 +7898,12 @@ def _mutate_retry_ai_partial(session: dict[str, Any], payload: dict[str, Any], p
             })
 
     session["ai_retry_summary"] = summaries
+    _adopt_recovered_output_dir_after_success(
+        session,
+        selected_output_dir,
+        recovered=recovered_output,
+        summaries=summaries,
+    )
     _refresh_session_problem_counts(session)
     return session
 
@@ -7526,11 +7998,11 @@ def _mutate_retry_ai(session: dict[str, Any], payload: dict[str, Any]) -> dict[s
         raise ValueError("AI 재인식할 페이지가 없습니다")
 
     stamp = _unique_artifact_stamp()
-    session_output_dir = session.get("output_dir")
-    if session_output_dir:
-        output_root = Path(session_output_dir).resolve() / "ai_retries"
-    else:
-        output_root = (RUNTIME_DIR / "ai_retries").resolve()
+    selected_output_dir, recovered_output = _select_session_write_root(
+        session,
+        operation="session_retry_ai",
+        reserved_descendants=MANAGED_RETRY_RESERVED_DESCENDANTS,
+    )
     ai_config = session.get("ai_fallback") if isinstance(session.get("ai_fallback"), dict) else {}
     summaries: list[dict[str, Any]] = []
     retry_jobs: list[dict[str, Any]] = []
@@ -7549,7 +8021,7 @@ def _mutate_retry_ai(session: dict[str, Any], payload: dict[str, Any]) -> dict[s
             retry_jobs.append({
                 "pageId": page_id,
                 "sourcePath": source_path,
-                "retryDir": output_root / sanitize_output_dir_name(page_id, suffix=stamp),
+                "retryDir": _managed_retry_dir(selected_output_dir, page_id, stamp),
             })
 
     def _run_retry_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -7710,6 +8182,12 @@ def _mutate_retry_ai(session: dict[str, Any], payload: dict[str, Any]) -> dict[s
         })
 
     session["ai_retry_summary"] = summaries
+    _adopt_recovered_output_dir_after_success(
+        session,
+        selected_output_dir,
+        recovered=recovered_output,
+        summaries=summaries,
+    )
     _refresh_session_problem_counts(session)
     return session
 
@@ -7745,8 +8223,18 @@ def _denormalize_session_paths(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 class AppHTTPServer(ThreadingHTTPServer):
-    allow_reuse_address = True
+    # Windows SO_REUSEADDR permits unrelated processes to bind the same port,
+    # which can split requests between two local services. Keep quick restart
+    # behavior on POSIX, but require exclusive ownership on Windows.
+    allow_reuse_address = not sys.platform.startswith("win")
     daemon_threads = True
+
+    def server_bind(self) -> None:
+        if sys.platform.startswith("win"):
+            exclusive_address_use = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+            if exclusive_address_use is not None:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive_address_use, 1)
+        super().server_bind()
 
     def __init__(self, server_address, RequestHandlerClass):
         super().__init__(server_address, RequestHandlerClass)
@@ -8506,26 +8994,30 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         # user may have excluded items in the review UI. Mirrors the formula in
         # run_problem_export so mvp_board.edb and the published EDB agree.
         template.board_page_count = max(50, len(entries) * 2)
-        output_dir = Path(session.get("output_dir") or RUNTIME_DIR / "publish_output").resolve()
         stamp = time.strftime("%Y%m%d-%H%M%S")
         requested_edb_name = payload.get("edbName") if "edbName" in payload else payload.get("edb_name")
-        edb_name = sanitize_edb_file_name(
-            str(requested_edb_name) if requested_edb_name is not None else None,
-            fallback_stem=f"{session.get('session_name') or 'classin'}-published-{stamp}",
-        )
-        generation_name = sanitize_output_dir_name(
-            Path(edb_name).stem,
-            suffix=_unique_artifact_stamp(),
-        )
-        staging_dir = output_dir / ".publish-staging" / generation_name
-        final_dir = output_dir / "published" / generation_name
         try:
+            output_dir, _recovered_output = _select_session_write_root(
+                session,
+                operation="session_publish",
+                reserved_descendants=MANAGED_OUTPUT_RESERVED_DESCENDANTS,
+            )
+            edb_name, staging_dir, final_dir = _managed_publish_artifact_paths(
+                output_dir,
+                str(requested_edb_name) if requested_edb_name is not None else None,
+                fallback_stem=f"{session.get('session_name') or 'classin'}-published-{stamp}",
+            )
             staging_dir.mkdir(parents=True, exist_ok=False)
         except OSError as exc:
             _log_operation_exception("session_publish.prepare_output", exc)
+            failure = _publish_stage_failure_payload("prepare", exc)
             self._send_json(
-                _publish_stage_failure_payload("prepare", exc),
-                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                failure,
+                status=(
+                    HTTPStatus.CONFLICT
+                    if failure.get("code") == "publish_path_too_long"
+                    else HTTPStatus.INTERNAL_SERVER_ERROR
+                ),
             )
             return
 
@@ -9039,6 +9531,18 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.BAD_REQUEST,
                 )
                 return
+        except SessionWritePathTooLong as exc:
+            if action in {"retry-ai", "retry_ai"}:
+                failure = _recognition_retry_path_failure_payload(exc)
+            elif action in {"enhance-image", "enhance_image"}:
+                failure = _image_enhancement_path_failure_payload(exc)
+            else:
+                failure = _session_mutation_path_failure_payload(exc)
+            self._send_json(
+                failure,
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -9269,6 +9773,12 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         except json.JSONDecodeError as exc:
             self._send_json({"ok": False, "error": f"invalid JSON: {exc}"}, status=HTTPStatus.BAD_REQUEST)
             return
+        except SessionWritePathTooLong as exc:
+            self._send_json(
+                _recognition_retry_path_failure_payload(exc),
+                status=HTTPStatus.CONFLICT,
+            )
+            return
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             return
@@ -9346,6 +9856,12 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             new_session = _mutate_enhance_image(session, payload)
         except json.JSONDecodeError as exc:
             self._send_json({"ok": False, "error": f"invalid JSON: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except SessionWritePathTooLong as exc:
+            self._send_json(
+                _image_enhancement_path_failure_payload(exc),
+                status=HTTPStatus.CONFLICT,
+            )
             return
         except ValueError as exc:
             self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
@@ -9916,21 +10432,25 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         file_data_base64 = payload.get("fileDataBase64")
         if not file_data_base64:
             raise ValueError("fileDataBase64 is required when sourcePath is not provided")
-        safe_name = sanitize_upload_file_name(file_name)
         try:
             file_bytes = base64.b64decode(file_data_base64, validate=True)
         except (binascii.Error, ValueError) as exc:
             raise ValueError("fileDataBase64 is not valid base64") from exc
         content_digest = hashlib.sha256(file_bytes).hexdigest()
+        target_name = _managed_upload_target_name(
+            file_name,
+            content_digest,
+            upload_dir=UPLOAD_DIR,
+        )
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        suffix = Path(safe_name).suffix
+        suffix = Path(target_name).suffix
         for candidate in sorted(UPLOAD_DIR.glob(f"{content_digest}_*{suffix}")):
             if _file_matches_digest(candidate, content_digest, len(file_bytes)):
                 return candidate
         # Older sessions may still reference SHA-1-prefixed cache files. Keep
         # those files in place, but every new upload is materialized under a
         # SHA-256 identity so a chosen-prefix SHA-1 collision cannot alias it.
-        target_path = UPLOAD_DIR / f"{content_digest}_{safe_name}"
+        target_path = UPLOAD_DIR / target_name
         _atomic_write_bytes(target_path, file_bytes)
         return target_path
 
@@ -9995,19 +10515,37 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         if requested:
             target = Path(str(requested))
             if not target.is_absolute():
-                target = output_root / sanitize_output_dir_name(str(requested))
+                target = output_root / _managed_output_dir_name(
+                    str(requested),
+                    parent_dir=output_root,
+                )
             return target.resolve()
         if not source_paths:
-            return (output_root / sanitize_output_dir_name(None)).resolve()
+            return (
+                output_root
+                / _managed_output_dir_name(
+                    None,
+                    parent_dir=output_root,
+                )
+            ).resolve()
         identity_suffix = _source_identity_suffix(source_paths)
         if len(source_paths) == 1:
             return (
                 output_root
-                / sanitize_output_dir_name(source_paths[0].stem, suffix=identity_suffix)
+                / _managed_output_dir_name(
+                    source_paths[0].stem,
+                    parent_dir=output_root,
+                    suffix=identity_suffix,
+                )
             ).resolve()
         batch_name = f"{source_paths[0].stem}_{len(source_paths)}files"
         return (
-            output_root / sanitize_output_dir_name(batch_name, suffix=identity_suffix)
+            output_root
+            / _managed_output_dir_name(
+                batch_name,
+                parent_dir=output_root,
+                suffix=identity_suffix,
+            )
         ).resolve()
 
     def _resolve_preview_output_dir(self, payload: dict[str, Any], source_paths: list[Path]) -> Path:
@@ -10027,8 +10565,14 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             name_hint = f"{source_paths[0].stem}_{len(source_paths)}files"
         else:
             name_hint = "preview"
-        run_name = sanitize_output_dir_name(name_hint, suffix=_unique_artifact_stamp())
-        return (default_output_root() / "previews" / run_name).resolve()
+        preview_root = default_output_root() / "previews"
+        run_name = _managed_output_dir_name(
+            name_hint,
+            parent_dir=preview_root,
+            suffix=_unique_artifact_stamp(),
+            reserved_descendants=MANAGED_PREVIEW_RESERVED_DESCENDANTS,
+        )
+        return (preview_root / run_name).resolve()
 
     def _handle_export(self) -> None:
         base_session, current_revision = self._current_session_state()
@@ -10063,14 +10607,16 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
                 output_dir = self._resolve_preview_output_dir(payload, source_paths)
             else:
                 export_working_dir = self._resolve_output_dir(payload, source_paths)
-                generation_name = sanitize_output_dir_name(
-                    "export",
-                    suffix=_unique_artifact_stamp(),
+                export_staging_dir, export_final_dir = _managed_export_generation_paths(
+                    export_working_dir,
                 )
-                export_staging_dir = export_working_dir / ".export-staging" / generation_name
-                export_final_dir = export_working_dir / "exports" / generation_name
                 export_staging_dir.mkdir(parents=True, exist_ok=False)
                 output_dir = export_staging_dir
+            export_edb_name_budget = _managed_path_component_max_bytes(
+                output_dir,
+                max_bytes=SAFE_PATH_COMPONENT_MAX_BYTES,
+                minimum_bytes=EDB_PART_SUFFIX_RESERVED_BYTES + 1,
+            )
             export_mode = str(payload.get("exportMode") or payload.get("export_mode") or payload.get("layoutMode") or "question").lower()
             input_intent = _extract_input_intent(payload)
             content_target = _extract_content_target(payload)
@@ -10111,6 +10657,7 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
                     if (payload.get("edbName") or payload.get("edb_name")) is not None
                     else None,
                     fallback_stem="mvp_board",
+                    max_bytes=export_edb_name_budget,
                 ),
                 "sync_ui": False,
             }

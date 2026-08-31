@@ -1170,7 +1170,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
     def test_windows_installer_removes_stale_setup_before_compiling(self) -> None:
         source = (PROJECT_ROOT / "package_windows_installer.ps1").read_text(encoding="utf-8")
         self.assertIn('$InstallerPath = Join-Path $ResolvedOutputDir "$AppName-Setup.exe"', source)
-        remove_index = source.index("Remove-Item -Force $InstallerPath")
+        remove_index = source.index("Remove-Item -Force -LiteralPath $InstallerPath")
         self.assertLess(remove_index, source.index("$Iscc = Find-InnoSetupCompiler"))
         self.assertLess(remove_index, source.index("& $Iscc @IsccArgs $InstallerScript"))
 

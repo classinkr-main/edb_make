@@ -8,7 +8,9 @@ remote report collector.
 """
 from __future__ import annotations
 
+import codecs
 import json
+import locale
 import os
 import platform
 import re
@@ -290,7 +292,9 @@ def redact_sensitive_text(value: Any) -> str:
     text = _EMAIL_PATTERN.sub("[redacted-email]", text)
     home = str(Path.home())
     if home:
-        text = text.replace(home, "[home]")
+        home_variants = {home, home.replace("\\", "/"), home.replace("/", "\\")}
+        for variant in sorted(home_variants, key=len, reverse=True):
+            text = re.sub(re.escape(variant), "[home]", text, flags=re.IGNORECASE)
     return text
 
 
@@ -389,15 +393,36 @@ def _safe_context(value: Any) -> dict[str, Any]:
     return safe
 
 
+def _decode_log_bytes(raw: bytes, *, file_prefix: bytes = b"") -> str:
+    """Decode UTF-8 and common Windows log encodings without losing Hangul."""
+
+    marker = file_prefix[:4]
+    if marker.startswith(codecs.BOM_UTF8) or raw.startswith(codecs.BOM_UTF8):
+        return raw.decode("utf-8-sig", errors="replace")
+    if marker.startswith(codecs.BOM_UTF16_LE):
+        return raw.decode("utf-16-le", errors="replace").lstrip("\ufeff")
+    if marker.startswith(codecs.BOM_UTF16_BE):
+        return raw.decode("utf-16-be", errors="replace").lstrip("\ufeff")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        preferred = locale.getpreferredencoding(False) or "utf-8"
+        try:
+            return raw.decode(preferred)
+        except (LookupError, UnicodeDecodeError):
+            return raw.decode("utf-8", errors="replace")
+
+
 def _read_log_tail(log_file: Path | None) -> str:
     if log_file is None or not log_file.is_file():
         return ""
     try:
         with log_file.open("rb") as stream:
+            file_prefix = stream.read(4)
             stream.seek(0, os.SEEK_END)
             size = stream.tell()
             stream.seek(max(0, size - (MAX_LOG_CHARS * 4)), os.SEEK_SET)
-            tail = stream.read().decode("utf-8", errors="replace")
+            tail = _decode_log_bytes(stream.read(), file_prefix=file_prefix)
     except OSError:
         return ""
     return redact_sensitive_text(tail)[-MAX_LOG_CHARS:]

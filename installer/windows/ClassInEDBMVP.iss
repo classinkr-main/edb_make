@@ -50,6 +50,11 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
+; PyInstaller's _internal directory is an immutable application payload. Remove
+; it after Restart Manager closes the running app so deleted/renamed DLL and PYD
+; files from an older version cannot survive an in-place upgrade. User state is
+; stored under the Windows Documents known folder, outside {app}.
+Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\.app_runtime"
 Type: filesandordirs; Name: "{app}\uploads"
 Type: filesandordirs; Name: "{app}\outputs"

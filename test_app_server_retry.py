@@ -51,6 +51,90 @@ class TestStaticAssetCaching(unittest.TestCase):
             "placementScaleRatio": 2.4,
             "inputIntent": "page-as-is",
         }))
+    def test_frozen_app_home_uses_redirected_windows_documents_directory(self):
+        redirected_documents = Path("C:/Users/test/OneDrive/문서")
+        with (
+            patch.object(app_server.sys, "platform", "win32"),
+            patch.object(
+                app_server,
+                "_windows_documents_directory",
+                return_value=redirected_documents,
+            ),
+            patch.dict(os.environ, {"EDB_APP_HOME": ""}),
+        ):
+            app_home = app_server.default_frozen_app_home()
+
+        self.assertEqual(
+            (redirected_documents / "ClassInEDBMVP").resolve(),
+            app_home,
+        )
+
+    def test_frozen_app_home_expands_environment_override(self):
+        with TemporaryDirectory() as raw_tmp:
+            configured_root = Path(raw_tmp) / "사용자 지정"
+            with patch.dict(
+                os.environ,
+                {
+                    "EDB_APP_HOME": "$EDB_TEST_APP_HOME/runtime",
+                    "EDB_TEST_APP_HOME": str(configured_root),
+                },
+            ):
+                app_home = app_server.default_frozen_app_home()
+
+        self.assertEqual((configured_root / "runtime").resolve(), app_home)
+
+    def test_local_health_check_rejects_another_service(self):
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return b'{"ok": true, "app": "another-service"}'
+
+        with patch.object(app_server, "urlopen", return_value=FakeResponse()):
+            self.assertFalse(app_server._local_server_is_healthy("127.0.0.1", 8765))
+
+        FakeResponse.read = staticmethod(
+            lambda: json.dumps({"ok": True, "app": app_server.APP_NAME}).encode("utf-8")
+        )
+        with patch.object(app_server, "urlopen", return_value=FakeResponse()):
+            self.assertTrue(app_server._local_server_is_healthy("127.0.0.1", 8765))
+
+    @unittest.skipUnless(os.name == "nt", "exclusive bind semantics are Windows-specific")
+    def test_windows_app_server_rejects_shared_port_binding(self):
+        foreign_server = app_server.ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            app_server.SimpleHTTPRequestHandler,
+        )
+        foreign_address = foreign_server.server_address
+        try:
+            with self.assertRaises(OSError):
+                app_server.AppHTTPServer(
+                    foreign_address,
+                    app_server.AppRequestHandler,
+                )
+        finally:
+            foreign_server.server_close()
+
+        app_http_server = app_server.AppHTTPServer(
+            ("127.0.0.1", 0),
+            app_server.AppRequestHandler,
+        )
+        app_address = app_http_server.server_address
+        try:
+            with self.assertRaises(OSError):
+                app_server.ThreadingHTTPServer(
+                    app_address,
+                    app_server.SimpleHTTPRequestHandler,
+                )
+        finally:
+            app_http_server.server_close()
 
     def test_update_config_normalizes_local_snake_case_overrides(self):
         with TemporaryDirectory() as raw_tmp:
@@ -144,8 +228,8 @@ class TestStaticAssetCaching(unittest.TestCase):
         self.assertTrue(app_server.sanitize_upload_file_name("NUL.pdf").startswith("_NUL_"))
         self.assertEqual("_LPT1", app_server.sanitize_output_dir_name("LPT1"))
         self.assertEqual(
-            "//fileserver/shared/Lesson 1.pdf",
-            str(app_server.decode_file_reference("file://fileserver/shared/Lesson%201.pdf")),
+            Path("//fileserver/shared/Lesson 1.pdf"),
+            app_server.decode_file_reference("file://fileserver/shared/Lesson%201.pdf"),
         )
 
     def test_upload_cache_component_reserves_bytes_for_content_digest_prefix(self):
@@ -182,13 +266,149 @@ class TestStaticAssetCaching(unittest.TestCase):
         stamp = "20260824_123456_1234567890_stampabcdef"
         with patch.object(app_server, "_unique_artifact_stamp", return_value=stamp):
             preview = handler._resolve_preview_output_dir({}, [long_source])
-            generation = app_server.sanitize_output_dir_name(long_source.stem, suffix=stamp)
+            budget = app_server._managed_path_component_max_bytes(
+                app_server.default_output_root() / "previews",
+                reserved_descendants=app_server.MANAGED_PREVIEW_RESERVED_DESCENDANTS,
+                max_bytes=app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
+            )
+            generation = app_server.sanitize_output_dir_name(
+                long_source.stem,
+                suffix=stamp,
+                max_bytes=budget,
+            )
         self.assertEqual(preview.name, generation)
         self.assertTrue(generation.endswith(f"_{stamp}"))
         self.assertLessEqual(
             len(generation.encode("utf-8")),
-            app_server.SAFE_PATH_COMPONENT_MAX_BYTES,
+            app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
         )
+
+    def test_windows_preview_crop_path_stays_below_legacy_max_path_boundary(self):
+        handler = object.__new__(app_server.AppRequestHandler)
+        runtime_dir = Path(
+            "C:/Users/Administrator/Documents/ClassInEDBMVP/.app_runtime"
+        )
+        source = Path(
+            ("b17d4d83e8de7ab5479d9c53a1dc00d520a8b28a64e86bc67f8f41c20a8cd38d"
+             "__2026.08.18_23_고1B_539b127457.pdf")
+        )
+        stamp = "20260824_143057_1787549457154522500_67513cd0436a"
+        with (
+            patch.object(app_server, "RUNTIME_DIR", runtime_dir),
+            patch.object(app_server, "_unique_artifact_stamp", return_value=stamp),
+        ):
+            preview = handler._resolve_preview_output_dir({}, [source])
+
+        crop_path = preview / "problem_crops" / "problem_001_df48bf64.png"
+        self.assertLess(len(str(crop_path)), 240)
+        self.assertLessEqual(
+            len(preview.name.encode("utf-8")),
+            app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
+        )
+
+    def test_long_onedrive_hangul_root_dynamically_budgets_preview_and_publish(self):
+        handler = object.__new__(app_server.AppRequestHandler)
+        runtime_dir = Path(
+            "C:/Users/"
+            + ("LongProfileName" * 3)
+            + "/OneDrive - International Academy/문서/ClassInEDBMVP/.app_runtime"
+        )
+        source = Path(("긴_한글_시험자료" * 80) + ".pdf")
+        stamp = "20260824_143057_1787549457154522500_67513cd0436a"
+        with (
+            patch.object(app_server, "RUNTIME_DIR", runtime_dir),
+            patch.object(app_server, "_unique_artifact_stamp", return_value=stamp),
+        ):
+            preview = handler._resolve_preview_output_dir({}, [source])
+
+        crop_path = preview / app_server.MANAGED_CROP_RELATIVE_PATH
+        future_publish_path = (
+            preview
+            / ".publish-staging"
+            / app_server.MANAGED_GENERATION_PLACEHOLDER
+            / "classin_handoff.json"
+        )
+        self.assertLessEqual(
+            app_server._windows_path_units(crop_path),
+            app_server.WINDOWS_MANAGED_PATH_MAX_UNITS,
+        )
+        self.assertLessEqual(
+            app_server._windows_path_units(future_publish_path),
+            app_server.WINDOWS_MANAGED_PATH_MAX_UNITS,
+        )
+        self.assertLess(
+            len(preview.name.encode("utf-8")),
+            app_server.MANAGED_OUTPUT_DIR_NAME_MAX_BYTES,
+        )
+
+    def test_long_onedrive_root_budgets_upload_digest_and_hangul_filename(self):
+        upload_dir = Path(
+            "C:/Users/"
+            + ("LongProfileName" * 3)
+            + "/OneDrive - International Academy/Documents/ClassInEDBMVP/.app_runtime/uploads"
+        )
+        target_name = app_server._managed_upload_target_name(
+            ("한글자료" * 100) + ".pdf",
+            "a" * 64,
+            upload_dir=upload_dir,
+        )
+        target_path = upload_dir / target_name
+
+        self.assertTrue(target_name.startswith(("a" * 64) + "_"))
+        self.assertTrue(target_name.endswith(".pdf"))
+        self.assertLessEqual(
+            app_server._windows_path_units(target_path),
+            app_server.WINDOWS_MANAGED_PATH_MAX_UNITS,
+        )
+
+    def test_long_runtime_root_budgets_export_and_publish_descendants(self):
+        handler = object.__new__(app_server.AppRequestHandler)
+        runtime_dir = Path(
+            "C:/Users/"
+            + ("LongProfileName" * 2)
+            + "/OneDrive - International Academy/Shared Documents/문서/"
+            "ClassInEDBMVP/.app_runtime"
+        )
+        source = Path(("수학영역_문제지" * 80) + ".pdf")
+        stamps = iter(
+            (
+                "20260824_143057_1787549457154522500_exportstamp",
+                "20260824_143058_1787549457154522501_publishstamp",
+            )
+        )
+        with (
+            patch.object(app_server, "RUNTIME_DIR", runtime_dir),
+            patch.object(app_server, "_unique_artifact_stamp", side_effect=lambda: next(stamps)),
+        ):
+            output_dir = handler._resolve_output_dir({}, [source])
+            export_staging, _export_final = app_server._managed_export_generation_paths(output_dir)
+            edb_name, publish_staging, _publish_final = app_server._managed_publish_artifact_paths(
+                output_dir,
+                "아주 긴 기말고사 EDB 이름" * 40,
+                fallback_stem="classin",
+            )
+
+        paths = (
+            export_staging / app_server.MANAGED_CROP_RELATIVE_PATH,
+            publish_staging / "classin_handoff.json",
+            publish_staging / app_server._edb_part_file_name(edb_name, 9998, 9999),
+        )
+        for path in paths:
+            self.assertLessEqual(
+                app_server._windows_path_units(path),
+                app_server.WINDOWS_MANAGED_PATH_MAX_UNITS,
+                str(path),
+            )
+        self.assertTrue(edb_name.endswith(".edb"))
+
+    def test_export_missing_crop_has_actionable_error_code(self):
+        error = FileNotFoundError(
+            "C:/runtime/outputs/previews/run/problem_crops/problem_001_df48bf64.png"
+        )
+        payload = app_server._export_error_payload(error)
+        self.assertEqual("recognition_asset_missing", payload["code"])
+        self.assertEqual("session_export", payload["operation"])
+        self.assertTrue(payload["retryable"])
 
     def test_image_generation_names_are_byte_safe_and_distinct_for_long_ids(self):
         output_dir = Path("/tmp")
@@ -432,6 +652,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             with patch.object(app_server, "RESOURCE_DIR", tmpdir), \
                     patch.object(app_server, "BASE_DIR", tmpdir), \
                     patch.object(app_server.sys, "platform", "darwin"), \
+                    patch.object(app_server.platform, "machine", return_value="arm64"), \
                     patch.dict(os.environ, {
                         "EDB_APP_VERSION": "",
                         "EDB_UPDATE_FEED_URL": "",
@@ -4149,8 +4370,12 @@ class TestSessionPublishPreflightGuard(unittest.TestCase):
             self.assertTrue(body["publishSummary"]["outputDirExists"])
             self.assertTrue(body["publishSummary"]["readyForClassIn"])
             self.assertTrue(body["publishSummary"]["canDownload"])
-            self.assertIn("/published/", body["publishSummary"]["edbFileUri"])
-            self.assertNotIn(".publish-staging", body["publishSummary"]["edbFileUri"])
+            published_path = app_server.decode_file_reference(
+                body["publishSummary"]["edbFileUri"]
+            )
+            self.assertIsNotNone(published_path)
+            self.assertIn("published", published_path.parts)
+            self.assertNotIn(".publish-staging", published_path.parts)
             self.assertEqual(50, body["publishSummary"]["pageCountHint"])
             self.assertTrue(body["publishSummary"]["edbSplit"])
             self.assertEqual(2, body["publishSummary"]["edbPartCount"])

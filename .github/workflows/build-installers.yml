@@ -527,23 +527,123 @@ jobs:
       - name: Verify portable and installed Windows launch smoke
         shell: pwsh
         run: |
-          .\.venv\Scripts\python.exe scripts\verify_packaged_app.py dist\ClassInEDBMVP `
-            --expected-app-id ClassInEDBMVP `
-            --expected-app-name ClassInEDBMVP `
-            --expected-version $env:RELEASE_VERSION `
-            --expected-update-feed-url $env:UPDATE_FEED_URL `
-            --expected-download-url $env:WINDOWS_DOWNLOAD_URL `
-            --expected-release-notes-url $env:RELEASE_NOTES_URL `
-            --expected-git-commit $env:GITHUB_SHA
-          .\.venv\Scripts\python.exe scripts\smoke_packaged_app.py dist\ClassInEDBMVP\ClassInEDBMVP.exe
+          $ErrorActionPreference = "Stop"
 
-          $installDir = Join-Path $env:RUNNER_TEMP "ClassInEDBMVP-installed-smoke"
-          $installerArgs = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installDir")
-          $installer = Start-Process -FilePath "dist\ClassInEDBMVP-Setup.exe" -ArgumentList $installerArgs -Wait -PassThru
-          if ($installer.ExitCode -ne 0) {
-            throw "Windows installer smoke failed with exit code $($installer.ExitCode)."
+          function Invoke-CheckedProcess {
+            param(
+              [Parameter(Mandatory = $true)][string]$FilePath,
+              [Parameter(Mandatory = $true)][string[]]$Arguments,
+              [Parameter(Mandatory = $true)][string]$Description
+            )
+            $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = [System.IO.Path]::GetFullPath($FilePath)
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            foreach ($argument in $Arguments) {
+              [void]$startInfo.ArgumentList.Add($argument)
+            }
+            $process = [System.Diagnostics.Process]::new()
+            $process.StartInfo = $startInfo
+            try {
+              if (-not $process.Start()) {
+                throw "$Description did not start."
+              }
+              $process.WaitForExit()
+              $exitCode = $process.ExitCode
+            } finally {
+              $process.Dispose()
+            }
+            if ($exitCode -ne 0) {
+              throw "$Description failed with exit code $exitCode."
+            }
           }
-          .\.venv\Scripts\python.exe scripts\smoke_packaged_app.py (Join-Path $installDir "ClassInEDBMVP.exe")
+
+          function Assert-NativeCommandSucceeded {
+            param([Parameter(Mandatory = $true)][string]$Description)
+            if ($LASTEXITCODE -ne 0) {
+              throw "$Description failed with exit code $LASTEXITCODE."
+            }
+          }
+
+          $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+          )
+          $smokeRoot = [System.IO.Path]::GetFullPath((Join-Path $runnerTemp "EDB 한글 package smoke"))
+          $smokeParent = [System.IO.Directory]::GetParent($smokeRoot).FullName.TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+          )
+          if ($smokeParent -ne $runnerTemp) {
+            throw "Refusing unsafe Windows smoke root: $smokeRoot"
+          }
+          $portableRoot = Join-Path $smokeRoot "포터블 앱 with spaces"
+          $installDir = Join-Path $smokeRoot "설치 경로 with spaces"
+          if (Test-Path -LiteralPath $smokeRoot) {
+            Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+
+          try {
+            Copy-Item -LiteralPath "dist\ClassInEDBMVP" -Destination $portableRoot -Recurse
+            $portableExe = Join-Path $portableRoot "ClassInEDBMVP.exe"
+            if (-not (Test-Path -LiteralPath $portableExe -PathType Leaf)) {
+              throw "Relocated portable executable was not copied to the expected Unicode path."
+            }
+            .\.venv\Scripts\python.exe scripts\verify_packaged_app.py $portableRoot `
+              --expected-app-id ClassInEDBMVP `
+              --expected-app-name ClassInEDBMVP `
+              --expected-version $env:RELEASE_VERSION `
+              --expected-update-feed-url $env:UPDATE_FEED_URL `
+              --expected-download-url $env:WINDOWS_DOWNLOAD_URL `
+              --expected-release-notes-url $env:RELEASE_NOTES_URL `
+              --expected-git-commit $env:GITHUB_SHA
+            Assert-NativeCommandSucceeded "Relocated portable metadata verification"
+            .\.venv\Scripts\python.exe scripts\smoke_packaged_app.py $portableExe
+            Assert-NativeCommandSucceeded "Relocated portable launch smoke"
+
+            Invoke-CheckedProcess `
+              -FilePath "dist\ClassInEDBMVP-Setup.exe" `
+              -Arguments @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/DIR=$installDir") `
+              -Description "Windows installer smoke"
+
+            $installedExe = Join-Path $installDir "ClassInEDBMVP.exe"
+            if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
+              throw "Installer did not honor the requested Unicode path: $installDir"
+            }
+            .\.venv\Scripts\python.exe scripts\verify_packaged_app.py $installDir `
+              --expected-app-id ClassInEDBMVP `
+              --expected-app-name ClassInEDBMVP `
+              --expected-version $env:RELEASE_VERSION `
+              --expected-update-feed-url $env:UPDATE_FEED_URL `
+              --expected-download-url $env:WINDOWS_DOWNLOAD_URL `
+              --expected-release-notes-url $env:RELEASE_NOTES_URL `
+              --expected-git-commit $env:GITHUB_SHA
+            Assert-NativeCommandSucceeded "Installed package metadata verification"
+            .\.venv\Scripts\python.exe scripts\smoke_packaged_app.py $installedExe
+            Assert-NativeCommandSucceeded "Installed package launch smoke"
+
+            $uninstallers = @(Get-ChildItem -LiteralPath $installDir -Filter "unins*.exe" -File)
+            if ($uninstallers.Count -ne 1) {
+              throw "Expected exactly one installed uninstaller, found $($uninstallers.Count)."
+            }
+            Invoke-CheckedProcess `
+              -FilePath $uninstallers[0].FullName `
+              -Arguments @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") `
+              -Description "Windows uninstaller smoke"
+
+            $uninstallDeadline = [DateTime]::UtcNow.AddSeconds(15)
+            while ((Test-Path -LiteralPath $installedExe) -and [DateTime]::UtcNow -lt $uninstallDeadline) {
+              Start-Sleep -Milliseconds 200
+            }
+            if (Test-Path -LiteralPath $installedExe) {
+              throw "Windows uninstaller left the installed executable behind: $installedExe"
+            }
+          } finally {
+            if (Test-Path -LiteralPath $smokeRoot) {
+              Remove-Item -LiteralPath $smokeRoot -Recurse -Force
+            }
+          }
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           UPDATE_FEED_URL: ${{ inputs.update_feed_url }}

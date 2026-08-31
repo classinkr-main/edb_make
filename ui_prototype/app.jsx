@@ -5076,7 +5076,7 @@ function ReviewStage({
             </span>
             <div className="review-completion-actions">
               {reviewFlow.complete ? (
-                <button className="btn primary review-completion-primary" type="button" onClick={() => onOpenBoard?.()}>
+                <button className="btn primary review-completion-primary review-board-preview-button" type="button" onClick={() => onOpenBoard?.()}>
                   {Icon.board} 칠판 미리보기
                 </button>
               ) : selectedUnresolvedProblemIds.length > 0 ? (
@@ -9518,10 +9518,14 @@ function RecognitionPageReviewStage({ review, confirming, onConfirm, onCancel })
     <section className="recognition-page-review-stage" aria-labelledby="recognition-page-review-title">
       <header className="recognition-page-review-hd">
         <div>
-          <span className="recognition-eyebrow">페이지별 원본 확인</span>
-          <h2 id="recognition-page-review-title">{title}</h2>
-          <p>{subtitle}</p>
-          <small>문제는 이미 파싱되어 있습니다. 여기서는 원본과 분할 경계만 빠르게 확인합니다.</small>
+          <div className="recognition-page-review-title-row">
+            <span className="recognition-eyebrow">페이지별 원본 확인</span>
+            <h2 id="recognition-page-review-title">{title}</h2>
+          </div>
+          <p>
+            {subtitle}
+            <span className="recognition-page-review-note"> · 문제는 이미 파싱되어 있습니다. 원본과 분할 경계만 확인하세요.</span>
+          </p>
         </div>
         <button className="btn" type="button" onClick={onCancel} disabled={confirming}>{cancelLabel}</button>
       </header>
@@ -9658,21 +9662,21 @@ function RecognitionPageReviewStage({ review, confirming, onConfirm, onCancel })
           }) : (
             <div className="recognition-empty">확인할 페이지가 없습니다.</div>
           )}
-          {pages.length > 1 && (
-            <div className="recognition-page-stepper" role="group" aria-label="페이지 이동">
-              <button className="btn" type="button" onClick={() => scrollRecognitionPageToIndex(safePageIndex - 1)} disabled={safePageIndex === 0}>
-                이전 페이지
-              </button>
-              <span>{safePageIndex + 1} / {pages.length}</span>
-              <button className="btn" type="button" onClick={() => scrollRecognitionPageToIndex(safePageIndex + 1)} disabled={safePageIndex === pages.length - 1}>
-                다음 페이지
-              </button>
-            </div>
-          )}
         </div>
       </div>
 
       <footer className="recognition-page-review-foot">
+        {pages.length > 1 && (
+          <div className="recognition-page-stepper" role="group" aria-label="페이지 이동">
+            <button className="btn" type="button" onClick={() => scrollRecognitionPageToIndex(safePageIndex - 1)} disabled={safePageIndex === 0}>
+              이전 페이지
+            </button>
+            <span>{safePageIndex + 1} / {pages.length}</span>
+            <button className="btn" type="button" onClick={() => scrollRecognitionPageToIndex(safePageIndex + 1)} disabled={safePageIndex === pages.length - 1}>
+              다음 페이지
+            </button>
+          </div>
+        )}
         <span className="recognition-page-review-foot-copy">
           {confirming
             ? confirmingLabel

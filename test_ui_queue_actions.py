@@ -249,7 +249,13 @@ class TestUiQueueActions(unittest.TestCase):
         self.assertIn(".recognition-summary", short_viewport_css)
         self.assertIn("display: none", short_viewport_css)
         self.assertIn("recognition-page-review-foot", stage)
-        self.assertIn("recognition-transition-actions", stage.split("recognition-page-review-foot", 1)[1])
+        footer_source = stage.split('className="recognition-page-review-foot"', 1)[1]
+        preview_source = stage.split('className="recognition-preview"', 1)[1].split(
+            'className="recognition-page-review-foot"', 1
+        )[0]
+        self.assertIn("recognition-transition-actions", footer_source)
+        self.assertIn("recognition-page-stepper", footer_source)
+        self.assertNotIn("recognition-page-stepper", preview_source)
         self.assertIn("hasActionableReview &&", stage)
         self.assertIn("hasActionableReview ? '' : 'primary'", stage)
         self.assertNotIn('role="dialog"', stage)

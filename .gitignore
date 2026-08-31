@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 *.pyc
 .venv/
+.venv-release/
 reports_worker/node_modules/
 .wrangler/
 .env.local
@@ -55,3 +56,7 @@ test_output_*/
 !assets/app_icon.png
 !assets/app_icon_source.png
 !ui_prototype/favicon.png
+
+# Local one-off packaging/install smoke logs
+/.audit/*-smoke-*.log
+/.audit/package-*.log

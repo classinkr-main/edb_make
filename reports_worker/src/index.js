@@ -6,13 +6,44 @@ const MAX_DIAGNOSTICS_JSON_CHARS = 24_000;
 const MAX_JSON_DEPTH = 12;
 const MAX_JSON_NODES = 2_000;
 const ALLOWED_APP_IDS = new Set(["ClassInEDBMVP"]);
-const HEALTH_DATABASE_QUERY = (
-  "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bug_reports' LIMIT 1"
-);
+const HEALTH_REQUIRED_COLUMNS = Object.freeze([
+  "id",
+  "created_at",
+  "app_id",
+  "app_version",
+  "platform",
+  "category",
+  "description",
+  "context_json",
+  "diagnostics_json",
+  "status",
+  "reporter_contact",
+  "consent_to_contact",
+  "error_code",
+  "failed_operation",
+  "resolution_note",
+  "resolved_at",
+  "payload_hash",
+]);
+const HEALTH_DATABASE_QUERY = [
+  "SELECT CASE WHEN",
+  `(SELECT COUNT(DISTINCT name) FROM pragma_table_info('bug_reports') WHERE name IN (${(
+    HEALTH_REQUIRED_COLUMNS.map(name => `'${name}'`).join(", ")
+  )})) = ${HEALTH_REQUIRED_COLUMNS.length}`,
+  "AND EXISTS (",
+  "SELECT 1 FROM pragma_index_list('bug_reports')",
+  "WHERE name = 'bug_reports_payload_hash_unique_idx' AND \"unique\" = 1 AND partial = 1",
+  ")",
+  "AND (SELECT group_concat(name, ',') FROM (",
+  "SELECT name FROM pragma_index_info('bug_reports_payload_hash_unique_idx') ORDER BY seqno",
+  ")) = 'payload_hash'",
+  "THEN 1 ELSE 0 END AS schema_ready",
+].join(" ");
 const HEALTH_RATE_LIMIT_KEY = "edb-report-health-readiness";
 const REPORT_CONTRACT = Object.freeze({
   reportSchemaVersion: 1,
   receiptSchemaVersion: 1,
+  storageSchemaVersion: 3,
   contactAccepted: true,
   operationErrorFields: ["error_code", "failed_operation"],
   idempotency: "payload_sha256",
@@ -379,7 +410,7 @@ async function bindingReadiness(env) {
     const statement = env?.REPORTS_DB?.prepare?.(HEALTH_DATABASE_QUERY);
     if (statement && typeof statement.first === "function") {
       const row = await statement.first();
-      bindings.REPORTS_DB = row?.name === "bug_reports";
+      bindings.REPORTS_DB = Number(row?.schema_ready) === 1;
     }
   } catch (error) {
     console.error("bug report health D1 probe failed", error);
@@ -434,6 +465,7 @@ export default {
 };
 
 export {
+  HEALTH_DATABASE_QUERY,
   MAX_BODY_BYTES,
   REPORT_CONTRACT,
   bindingReadiness,

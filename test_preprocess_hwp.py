@@ -2153,6 +2153,7 @@ class TestPreprocessHwp(unittest.TestCase):
 
             with (
                 mock.patch.object(preprocess, "_iter_hwp_pdf_converter_commands", return_value=[["/usr/local/bin/airun-hwp"]], create=True),
+                mock.patch.object(preprocess.sys, "platform", "darwin"),
                 mock.patch.object(preprocess.shutil, "which", side_effect=fake_which),
                 mock.patch.object(preprocess.subprocess, "run", side_effect=fake_run),
             ):

@@ -26,6 +26,15 @@ If dependencies are already installed:
 .\run_local_app.ps1
 ```
 
+With `-InstallDeps`, the Windows launcher creates `.venv` when needed and installs
+dependencies there instead of modifying the global Python environment. It prefers
+the project virtual environment, then the Windows `py -3` launcher, then
+`python.exe`, and requires Python 3.11 or newer. A custom interpreter can be
+selected with `-PythonExe C:\path\to\python.exe`.
+Unless the caller already configured `PYTHONUTF8`, the launcher enables Python
+UTF-8 mode so Korean paths and diagnostics remain readable when output is
+redirected to CI, an editor, or a support log.
+
 Default app URL:
 ```text
 http://127.0.0.1:8765/
@@ -100,7 +109,7 @@ If the certificate is already installed in the Windows certificate store, you ca
 ```
 
 The script locates `signtool.exe` from `PATH` or the Windows SDK. It signs `.exe`, `.dll`, and `.pyd` files in the packaged app folder before building the installer, then signs and verifies `dist\ClassInEDBMVP-Setup.exe`.
-The installer build prints the final setup file size and SHA-256 hash. The Inno Setup definition uses high-compression LZMA2 and removes stale legacy runtime/build artifacts from the install directory during upgrades; user settings and API keys remain in the separate runtime folder under Documents.
+The installer build prints the final setup file size and SHA-256 hash. The Inno Setup definition uses high-compression LZMA2 and closes the running app before replacing the complete PyInstaller `_internal` payload, so DLLs and Python extensions removed in a newer release cannot survive an in-place upgrade. User settings, API keys, uploads, and outputs remain untouched in the separate runtime folder under the Windows Documents known folder. If `-SignTool` or `-InnoSetupCompiler` is supplied explicitly, a missing or non-file path fails the build instead of silently selecting a different installed tool.
 
 Installer display metadata can be overridden without changing the packaged executable name:
 ```powershell
@@ -138,7 +147,7 @@ Windows portable archives are written as `ClassInEDBMVP-Portable.zip` to disting
 
 The packaging scripts remove deterministic previous outputs for the same app name before writing a new package. PyInstaller work files stay under the selected output directory and are removed after a successful build. Use a dedicated external `-OutputDir` when you need to keep older artifacts side by side.
 Inside the repository, packaging output is restricted to the exact top-level `dist` directory. Outside the repository, a non-empty directory is refused unless a prior packaging run created `.edb-packaging-output`; this applies with or without `--clean`/`-Clean`. Cleanup also refuses the filesystem root, user home, project root, ancestors, `.git`, and source directories. Release-metadata generation independently enforces an exact output-directory name, allowed parent, sentinel, and file allowlist before replacement.
-Before release sanity checks, clear old ignored local app outputs with `python scripts/clean_local_artifacts.py --yes`. The cleanup tool targets root-level `dist*`, `build`, and `tmp_validation_*` artifacts by default so stale test packages such as `dist_sizecheck` cannot be mistaken for the current UI; it also removes stale legacy UI bridge files without deleting the local `.app_runtime` folder. Generated EDB exports and full `.app_runtime` removal are opt-in cleanup targets.
+Before release sanity checks, clear old ignored local app outputs with `python scripts/clean_local_artifacts.py --yes`. The cleanup tool targets root-level `dist*`, `build`, and `tmp_validation_*` artifacts by default so stale test packages such as `dist_sizecheck` cannot be mistaken for the current UI; it also removes stale legacy UI bridge files under `ui_prototype`. Generated EDB exports are opt-in, while `.app_runtime` user state and `.venv` are always protected.
 
 Expected output:
 - **Default**: a folder containing the executable and dependencies: `dist\ClassInEDBMVP\`
@@ -148,10 +157,16 @@ Typical packaged launch target:
 - Default mode: `dist\ClassInEDBMVP\ClassInEDBMVP.exe`
 - Standalone mode: `dist\ClassInEDBMVP.exe`
 
-The default Windows build is windowed, so no console appears. Logs are written under:
+The default Windows build is windowed, so no console appears. Logs are written
+under the current Windows Documents known folder; OneDrive and policy-based
+Documents-folder redirection are respected:
 ```text
-%USERPROFILE%\Documents\ClassInEDBMVP\.app_runtime\app.log
+<Windows Documents>\ClassInEDBMVP\.app_runtime\app.log
 ```
+
+Set `EDB_APP_HOME` to override the packaged app home. Environment variables in
+the value are expanded, for example
+`EDB_APP_HOME=%LOCALAPPDATA%\ClassInEDBMVP`.
 
 ### macOS `.app`
 Install PyInstaller if needed and build:
@@ -232,7 +247,7 @@ app_update_config.json
 
 The packaged app reads `app_update_config.json` from bundled resources, then allows a local override at:
 ```text
-Documents\ClassInEDBMVP\app_update_config.json
+<Windows Documents>\ClassInEDBMVP\app_update_config.json
 ~/Documents/ClassInEDBMVP/app_update_config.json
 ```
 Local overrides may use equivalent snake_case keys such as `download_url`; the runtime normalizes them to the canonical camelCase metadata keys before checking updates. If both alias forms are present with different values, update status becomes `invalid_config` instead of guessing between old and new release metadata.
@@ -366,11 +381,11 @@ The base Python package also includes dependencies with copyleft or dual-license
 - `scripts\verify_packaged_app.py` runs after folder-style packaging, source-package fallback builds, and Windows installer reuse of an existing app folder to confirm the final artifact contains the current prebuilt UI with bundle digest metadata, matching app/version update metadata, safe and expected packaged update URLs, matching macOS `Info.plist` bundle id/version metadata when present, HWP render helper, and the required source-package Python runtime modules when applicable, without browser-side Babel, build-time frontend tooling, legacy UI data files, or local runtime/session outputs.
 - macOS and Windows packaging wrappers pass the current checkout as `--source-root`; a stale `dist` or external output therefore fails when its frontend source digest or the actual `app.bundle.js` byte SHA-256 differs from the checkout, even if a copied digest header and board cache-bust agree with each other. The Windows source-package fallback also requires `bug_reporting.py` and runs an isolated `app_server` import smoke. Windows `-OneFile` builds reuse `scripts/smoke_packaged_app.py` to launch with an isolated temporary `EDB_APP_HOME`, verify health, served `board.html`, its cache-busted bundle content/digest, update metadata, and clean shutdown before packaging continues.
 - `scripts\build_app_update_config.py` is the single generator for packaged app update metadata across macOS, Windows, and direct PyInstaller spec builds.
-- `scripts\clean_local_artifacts.py` removes ignored root-level packaging leftovers that can look like runnable current builds. Its default set covers `dist*`, `build`, `tmp_validation_*`, and stale legacy UI bridge files; generated EDB exports and full `.app_runtime` removal require explicit flags.
+- `scripts\clean_local_artifacts.py` removes ignored root-level packaging leftovers that can look like runnable current builds. Its default set covers `dist*`, `build`, `tmp_validation_*`, and stale legacy UI bridge files under `ui_prototype`; generated EDB exports require an explicit flag, while `.app_runtime` user state and `.venv` are always protected.
 - Packaging wrappers also verify that generated distribution archives and installers are real non-empty files before reporting success or signing them. PowerShell packaging converts non-zero native command exits from Python, Node.js, PyInstaller, and Inno Setup into build failures so stale artifacts are not carried forward. Windows zip verification checks the root executable for PyInstaller one-file builds, the packaged executable under the app folder for PyInstaller folder builds, and `source-package\app_update_config.json` for source-package fallback builds. Windows signing fails if a requested package folder contains no signable `.exe`, `.dll`, or `.pyd` artifacts.
 - Browser-side Babel is not included in packaged builds.
 - Development runs write default and relative UI-named outputs under `.app_runtime\outputs` in the project folder.
-- Packaged runs write default and relative UI-named outputs under `Documents\ClassInEDBMVP\.app_runtime\outputs`.
+- Packaged runs write default and relative UI-named outputs under `<Windows Documents>\ClassInEDBMVP\.app_runtime\outputs` on Windows and `~/Documents/ClassInEDBMVP/.app_runtime/outputs` on macOS.
 - Uploaded files are cached in `.app_runtime\uploads` under the active app home.
 - `generated_session.js` is kept and overwritten only as an empty compatibility bridge; latest-session restore uses `.app_runtime\latest_session.json` and session history. Legacy CLI bridge output stays under the selected output folder and must not recreate project `ui_prototype\generated_session.js` or `prototype_data.js`.
 - The browser UI talks to the local server over HTTP and does not call Python directly.

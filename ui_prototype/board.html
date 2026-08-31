@@ -5078,18 +5078,18 @@
     flex: 0 0 auto;
     display: flex;
     align-items: center;
-    gap: 12px;
-    min-height: 72px;
-    margin: 0 14px 14px 18px;
-    padding: 12px 14px 12px 18px;
-    border: 1px solid rgba(47,111,237,.52);
-    border-radius: 12px;
+    gap: 10px;
+    min-height: 54px;
+    margin: 0 14px 10px 18px;
+    padding: 8px 10px 8px 14px;
+    border: 1px solid rgba(47,111,237,.38);
+    border-radius: 10px;
     background: var(--surface);
-    box-shadow: 0 10px 30px rgba(47,111,237,.12), var(--shadow-1);
+    box-shadow: 0 6px 18px rgba(47,111,237,.09), var(--shadow-1);
   }
   .review-completion-bar.is-complete{
-    border-color: rgba(47,158,107,.42);
-    box-shadow: 0 10px 30px rgba(47,158,107,.10), var(--shadow-1);
+    border-color: rgba(47,158,107,.34);
+    box-shadow: 0 6px 18px rgba(47,158,107,.08), var(--shadow-1);
   }
   .review-completion-progress{
     display: inline-flex;
@@ -5105,12 +5105,12 @@
   .review-completion-progress strong{
     color: var(--accent);
     font-family: 'JetBrains Mono', monospace;
-    font-size: 19px;
+    font-size: 16px;
     line-height: 1;
   }
   .review-completion-state{
     flex: 0 0 auto;
-    padding: 5px 8px;
+    padding: 4px 7px;
     border-radius: 999px;
     background: var(--accent-soft);
     color: var(--accent-ink);
@@ -5135,20 +5135,26 @@
     flex: 0 0 auto;
   }
   .review-completion-primary{
-    min-width: 216px;
-    min-height: 48px;
-    padding: 0 10px 0 16px;
+    min-width: 180px;
+    min-height: 38px;
+    padding: 0 8px 0 12px;
     background: var(--accent) !important;
     border-color: var(--accent) !important;
     color: white !important;
     font-weight: 750;
     white-space: nowrap;
     justify-content: space-between;
-    gap: 14px;
-    box-shadow: 0 8px 18px rgba(47,111,237,.22);
+    gap: 10px;
+    box-shadow: 0 5px 12px rgba(47,111,237,.18);
   }
   .review-completion-primary:hover{
     background: var(--accent-ink) !important;
+  }
+  .review-board-preview-button{
+    min-width: 156px;
+    padding-inline: 12px;
+    justify-content: center;
+    gap: 6px;
   }
   .review-completion-primary-label{
     display: inline-flex;
@@ -5160,9 +5166,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 42px;
-    height: 28px;
-    padding: 0 7px;
+    min-width: 38px;
+    height: 24px;
+    padding: 0 6px;
     border: 1px solid rgba(255,255,255,.38);
     border-radius: 7px;
     background: rgba(255,255,255,.14);
@@ -6398,52 +6404,57 @@
   }
   .recognition-page-review-hd{
     display: flex;
-    align-items: flex-start;
-    gap: 16px;
-    padding: 16px 20px 13px;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
     border-bottom: 1px solid var(--line);
   }
   .recognition-page-review-hd > div{ min-width: 0; flex: 1; }
+  .recognition-page-review-title-row{
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+  }
   .recognition-eyebrow{
+    flex: 0 0 auto;
     display: inline-flex;
-    margin-bottom: 5px;
     color: var(--accent);
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 800;
     letter-spacing: .04em;
   }
   .recognition-page-review-hd h2{
+    min-width: 0;
     margin: 0;
-    font-size: 20px;
+    font-size: 18px;
     letter-spacing: 0;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .recognition-page-review-hd p{
-    margin: 6px 0 0;
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.45;
-  }
-  .recognition-page-review-hd small{
-    display: block;
-    margin-top: 4px;
+    margin: 3px 0 0;
     color: var(--muted);
     font-size: 11.5px;
-    line-height: 1.4;
+    line-height: 1.35;
+  }
+  .recognition-page-review-note{
+    color: var(--muted-2);
   }
   .recognition-summary{
     display: flex;
     flex-wrap: wrap;
-    gap: 8px;
-    padding: 12px 20px;
+    gap: 7px;
+    padding: 8px 16px;
     border-bottom: 1px solid var(--line);
     background: var(--surface-2);
   }
   .recognition-summary span{
     display: inline-flex;
     align-items: center;
-    min-height: 26px;
-    padding: 0 9px;
+    min-height: 24px;
+    padding: 0 8px;
     border: 1px solid var(--line);
     border-radius: 7px;
     background: var(--surface);
@@ -6664,23 +6675,30 @@
   .recognition-box.status-check-needed span{ background: #d97757; }
   .recognition-box.status-failed span{ background: var(--danger); }
   .recognition-page-stepper{
-    position: sticky;
-    bottom: 0;
-    max-width: 920px;
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 12px;
-    margin: 14px auto 0;
-    padding: 8px;
+    gap: 3px;
+    padding: 2px;
     border: 1px solid var(--line);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--surface) 92%, transparent);
-    box-shadow: var(--shadow-1);
-    backdrop-filter: blur(10px);
+    border-radius: 8px;
+    background: var(--surface-2);
+  }
+  .recognition-page-stepper .btn{
+    min-height: 28px;
+    padding: 0 9px;
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    font-size: 11px;
+  }
+  .recognition-page-stepper .btn:hover:not(:disabled){
+    border-color: var(--line);
+    background: var(--surface);
   }
   .recognition-page-stepper span{
-    min-width: 64px;
+    min-width: 46px;
     color: var(--muted);
     font-family: 'JetBrains Mono', monospace;
     font-size: 11px;
@@ -6691,18 +6709,20 @@
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 8px;
-    padding: 14px 20px;
+    gap: 10px;
+    padding: 9px 16px;
     border-top: 1px solid var(--line);
     background: var(--surface);
   }
   .recognition-page-review-foot-copy{
     min-width: 0;
+    flex: 1 1 180px;
     color: var(--muted);
     font-size: 12px;
   }
   .recognition-page-review-foot .recognition-transition-actions{
-    margin-left: auto;
+    flex: 0 0 auto;
+    margin-left: 0;
   }
   .recognition-page-review-foot .btn.primary{
     background: var(--accent);
@@ -7019,7 +7039,7 @@
     .recognition-page-review-hd{
       padding: 12px;
     }
-    .recognition-page-review-hd small{
+    .recognition-page-review-note{
       display: none;
     }
     .recognition-summary{
@@ -7058,8 +7078,14 @@
       align-items: stretch;
       padding: 10px 12px;
     }
+    .recognition-page-stepper{
+      width: 100%;
+    }
+    .recognition-page-stepper .btn{
+      flex: 1 1 0;
+    }
     .recognition-page-review-foot-copy{
-      flex: 1 0 100%;
+      display: none;
     }
     .recognition-page-review-foot .recognition-transition-actions{
       width: 100%;
@@ -7201,6 +7227,6 @@
 <script src="review_filters.js?v=review-mode-copy-20260818"></script>
 <script src="publish_summary.js?v=layout-diagnostics-edb-split-20260702"></script>
 <script src="publish_guard.js?v=preflight-passage-envelope-20260803"></script>
-<script src="app.bundle.js?v=frontend-bundle-613d45f8d8ba11d5f5c937c9b72ec298577294e7f9f78f771852bd42d96461a0"></script>
+<script src="app.bundle.js?v=frontend-bundle-5540fc87c4368045ccb0b8d08b51ccdd5cf45938b7a8f1e4d90f8b793a8f2d39"></script>
 </body>
 </html>

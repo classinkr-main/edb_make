@@ -9,6 +9,7 @@ continue with its existing Lanczos/sharpen pipeline.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,7 +46,7 @@ class _UpscaylFailureState:
 
 
 _UPSCAYL_FAILURES: dict[tuple[str, str, str], _UpscaylFailureState] = {}
-_UPSCAYL_NEGATIVE_DISCOVERY_AT: dict[tuple[str, str, str, str], float] = {}
+_UPSCAYL_NEGATIVE_DISCOVERY_AT: dict[tuple[str, ...], float] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +146,29 @@ def _binary_filename() -> str:
     return "upscayl-bin.exe" if sys.platform.startswith("win") else "upscayl-bin"
 
 
+def _configured_path(value: str | Path) -> Path:
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    text = re.sub(
+        r"%([^%]+)%",
+        lambda match: os.environ.get(match.group(1), match.group(0)),
+        text,
+    )
+    return Path(os.path.expandvars(os.path.expanduser(text)))
+
+
+def _path_identity(path: Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _subprocess_platform_kwargs() -> dict[str, int]:
+    if not sys.platform.startswith("win"):
+        return {}
+    creation_flags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return {"creationflags": creation_flags} if creation_flags else {}
+
+
 def _runtime_roots() -> list[Path]:
     roots = [Path(__file__).resolve().parent]
     frozen_root = getattr(sys, "_MEIPASS", None)
@@ -155,7 +179,7 @@ def _runtime_roots() -> list[Path]:
     unique: list[Path] = []
     seen: set[str] = set()
     for root in roots:
-        key = str(root)
+        key = _path_identity(root)
         if key not in seen:
             unique.append(root)
             seen.add(key)
@@ -172,14 +196,21 @@ def _models_near_binary(binary: Path) -> Iterable[Path]:
     yield from candidates
 
 
-def _candidate_installations(env_binary: str, env_models: str, path_env: str) -> Iterable[tuple[Path, Path]]:
+def _candidate_installations(
+    env_binary: str,
+    env_models: str,
+    path_env: str,
+    local_app_data: str = "",
+    program_files: str = "",
+    program_files_x86: str = "",
+) -> Iterable[tuple[Path, Path]]:
     binary_name = _binary_filename()
     platform_name = _platform_resource_name()
 
     if env_binary:
-        binary = Path(env_binary).expanduser()
+        binary = _configured_path(env_binary)
         if env_models:
-            yield binary, Path(env_models).expanduser()
+            yield binary, _configured_path(env_models)
         else:
             for models in _models_near_binary(binary):
                 yield binary, models
@@ -199,7 +230,7 @@ def _candidate_installations(env_binary: str, env_models: str, path_env: str) ->
     if path_binary:
         binary = Path(path_binary)
         if env_models:
-            yield binary, Path(env_models).expanduser()
+            yield binary, _configured_path(env_models)
         for models in _models_near_binary(binary):
             yield binary, models
 
@@ -208,13 +239,20 @@ def _candidate_installations(env_binary: str, env_models: str, path_env: str) ->
             resource_root = applications / "Upscayl.app" / "Contents" / "Resources" / "resources"
             yield resource_root / "mac" / "bin" / binary_name, resource_root / "models"
     elif sys.platform.startswith("win"):
-        for env_name in ("LOCALAPPDATA", "PROGRAMFILES"):
-            base = os.environ.get(env_name)
+        for env_name, base in (
+            ("LOCALAPPDATA", local_app_data),
+            ("PROGRAMFILES", program_files),
+            ("PROGRAMFILES(X86)", program_files_x86),
+        ):
             if not base:
                 continue
+            base_path = _configured_path(base)
             for app_name in ("Upscayl", "upscayl"):
-                resource_root = Path(base) / app_name / "resources" / "resources"
-                yield resource_root / "win" / "bin" / binary_name, resource_root / "models"
+                roots = [base_path / app_name / "resources" / "resources"]
+                if env_name == "LOCALAPPDATA":
+                    roots.append(base_path / "Programs" / app_name / "resources" / "resources")
+                for resource_root in roots:
+                    yield resource_root / "win" / "bin" / binary_name, resource_root / "models"
     else:
         for app_root in (Path("/opt/Upscayl"), Path("/opt/upscayl"), Path.home() / ".local" / "opt" / "upscayl"):
             resource_root = app_root / "resources" / "resources"
@@ -223,8 +261,8 @@ def _candidate_installations(env_binary: str, env_models: str, path_env: str) ->
 
 def _valid_installation(binary: Path, models_dir: Path, model: str) -> UpscaylInstallation | None:
     try:
-        binary = binary.expanduser().resolve()
-        models_dir = models_dir.expanduser().resolve()
+        binary = _configured_path(binary).resolve()
+        models_dir = _configured_path(models_dir).resolve()
     except OSError:
         return None
     if not binary.is_file() or not models_dir.is_dir():
@@ -237,10 +275,25 @@ def _valid_installation(binary: Path, models_dir: Path, model: str) -> UpscaylIn
 
 
 @lru_cache(maxsize=16)
-def _discover_cached(env_binary: str, env_models: str, path_env: str, model: str) -> UpscaylInstallation | None:
+def _discover_cached(
+    env_binary: str,
+    env_models: str,
+    path_env: str,
+    local_app_data: str,
+    program_files: str,
+    program_files_x86: str,
+    model: str,
+) -> UpscaylInstallation | None:
     seen: set[tuple[str, str]] = set()
-    for binary, models_dir in _candidate_installations(env_binary, env_models, path_env):
-        key = (str(binary), str(models_dir))
+    for binary, models_dir in _candidate_installations(
+        env_binary,
+        env_models,
+        path_env,
+        local_app_data,
+        program_files,
+        program_files_x86,
+    ):
+        key = (_path_identity(binary), _path_identity(models_dir))
         if key in seen:
             continue
         seen.add(key)
@@ -285,6 +338,9 @@ def discover_upscayl_installation(
             os.environ.get("UPSCAYL_BIN", "").strip(),
             os.environ.get("UPSCAYL_MODELS_DIR", "").strip(),
             os.environ.get("PATH", ""),
+            os.environ.get("LOCALAPPDATA", "").strip(),
+            os.environ.get("PROGRAMFILES", "").strip(),
+            os.environ.get("PROGRAMFILES(X86)", "").strip(),
             model,
         )
         if refresh:
@@ -491,8 +547,11 @@ def auto_upscale_image(
                         command,
                         capture_output=True,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         timeout=max(1.0, float(timeout_seconds)),
                         check=False,
+                        **_subprocess_platform_kwargs(),
                     )
                 except subprocess.TimeoutExpired:
                     cooldown_ms = _record_failure(resolved, "timeout")

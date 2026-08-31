@@ -11,11 +11,14 @@ from __future__ import annotations
 import json
 import os
 import stat
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
 _SETTINGS_FILENAME = "user_settings.json"
 _AI_ENABLED_KEY = "ai_enabled"
+_SETTINGS_LOCK = threading.RLock()
 
 
 def settings_path(runtime_dir: Path) -> Path:
@@ -27,9 +30,12 @@ def load_user_settings(runtime_dir: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8")) or {}
-    except (json.JSONDecodeError, OSError):
+        # ``utf-8-sig`` also accepts plain UTF-8 and tolerates files saved by
+        # Windows editors that prepend a BOM.
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError, UnicodeError):
         return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def ai_enabled_from_settings(
@@ -58,12 +64,37 @@ def ai_enabled_from_settings(
 
 
 def save_user_settings(runtime_dir: Path, settings: dict[str, Any]) -> Path:
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    path = settings_path(runtime_dir)
-    payload = json.dumps(settings, ensure_ascii=False, indent=2)
-    path.write_text(payload, encoding="utf-8")
-    _restrict_permissions(path)
-    return path
+    with _SETTINGS_LOCK:
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        path = settings_path(runtime_dir)
+        payload = json.dumps(settings, ensure_ascii=False, indent=2)
+        file_descriptor, temp_name = tempfile.mkstemp(
+            prefix=f".{_SETTINGS_FILENAME}.",
+            suffix=".tmp",
+            dir=runtime_dir,
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(payload)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            _restrict_permissions(temp_path)
+            # A same-directory replace is atomic on NTFS as well as POSIX,
+            # preventing a crash or concurrent reader from observing half JSON.
+            os.replace(temp_path, path)
+            return path
+        except Exception:
+            try:
+                os.close(file_descriptor)
+            except OSError:
+                pass
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+            raise
 
 
 def apply_to_env(settings: dict[str, Any], *, overwrite: bool = False) -> dict[str, str]:
@@ -185,19 +216,24 @@ def update_api_keys(
     Passing ``None`` leaves a provider unchanged; passing an empty string clears
     the stored key for that provider.
     """
-    settings = load_user_settings(runtime_dir)
-    env_overwrites = False
-    if gemini_api_key is not None:
-        _store_key(settings, "gemini_api_key", gemini_api_key)
-        _sync_env_key("GEMINI_API_KEY", gemini_api_key)
-        env_overwrites = True
-    if openai_api_key is not None:
-        _store_key(settings, "openai_api_key", openai_api_key)
-        _sync_env_key("OPENAI_API_KEY", openai_api_key)
-        env_overwrites = True
-    if ai_enabled is not None:
-        settings[_AI_ENABLED_KEY] = bool(ai_enabled)
-    save_user_settings(runtime_dir, settings)
+    with _SETTINGS_LOCK:
+        settings = load_user_settings(runtime_dir)
+        env_overwrites = False
+        if gemini_api_key is not None:
+            _store_key(settings, "gemini_api_key", gemini_api_key)
+            env_overwrites = True
+        if openai_api_key is not None:
+            _store_key(settings, "openai_api_key", openai_api_key)
+            env_overwrites = True
+        if ai_enabled is not None:
+            settings[_AI_ENABLED_KEY] = bool(ai_enabled)
+        save_user_settings(runtime_dir, settings)
+        # Keep process state consistent with durable state if an atomic replace
+        # is rejected by antivirus software or a transient Windows file lock.
+        if gemini_api_key is not None:
+            _sync_env_key("GEMINI_API_KEY", gemini_api_key)
+        if openai_api_key is not None:
+            _sync_env_key("OPENAI_API_KEY", openai_api_key)
 
     return summarize_for_response(runtime_dir, env_overwrites=env_overwrites)
 

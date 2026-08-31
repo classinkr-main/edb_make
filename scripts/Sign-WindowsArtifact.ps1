@@ -1,8 +1,16 @@
 function Find-EDBSignTool {
     param([string]$Requested)
 
-    if ($Requested -and (Test-Path $Requested)) {
-        return (Resolve-Path $Requested).Path
+    if ($Requested) {
+        $ResolvedRequested = if ([System.IO.Path]::IsPathRooted($Requested)) {
+            [System.IO.Path]::GetFullPath($Requested)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Requested))
+        }
+        if (-not (Test-Path -LiteralPath $ResolvedRequested -PathType Leaf)) {
+            throw "Requested signtool.exe was not found: $ResolvedRequested"
+        }
+        return (Resolve-Path -LiteralPath $ResolvedRequested).Path
     }
 
     $Command = Get-Command "signtool.exe" -ErrorAction SilentlyContinue
@@ -19,10 +27,10 @@ function Find-EDBSignTool {
     }
 
     foreach ($Root in $CandidateRoots) {
-        if (-not (Test-Path $Root)) {
+        if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
             continue
         }
-        $Candidate = Get-ChildItem -Path $Root -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
+        $Candidate = Get-ChildItem -LiteralPath $Root -Recurse -Filter "signtool.exe" -File -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } |
             Sort-Object FullName -Descending |
             Select-Object -First 1
@@ -47,8 +55,12 @@ function Invoke-EDBWindowsSignature {
         [string]$Description = "ClassIn EDB"
     )
 
-    $ResolvedPath = if ([System.IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path (Get-Location) $Path }
-    if (-not (Test-Path $ResolvedPath)) {
+    $ResolvedPath = if ([System.IO.Path]::IsPathRooted($Path)) {
+        [System.IO.Path]::GetFullPath($Path)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
+    }
+    if (-not (Test-Path -LiteralPath $ResolvedPath -PathType Leaf)) {
         throw "Signing target was not found: $ResolvedPath"
     }
 
@@ -66,10 +78,15 @@ function Invoke-EDBWindowsSignature {
     }
 
     if ($CertificatePath) {
-        $ResolvedCertificatePath = if ([System.IO.Path]::IsPathRooted($CertificatePath)) { $CertificatePath } else { Join-Path (Get-Location) $CertificatePath }
-        if (-not (Test-Path $ResolvedCertificatePath)) {
+        $ResolvedCertificatePath = if ([System.IO.Path]::IsPathRooted($CertificatePath)) {
+            [System.IO.Path]::GetFullPath($CertificatePath)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $CertificatePath))
+        }
+        if (-not (Test-Path -LiteralPath $ResolvedCertificatePath -PathType Leaf)) {
             throw "Code-signing certificate was not found: $ResolvedCertificatePath"
         }
+        $ResolvedCertificatePath = (Resolve-Path -LiteralPath $ResolvedCertificatePath).Path
         $SignArgs += @("/f", $ResolvedCertificatePath)
         if ($CertificatePassword) {
             $SignArgs += @("/p", $CertificatePassword)
@@ -112,17 +129,21 @@ function Invoke-EDBWindowsPackageSigning {
         [string]$Description = "ClassIn EDB"
     )
 
-    $ResolvedPackagePath = if ([System.IO.Path]::IsPathRooted($PackagePath)) { $PackagePath } else { Join-Path (Get-Location) $PackagePath }
-    if (-not (Test-Path $ResolvedPackagePath)) {
+    $ResolvedPackagePath = if ([System.IO.Path]::IsPathRooted($PackagePath)) {
+        [System.IO.Path]::GetFullPath($PackagePath)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $PackagePath))
+    }
+    if (-not (Test-Path -LiteralPath $ResolvedPackagePath)) {
         throw "Package path was not found: $ResolvedPackagePath"
     }
 
-    if ((Get-Item $ResolvedPackagePath).PSIsContainer) {
-        $Targets = Get-ChildItem -Path $ResolvedPackagePath -Recurse -File |
+    if ((Get-Item -LiteralPath $ResolvedPackagePath).PSIsContainer) {
+        $Targets = Get-ChildItem -LiteralPath $ResolvedPackagePath -Recurse -File |
             Where-Object { $_.Extension -in @(".exe", ".dll", ".pyd") } |
             Sort-Object FullName
     } else {
-        $Targets = @(Get-Item $ResolvedPackagePath)
+        $Targets = @(Get-Item -LiteralPath $ResolvedPackagePath)
     }
 
     if (-not $Targets -or $Targets.Count -eq 0) {

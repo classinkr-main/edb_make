@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "migrations": [
+    {
+      "name": "0001_create_bug_reports.sql",
+      "sha256": "31020163be2c6c6085458e070aeb1e0d773687faa7f5bc053f51d77a97560f89"
+    },
+    {
+      "name": "0002_add_reporter_and_resolution.sql",
+      "sha256": "9e51ee1de91de2e46acee393310f417cb8d112b9334c58ce921750367ee464c2"
+    },
+    {
+      "name": "0003_add_payload_deduplication.sql",
+      "sha256": "2980359baca54d84ccd5d59d82678f8c0d5b3712afa70eefe167678bdd167960"
+    }
+  ]
+}

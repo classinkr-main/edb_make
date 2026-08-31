@@ -90,10 +90,18 @@ class TestUiReviewBulkConfirm(unittest.TestCase):
         self.assertIn("마지막 확인 · 칠판 보기", review_stage)
         self.assertIn("확인하고 다음", review_stage)
         self.assertIn("칠판 미리보기", review_stage)
+        self.assertIn("review-board-preview-button", review_stage)
         self.assertIn("onOpenBoard", review_stage)
         self.assertIn(".review-completion-bar", html)
         self.assertIn(".review-completion-primary", html)
         self.assertIn(".review-completion-shortcut", html)
+        completion_css = html.split(".review-completion-bar{", 1)[1].split("}", 1)[0]
+        primary_css = html.split(".review-completion-primary{", 1)[1].split("}", 1)[0]
+        self.assertIn("min-height: 54px", completion_css)
+        self.assertIn("min-height: 38px", primary_css)
+        board_preview_css = html.split(".review-board-preview-button{", 1)[1].split("}", 1)[0]
+        self.assertIn("justify-content: center", board_preview_css)
+        self.assertIn("gap: 6px", board_preview_css)
 
     def test_review_confirmation_advances_and_has_a_keyboard_shortcut(self) -> None:
         source = (PROJECT_ROOT / "ui_prototype" / "app.jsx").read_text(encoding="utf-8")

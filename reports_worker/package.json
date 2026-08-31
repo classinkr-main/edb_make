@@ -5,16 +5,22 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "predeploy": "npm test && node scripts/verify_deployment.mjs --remote --phase pre",
-    "deploy": "wrangler deploy",
-    "postdeploy": "node scripts/verify_deployment.mjs --remote --phase post",
+    "test:migrations": "node scripts/test_migrations_local.mjs",
+    "build:check": "wrangler deploy --dry-run",
+    "check": "npm test && npm run test:migrations && npm run build:check",
+    "predeploy": "npm run check",
+    "deploy": "node scripts/deploy_remote.mjs",
+    "predeploy:migrations-only": "npm run check",
+    "deploy:migrations-only": "node scripts/deploy_remote.mjs --migrate-only",
+    "verify:pre-migration:remote": "node scripts/verify_deployment.mjs --remote --phase pre-migration",
+    "verify:schema:remote": "node scripts/verify_deployment.mjs --remote --phase schema",
     "verify:deploy:remote": "node scripts/verify_deployment.mjs --remote --phase post",
-    "verify:deploy:local": "node scripts/verify_deployment.mjs --local --phase pre",
+    "verify:deploy:local": "node scripts/verify_deployment.mjs --local --phase schema",
     "db:create": "wrangler d1 create classin-edb-reports",
     "db:migrate:local": "wrangler d1 migrations apply classin-edb-reports --local",
-    "db:migrate:remote": "wrangler d1 migrations apply classin-edb-reports --remote"
+    "db:migrate:remote": "npm run deploy:migrations-only"
   },
   "devDependencies": {
-    "wrangler": "^4.36.0"
+    "wrangler": "4.125.0"
   }
 }

@@ -86,7 +86,7 @@ if ([string]::IsNullOrWhiteSpace($AppPublisher)) {
 
 if (-not $PythonExe) {
     $VenvPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-    if (Test-Path $VenvPython) {
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
         $PythonExe = $VenvPython
     } else {
         $PythonExe = "python"
@@ -96,8 +96,16 @@ if (-not $PythonExe) {
 function Find-InnoSetupCompiler {
     param([string]$Requested)
 
-    if ($Requested -and (Test-Path $Requested)) {
-        return $Requested
+    if ($Requested) {
+        $ResolvedRequested = if ([System.IO.Path]::IsPathRooted($Requested)) {
+            [System.IO.Path]::GetFullPath($Requested)
+        } else {
+            [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Requested))
+        }
+        if (-not (Test-Path -LiteralPath $ResolvedRequested -PathType Leaf)) {
+            throw "Requested Inno Setup compiler was not found: $ResolvedRequested"
+        }
+        return (Resolve-Path -LiteralPath $ResolvedRequested).Path
     }
 
     $Candidates = @()
@@ -110,8 +118,8 @@ function Find-InnoSetupCompiler {
     )
 
     foreach ($Candidate in $Candidates) {
-        if ($Candidate -and (Test-Path $Candidate)) {
-            return $Candidate
+        if ($Candidate -and (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+            return (Resolve-Path -LiteralPath $Candidate).Path
         }
     }
 
@@ -186,9 +194,9 @@ function Read-PackagedUpdateConfig {
         (Join-Path $PackageRoot "_internal\app_update_config.json")
     )
     foreach ($Candidate in $Candidates) {
-        if (Test-Path $Candidate) {
+        if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
             try {
-                return Get-Content -Raw -Path $Candidate | ConvertFrom-Json
+                return Get-Content -Raw -LiteralPath $Candidate | ConvertFrom-Json
             } catch {
                 throw "Could not read packaged update metadata: $Candidate. $($_.Exception.Message)"
             }
@@ -245,8 +253,10 @@ if (-not $SkipAppBuild) {
 
 $PackageRoot = Join-Path $ResolvedOutputDir $AppName
 $PackageExe = Join-Path $PackageRoot "$AppName.exe"
-if (-not (Test-Path $PackageExe)) {
-    throw "PyInstaller app output was not found: $PackageExe. Build the app first or remove -SkipAppBuild."
+try {
+    Assert-EDBNonEmptyFile -Path $PackageExe -Label "PyInstaller app executable"
+} catch {
+    throw "PyInstaller app output was not found or is empty: $PackageExe. Build the app first or remove -SkipAppBuild."
 }
 
 $PackagedUpdateConfig = Read-PackagedUpdateConfig $PackageRoot
@@ -303,8 +313,8 @@ if ($Sign -and $SkipAppBuild) {
 }
 
 $InstallerPath = Join-Path $ResolvedOutputDir "$AppName-Setup.exe"
-if (Test-Path $InstallerPath) {
-    Remove-Item -Force $InstallerPath
+if (Test-Path -LiteralPath $InstallerPath -PathType Leaf) {
+    Remove-Item -Force -LiteralPath $InstallerPath
 }
 
 $Iscc = Find-InnoSetupCompiler $InnoSetupCompiler
