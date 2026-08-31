@@ -7061,6 +7061,11 @@ function BoardStage({
     drag.windowPointerEnd = event => endPositionDrag(event);
     drag.windowPointerCancel = event => cancelPositionDrag(event);
     positionDragRef.current = drag;
+    // Kill the hover transition imperatively right away — the .positioning
+    // class (which also disables it) only lands on the next React commit,
+    // and a 120ms transform transition makes the tile rubber-band after the
+    // cursor for the first frames of the drag.
+    drag.tile.style.transition = 'none';
     setPositioningId(item.id);
     setCurrentBoardDropTarget(null);
     syncLock.current = Date.now();
@@ -7105,11 +7110,21 @@ function BoardStage({
       if (orderChanged) {
         reorder?.(drag.id, target.id, target.position, { resetPlacement: false });
       } else if (drag.pendingPlacement) {
+        // Pre-apply the final resting position inline before dropping the
+        // transform: React commits the same left/top a frame later, so the
+        // tile stays put instead of flashing back to its pre-drag spot.
+        const finalLeft = normalizePlacementXRatio(drag.pendingPlacement.xRatio) * drag.maxLeft;
+        const finalTopOffset = normalizePlacementYRatio(drag.pendingPlacement.yRatio) * drag.maxTopOffset;
+        const baseLeft = (parseFloat(drag.tile.style.left) || 0) - drag.startLeft;
+        const baseTop = (parseFloat(drag.tile.style.top) || 0) - drag.startTopOffset;
+        drag.tile.style.left = `${baseLeft + finalLeft}px`;
+        drag.tile.style.top = `${baseTop + finalTopOffset}px`;
         setPlacement?.(drag.id, drag.pendingPlacement);
       }
     }
     drag.tile.style.transform = '';
     drag.tile.style.zIndex = '';
+    drag.tile.style.transition = '';
     removePositionDragWindowListeners(drag);
     const captureTarget = drag.captureTarget || evt.currentTarget;
     captureTarget?.releasePointerCapture?.(evt.pointerId);
@@ -7126,6 +7141,7 @@ function BoardStage({
     if (!drag || drag.pointerId !== evt.pointerId) return;
     drag.tile.style.transform = '';
     drag.tile.style.zIndex = '';
+    drag.tile.style.transition = '';
     removePositionDragWindowListeners(drag);
     drag.captureTarget?.releasePointerCapture?.(evt.pointerId);
     positionDragRef.current = null;
