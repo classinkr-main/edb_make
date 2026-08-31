@@ -1690,6 +1690,24 @@ def _composite_on_board_background(image: Image.Image, *, board_theme: str = DEF
     return background.convert("RGB")
 
 
+BOARD_RENDER_CROP_ASPECT_TOLERANCE = 0.03
+
+
+def _board_render_matches_crop(rendered: Image.Image, crop_image: Image.Image) -> bool:
+    """A stored board render is only reusable if it covers the same content.
+
+    A stale render (made before the problem box was re-adjusted) has a
+    different height-to-width ratio than the current crop; using it would
+    publish a problem with its bottom cut off (or stretched)."""
+    if min(rendered.width, rendered.height, crop_image.width, crop_image.height) <= 0:
+        return False
+    crop_aspect = crop_image.height / crop_image.width
+    render_aspect = rendered.height / rendered.width
+    return abs(render_aspect - crop_aspect) <= (
+        BOARD_RENDER_CROP_ASPECT_TOLERANCE * max(crop_aspect, render_aspect)
+    )
+
+
 def _load_board_export_image(
     board_render_path: Path,
     crop_image: Image.Image,
@@ -1708,6 +1726,8 @@ def _load_board_export_image(
                     "RGBA" if "A" in loaded_render.getbands() else "RGB"
                 )
         except OSError:
+            rendered = None
+        if rendered is not None and not _board_render_matches_crop(rendered, crop_image):
             rendered = None
         if (
             rendered is not None
@@ -1740,6 +1760,8 @@ def _load_board_export_image(
         try:
             rendered = Image.open(board_render_path)
         except OSError:
+            rendered = None
+        if rendered is not None and not _board_render_matches_crop(rendered, crop_image):
             rendered = None
 
     if rendered is not None:
@@ -1774,8 +1796,12 @@ def _build_transparent_reconstruction_image(
     *,
     board_theme: str = DEFAULT_BOARD_THEME,
     text_priority: bool = False,
+    trim_page_chrome: bool = True,
 ) -> Image.Image:
-    crop_image = _trim_source_page_chrome(crop_image)
+    # Manual crops skip chrome trimming: the user chose the exact region, and
+    # a false-positive "footer line" match would silently cut real content.
+    if trim_page_chrome:
+        crop_image = _trim_source_page_chrome(crop_image)
     # Stage 3 transparently attempts the local Lite model only for undersized
     # crops. The backend is fail-open, and this extra guard ensures packaging
     # or runtime surprises can never block the existing stage-3 path.

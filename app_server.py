@@ -4715,6 +4715,7 @@ def _render_board_crop_from_raw(
                 (problem or {}).get("sourceFileName"),
                 (problem or {}).get("title"),
             ),
+            trim_page_chrome=False,
         )
         board_image.save(board_crop_path)
 
