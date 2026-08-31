@@ -476,15 +476,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Pinned Inno Setup installation failed with exit code $LASTEXITCODE."
           }
-          # Verify the real compiler, not the chocolatey shim: the shim exe
-          # carries shimgen's version metadata, not Inno Setup's.
+          # Verify the real compiler, not the chocolatey shim. Exe metadata is
+          # unreliable across Inno builds (ProductVersion can be 0.0.0.0), so
+          # accept either the CLI banner or the FileVersion; the .nupkg itself
+          # is already pinned by SHA256 above.
           $isccPath = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
           if (-not (Test-Path -LiteralPath $isccPath)) {
             $isccPath = (Get-Command ISCC.exe -ErrorAction Stop).Source
           }
-          $installedVersion = (Get-Item -LiteralPath $isccPath).VersionInfo.ProductVersion
-          if (-not $installedVersion.StartsWith($innoVersion, [System.StringComparison]::Ordinal)) {
-            throw "Unexpected Inno Setup compiler version: $installedVersion"
+          $banner = ((& $isccPath 2>&1 | Select-Object -First 2) -join ' ')
+          $global:LASTEXITCODE = 0
+          $fileVersion = "$((Get-Item -LiteralPath $isccPath).VersionInfo.FileVersion)"
+          if (-not (($banner -match [regex]::Escape($innoVersion)) -or $fileVersion.StartsWith($innoVersion, [System.StringComparison]::Ordinal))) {
+            throw "Unexpected Inno Setup compiler version: banner='$banner' fileVersion='$fileVersion'"
           }
 
       - name: Build Windows installer
