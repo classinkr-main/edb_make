@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+
+import pytest
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -126,6 +129,7 @@ def test_preprocess_discovers_standard_windows_office_and_browser_installs() -> 
     assert [str(chrome)] in browsers
 
 
+@pytest.mark.skipif(not sys.platform.startswith("win"), reason="%VAR% expansion for tool paths only happens on Windows")
 def test_preprocess_expands_quoted_windows_executable_env_path() -> None:
     with TemporaryDirectory() as raw_tmp:
         root = Path(raw_tmp) / "한글 도구"
