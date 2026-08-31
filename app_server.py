@@ -4688,10 +4688,14 @@ def _make_crop_filename(problem_id: str, suffix: str) -> str:
 
 
 def _crop_refreshes_board_render(problem: dict[str, Any]) -> bool:
+    # Every step except s1 ("keep the original paper look") presents the
+    # chalk render on the board, so a re-crop must rebuild it — otherwise the
+    # cropped problem falls back to the raw crop and shows its white paper
+    # background on the dark board.
     step = _normalize_processing_step(
         str(problem.get("step") or problem.get("processingStep") or problem.get("processing_step") or "raw")
     )
-    return step in {"s2", "s3"}
+    return step in {"raw", "s2", "s3"}
 
 
 def _render_board_crop_from_raw(
