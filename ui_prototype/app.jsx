@@ -2551,6 +2551,10 @@ function ReviewStage({
   }, [problemsById]);
 
   const onBoxClick = (probId, evt) => {
+    if (suppressReviewBoxClickRef.current) {
+      suppressReviewBoxClickRef.current = false;
+      return;
+    }
     if (manualSplit) return;
     if (boxEdit) {
       evt.preventDefault();
@@ -3519,6 +3523,44 @@ function ReviewStage({
       moved: false,
     };
   };
+  // Direct crop: drag a rectangle anywhere on a review page (no edit mode
+  // needed) and the most-overlapped problem is re-cropped to that box on
+  // release. A short drag (< threshold) still behaves as a plain click.
+  const suppressReviewBoxClickRef = useRef(false);
+  const beginDirectCropDraw = (evt, page, pageProblems) => {
+    if (evt.button !== 0 || boxEdit || manualSplit || mutating) return;
+    if (!evt.currentTarget?.getBoundingClientRect) return;
+    evt.preventDefault();
+    const rect = evt.currentTarget.getBoundingClientRect();
+    const startPoint = manualSplitPointFromClient(evt.clientX, evt.clientY, page, rect);
+    const candidates = (pageProblems || [])
+      .filter(prob => prob?.id && prob?.bbox?.width && prob?.bbox?.height)
+      .map(prob => ({ id: prob.id, bbox: { ...prob.bbox } }));
+    boxEditDragRef.current = {
+      mode: 'draw-direct-crop',
+      page,
+      rect,
+      startPoint,
+      startX: evt.clientX,
+      startY: evt.clientY,
+      moved: false,
+      applyDirectCrop: (box) => {
+        let target = null;
+        let bestArea = 0;
+        for (const prob of candidates) {
+          const b = prob.bbox;
+          const ix = Math.max(0, Math.min(b.left + b.width, box.left + box.width) - Math.max(b.left, box.left));
+          const iy = Math.max(0, Math.min(b.top + b.height, box.top + box.height) - Math.max(b.top, box.top));
+          const area = ix * iy;
+          if (area > bestArea) { bestArea = area; target = prob; }
+        }
+        if (!target) return;
+        if (setActive) setActive(target.id);
+        setSelectedIds(new Set([target.id]));
+        void mutateSession?.('crop', { problemId: target.id, cropBox: box });
+      },
+    };
+  };
   const beginBoxDrag = (evt, mode, page, segmentId = null) => {
     if (!boxEdit?.box || evt.button !== 0) return;
     evt.preventDefault();
@@ -3772,7 +3814,7 @@ function ReviewStage({
     const onMove = (evt) => {
       const drag = boxEditDragRef.current;
       if (!drag) return;
-      if (drag.mode === 'draw-segment') {
+      if (drag.mode === 'draw-segment' || drag.mode === 'draw-direct-crop') {
         const point = manualSplitPointFromClient(evt.clientX, evt.clientY, drag.page, drag.rect);
         const bbox = manualSplitBoxFromPoints(drag.startPoint, point, drag.page);
         drag.latestBox = bbox;
@@ -3827,6 +3869,19 @@ function ReviewStage({
     };
     const onUp = () => {
       const drag = boxEditDragRef.current;
+      if (drag?.mode === 'draw-direct-crop') {
+        const box = drag.latestBox;
+        // Require a deliberate drag (threshold + minimum source-pixel size)
+        // so plain clicks keep selecting problems.
+        if (drag.moved && box && box.width >= 24 && box.height >= 24) {
+          suppressReviewBoxClickRef.current = true;
+          window.setTimeout(() => { suppressReviewBoxClickRef.current = false; }, 0);
+          drag.applyDirectCrop?.(box);
+        }
+        setBoxEditDraftBox(null);
+        boxEditDragRef.current = null;
+        return;
+      }
       if (drag?.mode === 'draw-segment') {
         if (drag.moved && drag.latestBox) {
           const id = `manual-passage-segment-${boxEditSeqRef.current++}`;
@@ -4823,10 +4878,12 @@ function ReviewStage({
                   <div className={`box-edit-layout ${boxEdit?.pageId === page.id ? 'is-open' : ''}`}>
                     <ReviewCanvasZoomShell>
                       <div
-                        className={`review-page-canvas ${boxEdit?.multi && boxEdit.addingSegment ? 'adding-passage-segment' : ''}`}
+                        className={`review-page-canvas ${boxEdit?.multi && boxEdit.addingSegment ? 'adding-passage-segment' : ''} ${!boxEdit && !manualSplit ? 'direct-crop-armed' : ''}`}
                         onMouseDown={boxEdit?.multi && boxEdit.addingSegment
                           ? (evt) => beginBoxSegmentDraw(evt, page)
-                          : undefined}
+                          : (!boxEdit && !manualSplit
+                              ? (evt) => beginDirectCropDraw(evt, page, canvasProblems)
+                              : undefined)}
                       >
                     {page.sourceImageUri ? (
                       <img
