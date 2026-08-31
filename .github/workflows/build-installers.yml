@@ -502,29 +502,29 @@ jobs:
           WINDOWS_DOWNLOAD_URL: ${{ inputs.windows_download_url }}
           RELEASE_NOTES_URL: ${{ inputs.release_notes_url }}
         run: |
-          # Optional URLs are appended only when set: empty step env vars are
-          # unset on Windows ($null), and $null elements shift array-splatted
-          # parameter binding, which once landed "" in -OutputDir and tripped
-          # the unsafe-output guard.
-          $packageArgs = @(
-            "-Clean",
-            "-OutputDir", "dist",
-            "-Version", $env:RELEASE_VERSION
-          )
-          if ($env:UPDATE_FEED_URL) { $packageArgs += @("-UpdateFeedUrl", $env:UPDATE_FEED_URL) }
-          if ($env:WINDOWS_DOWNLOAD_URL) { $packageArgs += @("-DownloadUrl", $env:WINDOWS_DOWNLOAD_URL) }
-          if ($env:RELEASE_NOTES_URL) { $packageArgs += @("-ReleaseNotesUrl", $env:RELEASE_NOTES_URL) }
+          # Hashtable splatting: array splatting bound these tokens
+          # positionally in this runner's pwsh, which landed the version
+          # string in -OutputDir and tripped the unsafe-output guard.
+          $packageArgs = @{
+            Clean = $true
+            OutputDir = "dist"
+            Version = $env:RELEASE_VERSION
+          }
+          if ($env:UPDATE_FEED_URL) { $packageArgs.UpdateFeedUrl = $env:UPDATE_FEED_URL }
+          if ($env:WINDOWS_DOWNLOAD_URL) { $packageArgs.DownloadUrl = $env:WINDOWS_DOWNLOAD_URL }
+          if ($env:RELEASE_NOTES_URL) { $packageArgs.ReleaseNotesUrl = $env:RELEASE_NOTES_URL }
 
           $certificatePath = ""
           if ($env:WINDOWS_CERTIFICATE_PFX_BASE64) {
             $certificatePath = Join-Path $env:RUNNER_TEMP "windows-signing.pfx"
             [System.IO.File]::WriteAllBytes($certificatePath, [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
-            $packageArgs += @("-Sign", "-SignCertificatePath", $certificatePath)
+            $packageArgs.Sign = $true
+            $packageArgs.SignCertificatePath = $certificatePath
             if ($env:WINDOWS_CERTIFICATE_PASSWORD) {
-              $packageArgs += @("-SignCertificatePassword", $env:WINDOWS_CERTIFICATE_PASSWORD)
+              $packageArgs.SignCertificatePassword = $env:WINDOWS_CERTIFICATE_PASSWORD
             }
             if ($env:WINDOWS_SIGN_TIMESTAMP_URL) {
-              $packageArgs += @("-SignTimestampUrl", $env:WINDOWS_SIGN_TIMESTAMP_URL)
+              $packageArgs.SignTimestampUrl = $env:WINDOWS_SIGN_TIMESTAMP_URL
             }
           } elseif ($env:PRODUCTION_RELEASE -eq "true") {
             throw "Production release requires WINDOWS_CERTIFICATE_PFX_BASE64."

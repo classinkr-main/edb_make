@@ -2168,6 +2168,34 @@ def _map_source_media_regions_to_crop(
     return mapped
 
 
+# A media region is pasted back opaquely only when it looks like real media
+# (photo, shading, colour). Plain dark-line-on-white figures — graphs,
+# geometry, physics diagrams — read better as chalk strokes, and preserving
+# them reintroduces an opaque white box on the dark board.
+MEDIA_LINE_ART_MAX_COLOR_FRACTION = 0.05
+MEDIA_LINE_ART_MIN_BRIGHT_FRACTION = 0.45
+MEDIA_LINE_ART_MAX_MIDTONE_FRACTION = 0.18
+
+
+def _media_patch_is_line_art(patch: Image.Image) -> bool:
+    if patch.width < 8 or patch.height < 8:
+        return False
+    sample = patch.convert("RGB")
+    sample.thumbnail((160, 160))
+    total = max(1, sample.width * sample.height)
+    saturation_histogram = sample.convert("HSV").getchannel("S").histogram()
+    colorful_fraction = sum(saturation_histogram[64:]) / total
+    if colorful_fraction > MEDIA_LINE_ART_MAX_COLOR_FRACTION:
+        return False
+    luminance_histogram = sample.convert("L").histogram()
+    bright_fraction = sum(luminance_histogram[231:]) / total
+    midtone_fraction = sum(luminance_histogram[100:221]) / total
+    return (
+        bright_fraction >= MEDIA_LINE_ART_MIN_BRIGHT_FRACTION
+        and midtone_fraction <= MEDIA_LINE_ART_MAX_MIDTONE_FRACTION
+    )
+
+
 def _apply_selective_media_preservation(
     rendered: Image.Image,
     source_crop: Image.Image,
@@ -2203,6 +2231,8 @@ def _apply_selective_media_preservation(
         if target_size[0] <= 0 or target_size[1] <= 0:
             continue
         patch = source.crop(source_box)
+        if _media_patch_is_line_art(patch):
+            continue
         if patch.size != target_size:
             patch = patch.resize(target_size, Image.Resampling.LANCZOS)
         output.paste(patch, (target_box[0], target_box[1]))
