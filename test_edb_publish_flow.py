@@ -1602,8 +1602,8 @@ class TestEdbPublishFlow(unittest.TestCase):
                 entry = self._make_problem_entry(root, f"normal-{index:02d}", Box(0, 0, 640, 640))
                 entry.actual_height_pages = 0.72
                 entries.append(entry)
-            long_entry = self._make_problem_entry(root, "long-40", Box(0, 0, 640, 720))
-            long_entry.actual_height_pages = 1.21
+            long_entry = self._make_problem_entry(root, "long-40", Box(0, 0, 640, 960))
+            long_entry.actual_height_pages = 1.6
             entries.append(long_entry)
 
             self.assertAlmostEqual(50.4, problem_board._entries_flow_end_pages(entries, template))
@@ -1611,6 +1611,32 @@ class TestEdbPublishFlow(unittest.TestCase):
             chunks = split_problem_entries_for_classin_page_limit(entries, template)
 
             self.assertEqual([40, 1], [len(chunk) for chunk in chunks])
+
+    def test_classin_slight_overflow_fits_single_slot_without_split(self):
+        # A problem barely taller than one visible page (1.2) shrinks to fit
+        # its slot instead of reserving a second, mostly-empty page.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template = LayoutTemplate(
+                name="academy-default",
+                board_page_count=80,
+                base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+            )
+            entries = []
+            for index in range(40):
+                entry = self._make_problem_entry(root, f"normal-{index:02d}", Box(0, 0, 640, 640))
+                entry.actual_height_pages = 0.72
+                entries.append(entry)
+            slight_entry = self._make_problem_entry(root, "slight-40", Box(0, 0, 640, 726))
+            slight_entry.actual_height_pages = 1.21
+            slight_entry.overflow_allowed = False
+            entries.append(slight_entry)
+
+            self.assertAlmostEqual(49.2, problem_board._entries_flow_end_pages(entries, template))
+
+            chunks = split_problem_entries_for_classin_page_limit(entries, template)
+
+            self.assertEqual([41], [len(chunk) for chunk in chunks])
 
     def test_problem_export_writes_real_split_edbs_with_fifty_page_hints(self):
         with tempfile.TemporaryDirectory() as tmp:

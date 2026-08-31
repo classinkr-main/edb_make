@@ -465,7 +465,7 @@ class TestUiReorderHelper(unittest.TestCase):
 
             const reflowed = sandbox.reflowItemsForBoardOrder([
               { id: 'p1', heightFrac: 0.5, placementScaleRatio: 1.0 },
-              { id: 'p2', heightFrac: 1.4, placementScaleRatio: 1.0 },
+              { id: 'p2', heightFrac: 1.4, placementScaleRatio: 1.0, overflowAllowed: true },
               { id: 'p3', heightFrac: 0.7, placementScaleRatio: 1.0 },
             ], 1.2, 2);
 
@@ -549,7 +549,7 @@ class TestUiReorderHelper(unittest.TestCase):
 
             const reflowed = sandbox.reflowItemsForBoardOrder([
               { id: 'short-before', heightFrac: 0.8, placementScaleRatio: 1 },
-              { id: 'long', heightFrac: 1.43, placementScaleRatio: 1 },
+              { id: 'long', heightFrac: 1.43, placementScaleRatio: 1, overflowAllowed: true },
               { id: 'short-after', heightFrac: 0.8, placementScaleRatio: 1 },
             ]);
             const starts = reflowed.map(item => item.startYPages);
@@ -558,6 +558,18 @@ class TestUiReorderHelper(unittest.TestCase):
             }
             if (reflowed[1].renderedBottomYPages !== 2.63) {
               throw new Error(`long problem bottom should remain 2.63p, got ${reflowed[1].renderedBottomYPages}`);
+            }
+
+            // Without the overflow marker the same problem now shrinks into a
+            // single slot so the following problem starts one page earlier.
+            const fitted = sandbox.reflowItemsForBoardOrder([
+              { id: 'short-before', heightFrac: 0.8, placementScaleRatio: 1 },
+              { id: 'long', heightFrac: 1.43, placementScaleRatio: 1 },
+              { id: 'short-after', heightFrac: 0.8, placementScaleRatio: 1 },
+            ]);
+            const fittedStarts = fitted.map(item => item.startYPages);
+            if (JSON.stringify(fittedStarts) !== JSON.stringify([0, 1.2, 2.4])) {
+              throw new Error(`expected fitted stair-step [0,1.2,2.4], got ${JSON.stringify(fittedStarts)}`);
             }
             """
         )
@@ -601,7 +613,7 @@ class TestUiReorderHelper(unittest.TestCase):
             """
         )
 
-    def test_board_reflow_auto_scale_uses_six_percent_reduction_cutoff(self) -> None:
+    def test_board_reflow_auto_scale_uses_twenty_percent_reduction_cutoff(self) -> None:
         run_node(
             r"""
             const fs = require('fs');
@@ -629,10 +641,10 @@ class TestUiReorderHelper(unittest.TestCase):
             }
 
             const outsideCutoff = sandbox.reflowItemsForBoardOrder([
-              { id: 'outside-cutoff', heightFrac: 6.407, placementScaleRatio: 1 },
+              { id: 'outside-cutoff', heightFrac: 1.55, placementScaleRatio: 1 },
             ])[0];
-            if (outsideCutoff.placementScaleRatio !== 1 || outsideCutoff.snappedNextStartYPages !== 7.2) {
-              throw new Error(`6.35% reduction should keep its scale and next slot: ${JSON.stringify(outsideCutoff)}`);
+            if (outsideCutoff.placementScaleRatio !== 1 || outsideCutoff.snappedNextStartYPages !== 2.4) {
+              throw new Error(`22.6% reduction should keep its scale and next slot: ${JSON.stringify(outsideCutoff)}`);
             }
 
             const alreadyAligned = sandbox.reflowItemsForBoardOrder([

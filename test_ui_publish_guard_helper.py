@@ -18,7 +18,8 @@ def run_node(script: str) -> None:
 class TestUiPublishGuardHelper(unittest.TestCase):
     def test_one_problem_flow_uses_same_absolute_12_grid_across_layers(self) -> None:
         heights = [0.8, 1.43, 0.8]
-        expected_starts = [0.0, 1.2, 3.6]
+        # 1.43 now auto-fits into a single 1.2p slot (fit-to-slot shrink).
+        expected_starts = [0.0, 1.2, 2.4]
         placements = place_problems(
             [
                 ProblemLayoutInput(
@@ -54,7 +55,7 @@ class TestUiPublishGuardHelper(unittest.TestCase):
               heightFrac,
               placementScaleRatio: 1,
             }));
-            const expectedStarts = [0, 1.2, 3.6];
+            const expectedStarts = [0, 1.2, 2.4];
             const startsFor = placements => placements.map(item => Number(item.startYPages.toFixed(6)));
             const uiStarts = startsFor(sandbox.reflowItemsForBoardOrder(items, 1.2, 1));
             const guardStarts = startsFor(simulatedBoardPlacements(items, { slotHeightPages: 1.2 }));
@@ -104,26 +105,26 @@ class TestUiPublishGuardHelper(unittest.TestCase):
             }
 
             const farItems = [
-              { id: 'far', heightFrac: 2.72, placementScaleRatio: 1 },
+              { id: 'far', heightFrac: 3.2, placementScaleRatio: 1 },
               { id: 'after-far', heightFrac: 0.8, placementScaleRatio: 1 },
             ];
             const farUi = sandbox.reflowItemsForBoardOrder(farItems, 1.2, 1);
             const farGuard = simulatedBoardPlacements(farItems, { slotHeightPages: 1.2 });
             if (JSON.stringify(startsFor(farUi)) !== JSON.stringify([0, 3.6])) {
-              throw new Error(`UI incorrectly shrank 2.72p to 2.4p: ${JSON.stringify(farUi)}`);
+              throw new Error(`UI incorrectly shrank 3.2p to 2.4p: ${JSON.stringify(farUi)}`);
             }
             if (JSON.stringify(startsFor(farGuard)) !== JSON.stringify(startsFor(farUi))) {
               throw new Error(`guard far-boundary flow mismatch: ${JSON.stringify(farGuard)}`);
             }
             if (farGuard[0].requestedScale !== 1) {
-              throw new Error(`guard exceeded the 6% auto-scale tolerance: ${JSON.stringify(farGuard[0])}`);
+              throw new Error(`guard exceeded the 20% auto-scale tolerance: ${JSON.stringify(farGuard[0])}`);
             }
 
-            const sixPercentCases = [
+            const cutoffCases = [
               { heightFrac: 6.21, expectedStarts: [0, 6] },
-              { heightFrac: 6.407, expectedStarts: [0, 7.2] },
+              { heightFrac: 1.55, expectedStarts: [0, 2.4] },
             ];
-            for (const testCase of sixPercentCases) {
+            for (const testCase of cutoffCases) {
               const items = [
                 { id: `boundary-${testCase.heightFrac}`, heightFrac: testCase.heightFrac, placementScaleRatio: 1 },
                 { id: `after-${testCase.heightFrac}`, heightFrac: 0.8, placementScaleRatio: 1 },

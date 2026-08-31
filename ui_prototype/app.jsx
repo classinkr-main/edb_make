@@ -296,7 +296,7 @@ const DEFAULT_PLACEMENT_SCALE_RATIO = 1;
 const PLACEMENT_SCALE_MIN = 0.6;
 const PLACEMENT_SCALE_MAX = 1.6;
 const PLACEMENT_FIT_WIDTH_SCALE_RATIO = 3.0;
-const AUTO_SCALE_MAX_REDUCTION_RATIO = 0.06;
+const AUTO_SCALE_MAX_REDUCTION_RATIO = 0.2;
 const PLACEMENT_NUDGE_STEP = 0.04;
 const PLACEMENT_SCALE_STEP = 0.05;
 const ADJACENT_RETRY_PADDING_RATIO = 0.16;
@@ -637,6 +637,17 @@ function itemRenderedHeightPages(item, scaleRatio = item?.placementScaleRatio){
   return heightPages * scale;
 }
 
+function itemAllowsOverflow(item){
+  // Mirrors the backend rule: explicitly-allowed overflow content (Korean
+  // passages, reading-heavy sets) keeps its natural height instead of being
+  // auto-scaled into a single slot.
+  return Boolean(
+    item?.overflowAllowed
+    ?? item?.overflow_allowed
+    ?? (item?.readingHeavy || item?.reading_heavy)
+  );
+}
+
 function scaleNearPreviousSlotBoundary(item, startPages, slotHeight = DEFAULT_SLOT_HEIGHT_PAGES){
   const currentScale = normalizePlacementScaleRatio(
     item?.placementScaleRatio ?? item?.placement_scale_ratio,
@@ -645,6 +656,7 @@ function scaleNearPreviousSlotBoundary(item, startPages, slotHeight = DEFAULT_SL
   if (
     !item
     || itemUsesContinuousPageFlow(item)
+    || itemAllowsOverflow(item)
     || currentScale < DEFAULT_PLACEMENT_SCALE_RATIO
     || currentScale > PLACEMENT_SCALE_MAX
     || !Number.isFinite(slotHeight)

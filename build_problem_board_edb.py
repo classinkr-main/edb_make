@@ -332,23 +332,43 @@ def _problem_scale_ratio(
         if ignore_height_limit or _entry_preserves_legacy_placement_scale(entry)
         else PLACEMENT_SCALE_MAX
     )
+    fit_to_slot = _placement_fit_to_slot_scale(placement)
     requested = _clamp_placement_scale_ratio(entry.placement_scale_ratio, allowed_max)
     if requested is None:
-        return 1.0
+        if fit_to_slot is None:
+            return 1.0
+        requested = 1.0
     max_width_scale = (CANVAS_HEIGHT - LEFT_MARGIN_PX - RIGHT_PADDING_PX) / max(rendered_width_px, 1.0)
     if ignore_height_limit:
         max_scale = max(PLACEMENT_SCALE_MIN, min(PLACEMENT_FIT_WIDTH_SCALE_MAX, max_width_scale))
         return max(PLACEMENT_SCALE_MIN, min(max_scale, requested))
-    slot_height_px = max(
-        rendered_height_px,
-        (placement.snapped_next_start_y_pages - placement.start_y_pages) * CANVAS_WIDTH,
-    )
+    slot_span_px = (placement.snapped_next_start_y_pages - placement.start_y_pages) * CANVAS_WIDTH
+    if fit_to_slot is not None:
+        # The placement reserved a single slot for content that is slightly
+        # taller than one visible page; shrink the render so it truly fits
+        # (including the top padding offset) instead of bleeding into the
+        # next problem's page.
+        slot_height_px = max(1.0, slot_span_px - TOP_PADDING_PX)
+    else:
+        slot_height_px = max(rendered_height_px, slot_span_px)
     max_height_scale = slot_height_px / max(rendered_height_px, 1.0)
     max_scale = max(
         PLACEMENT_SCALE_MIN,
         min(allowed_max, max_width_scale, max_height_scale),
     )
     return max(PLACEMENT_SCALE_MIN, min(max_scale, requested))
+
+
+def _placement_fit_to_slot_scale(placement: "ProblemPlacement") -> float | None:
+    metadata = getattr(placement, "metadata", None) or {}
+    for key in ("fit_to_slot_scale", "fitToSlotScale"):
+        value = metadata.get(key)
+        try:
+            if value is not None and 0.0 < float(value) <= 1.0:
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _entry_uses_continuous_page_flow(entry: "ProblemEntry") -> bool:

@@ -10,6 +10,11 @@ from structured_schema import PageModel, ProblemUnit, Subject
 
 EPSILON = 1e-9
 CONTINUOUS_PLACEMENT_MODES = {"continuous", "continuous-page-as-is"}
+# One board slot equals one visible ClassIn page (16:9). Problems that spill
+# only slightly past a slot boundary would otherwise reserve a second slot and
+# leave an almost-empty page between problems, so shrink them to fit as long
+# as the required scale stays readable.
+FIT_TO_SLOT_MIN_SCALE = 0.8
 
 
 def snap_up_to_slot(value_pages: float, base_slot_height_pages: float) -> float:
@@ -79,6 +84,26 @@ def _rendered_flow_height_pages(
     return max(actual_height_pages, actual_height_pages * scale_ratio)
 
 
+def _fit_to_slot_scale(
+    flow_height_pages: float,
+    slot_height_pages: float,
+    *,
+    continuous: bool,
+) -> float | None:
+    """Scale factor that squeezes a slightly-overflowing problem into one slot.
+
+    Returns None when the problem already fits, is continuous-flow, or would
+    need to shrink below FIT_TO_SLOT_MIN_SCALE to fit (genuinely tall content
+    keeps its multi-slot reservation).
+    """
+    if continuous or slot_height_pages <= 0 or flow_height_pages <= slot_height_pages + EPSILON:
+        return None
+    scale = slot_height_pages / flow_height_pages
+    if scale < FIT_TO_SLOT_MIN_SCALE:
+        return None
+    return round(scale, 6)
+
+
 def resolve_overflow_allowed(problem: ProblemLayoutInput, template: LayoutTemplate) -> bool:
     if problem.overflow_allowed is not None:
         return problem.overflow_allowed
@@ -108,7 +133,29 @@ def place_problem(
     )
     overflow_allowed = resolve_overflow_allowed(problem, template)
 
-    actual_bottom_y_pages = round(start_y_pages + actual_height_pages, 6)
+    force_full_page_bounds = _metadata_bool(
+        problem.metadata or {},
+        "force_full_page_bounds",
+        "forceFullPageBounds",
+    )
+    fit_to_slot_scale = (
+        None
+        if overflow_allowed or force_full_page_bounds
+        else _fit_to_slot_scale(
+            flow_height_pages,
+            nominal_slot_height_pages,
+            continuous=continuous,
+        )
+    )
+    if fit_to_slot_scale is not None:
+        flow_height_pages = nominal_slot_height_pages
+
+    actual_bottom_y_pages = round(
+        start_y_pages + min(actual_height_pages, flow_height_pages)
+        if fit_to_slot_scale is not None
+        else start_y_pages + actual_height_pages,
+        6,
+    )
     snapped_next_start_y_pages = (
         round(start_y_pages + flow_height_pages, 6)
         if continuous
@@ -125,6 +172,11 @@ def place_problem(
     )
     board_capacity_exceeded = max(actual_bottom_y_pages, snapped_next_start_y_pages) > template.board_page_count
 
+    placement_metadata = dict(problem.metadata)
+    if fit_to_slot_scale is not None:
+        placement_metadata["fit_to_slot_scale"] = fit_to_slot_scale
+        placement_metadata["fitToSlotScale"] = fit_to_slot_scale
+
     return ProblemPlacement(
         problem_id=problem.problem_id,
         subject=problem.subject,
@@ -138,7 +190,7 @@ def place_problem(
         overflow_violation=overflow_violation,
         slot_span_count=slot_span_count,
         board_capacity_exceeded=board_capacity_exceeded,
-        metadata=dict(problem.metadata),
+        metadata=placement_metadata,
     )
 
 

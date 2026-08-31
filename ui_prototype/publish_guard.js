@@ -12,7 +12,7 @@
   const PLACEMENT_SCALE_MIN = 0.6;
   const PLACEMENT_SCALE_MAX = 1.6;
   const PLACEMENT_FIT_WIDTH_SCALE_MAX = 3.0;
-  const AUTO_SCALE_MAX_REDUCTION_RATIO = 0.06;
+  const AUTO_SCALE_MAX_REDUCTION_RATIO = 0.2;
   const MIN_HEIGHT_PAGES = 0.12;
   const OVERLAP_TOLERANCE_PAGES = 0.01;
   const SOURCE_BBOX_OVERLAP_RATIO = 0.65;
@@ -137,6 +137,17 @@
     return placementMode === "continuous" || placementMode === "continuous-page-as-is";
   }
 
+  function itemAllowsOverflow(item) {
+    // Mirrors the backend rule: overflow-allowed content (Korean passages,
+    // reading-heavy sets) keeps its natural height instead of being
+    // auto-scaled into a single slot.
+    return Boolean(
+      item?.overflowAllowed
+      ?? item?.overflow_allowed
+      ?? (item?.readingHeavy || item?.reading_heavy)
+    );
+  }
+
   function scaleNearPreviousBoundary(startYPages, heightPages, scaleRatio, slotHeightPages) {
     if (scaleRatio < DEFAULT_SCALE_RATIO || slotHeightPages <= 0) return scaleRatio;
     const renderedBottomYPages = startYPages + heightPages * scaleRatio;
@@ -189,7 +200,7 @@
           firstNumber(item, ["placementScaleRatio", "placement_scale_ratio", "scaleRatio"], DEFAULT_SCALE_RATIO)
         )
       );
-      const requestedScale = continuous || preserveLegacyScale
+      const requestedScale = continuous || preserveLegacyScale || itemAllowsOverflow(item)
         ? normalizedScale
         : scaleNearPreviousBoundary(startYPages, heightPages, normalizedScale, slotHeightPages);
       const renderedHeightPages = heightPages * requestedScale;
