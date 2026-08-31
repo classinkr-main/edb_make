@@ -10928,6 +10928,16 @@ def main() -> int:
     parser.add_argument("--no-open-browser", dest="open_browser", action="store_false", help="Do not open the default browser")
     parser.add_argument("--log-file", default="", help="Write stdout/stderr to this file")
     args = parser.parse_args()
+    # Console output must survive non-UTF-8 terminals (Windows cp1252/cp949):
+    # artifact names are Korean and a bare print() would otherwise kill the
+    # process with UnicodeEncodeError before logging is even configured.
+    for console_stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(console_stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
     ensure_runtime_dirs()
     if args.log_file or is_frozen_app():
         configure_app_logging(args.log_file or None)
