@@ -542,11 +542,6 @@ jobs:
 
       - name: Verify portable and installed Windows launch smoke
         shell: pwsh
-        env:
-          # The verifier prints Korean artifact names; the runner console
-          # defaults to cp1252 and UnicodeEncodeError kills the check.
-          PYTHONUTF8: "1"
-          PYTHONIOENCODING: "utf-8"
         run: |
           $ErrorActionPreference = "Stop"
 
@@ -670,6 +665,10 @@ jobs:
           UPDATE_FEED_URL: ${{ inputs.update_feed_url }}
           WINDOWS_DOWNLOAD_URL: ${{ inputs.windows_download_url }}
           RELEASE_NOTES_URL: ${{ inputs.release_notes_url }}
+          # The verifier prints Korean artifact names; the runner console
+          # defaults to cp1252 and UnicodeEncodeError kills the check.
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
 
       - name: Enforce public Windows Authenticode trust policy
         if: inputs.production_release
