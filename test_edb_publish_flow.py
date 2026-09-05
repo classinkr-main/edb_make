@@ -38,6 +38,7 @@ from build_problem_board_edb import (
     _pad_problem_crop_edges,
     _pad_problem_crop_bottom,
     _hwp_conversion_has_pdf_problem_markers,
+    _trim_bottom_blue_watermark,
     _trim_edge_vertical_guides,
     _trim_source_page_chrome,
     _trim_text_priority_bottom_page_badge,
@@ -6552,6 +6553,31 @@ class TestEdbPublishFlow(unittest.TestCase):
         self.assertGreater(cleaned.width, 650)
         self.assertGreater(cleaned.height, 900)
         self.assertEqual(cleaned.getpixel((8, cleaned.height - 8)), (255, 255, 255))
+
+    def test_bottom_blue_watermark_ignores_vertical_guide_column(self):
+        # A cyan column divider swallowed by horizontal crop expansion runs the
+        # full height of the crop. It must not be mistaken for the blue footer,
+        # which previously chopped the answer row off every textbook problem.
+        image = Image.new("RGB", (820, 913), "white")
+        draw = ImageDraw.Draw(image)
+        draw.text((64, 80), "1. problem body", fill="black")
+        draw.text((64, 860), "1 2 3 4 5", fill="black")
+        draw.rectangle((814, 0, 818, 912), fill=(90, 200, 235))
+
+        cleaned = _trim_bottom_blue_watermark(image)
+
+        self.assertEqual(cleaned.size, image.size)
+
+    def test_bottom_blue_watermark_still_trims_horizontal_footer(self):
+        image = Image.new("RGB", (820, 913), "white")
+        draw = ImageDraw.Draw(image)
+        draw.text((64, 80), "1. problem body", fill="black")
+        draw.text((120, 872), "이 문제지에 관한 저작권은 한국교육과정평가원에 있습니다.", fill=(30, 70, 250))
+
+        cleaned = _trim_bottom_blue_watermark(image)
+
+        self.assertLess(cleaned.height, 872)
+        self.assertGreater(cleaned.height, int(913 * 0.72))
 
     def test_trusted_pdf_marker_crop_trims_column_divider_and_footer_badge(self):
         with tempfile.TemporaryDirectory() as tmp:

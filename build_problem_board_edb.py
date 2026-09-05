@@ -459,6 +459,10 @@ BOTTOM_WATERMARK_SCAN_RATIO = 0.22
 BOTTOM_WATERMARK_MIN_Y_RATIO = 0.82
 BOTTOM_WATERMARK_BLUE_DELTA = 22
 BOTTOM_WATERMARK_TRIM_PADDING_PX = 10
+# A column whose blue pixels span nearly the whole scan band is a vertical
+# page guide (e.g. a colored column divider swallowed by horizontal crop
+# expansion), not the horizontal copyright footer this trim targets.
+BOTTOM_WATERMARK_GUIDE_COLUMN_FILL_RATIO = 0.9
 CORNER_PAGE_BADGE_SCAN_RATIO = 0.18
 CORNER_PAGE_BADGE_SCAN_MAX_PX = 180
 CORNER_PAGE_BADGE_EDGE_SEED_PX = 10
@@ -702,6 +706,11 @@ def _trim_bottom_blue_watermark(image: Image.Image) -> Image.Image:
             & (blue >= green + 8)
             & (saturation >= 32)
         )
+        band_height = int(blue_mask.shape[0])
+        guide_column_min_rows = max(1, int(round(band_height * BOTTOM_WATERMARK_GUIDE_COLUMN_FILL_RATIO)))
+        guide_columns = np.count_nonzero(blue_mask, axis=0) >= guide_column_min_rows
+        if bool(guide_columns.any()):
+            blue_mask = blue_mask & ~guide_columns[np.newaxis, :]
         if int(np.count_nonzero(blue_mask)) < max(18, int(round(width * height * 0.00035))):
             return image
         rows = np.where(np.count_nonzero(blue_mask, axis=1) >= max(4, int(round(width * 0.006))))[0]
@@ -711,18 +720,33 @@ def _trim_bottom_blue_watermark(image: Image.Image) -> Image.Image:
     else:
         pixels = rgb.load()
         min_row_blue_count = max(4, int(round(width * 0.006)))
+
+        def is_blue(x: int, y: int) -> bool:
+            red, green, blue = pixels[x, y]
+            saturation = max(red, green, blue) - min(red, green, blue)
+            return (
+                blue >= red + BOTTOM_WATERMARK_BLUE_DELTA
+                and blue >= green + 8
+                and saturation >= 32
+            )
+
+        band_height = height - scan_top
+        guide_column_min_rows = max(1, int(round(band_height * BOTTOM_WATERMARK_GUIDE_COLUMN_FILL_RATIO)))
+        column_blue_counts = [0] * width
+        for y in range(scan_top, height):
+            for x in range(width):
+                if is_blue(x, y):
+                    column_blue_counts[x] += 1
+        guide_columns = {x for x, count in enumerate(column_blue_counts) if count >= guide_column_min_rows}
+
         total_blue_count = 0
         first_y: int | None = None
         for y in range(scan_top, height):
             row_blue_count = 0
             for x in range(width):
-                red, green, blue = pixels[x, y]
-                saturation = max(red, green, blue) - min(red, green, blue)
-                if (
-                    blue >= red + BOTTOM_WATERMARK_BLUE_DELTA
-                    and blue >= green + 8
-                    and saturation >= 32
-                ):
+                if x in guide_columns:
+                    continue
+                if is_blue(x, y):
                     row_blue_count += 1
             total_blue_count += row_blue_count
             if first_y is None and row_blue_count >= min_row_blue_count:
