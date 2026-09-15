@@ -1,0 +1,16 @@
+# Vercel deploy manifest for the web trial only (trial_server.py).
+# The desktop app keeps using requirements-*.lock; nothing else reads this file.
+[project]
+name = "edb-parser-trial"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.141.1",
+    "numpy==2.4.6",
+    "opencv-python-headless==4.13.0.92",
+    "Pillow==12.2.0",
+    "PyMuPDF==1.27.2.3",
+]
+
+[tool.vercel]
+entrypoint = "trial_server:app"

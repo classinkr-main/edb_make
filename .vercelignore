@@ -1,0 +1,8 @@
+.venv/
+.app_runtime/
+.pipeline_cache/
+docs/
+reports_worker/
+ui_prototype/vendor/
+release/
+.audit/

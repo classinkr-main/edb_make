@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["icn1"],
+  "functions": {
+    "trial_server.py": {
+      "memory": 2048,
+      "maxDuration": 60,
+      "excludeFiles": "{test_*.py,docs/**,scripts/**,ui_prototype/**,assets/**,quality/**,reports_worker/**,release/**,resources/**,.audit/**,.github/**,**/*.md,**/*.ipynb}"
+    }
+  }
+}
