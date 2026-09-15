@@ -18,7 +18,13 @@ from typing import Any, Callable, Iterable
 
 BENCH_ROOT = Path(os.environ.get("TRIAL_BENCH_ROOT") or Path.home() / "edb-trial-bench")
 MAX_PAGES = 3
-PASSAGE_RANGE = re.compile(r"(\d+)\s*[~∼～\-–]\s*(\d+)")
+# Require the passage marker itself, not just two numbers anywhere in the
+# title: a free-text title ("표는 1-3족 원소의 성질을...") can contain a bare
+# "<digits><sep><digits>" run that has nothing to do with a passage range.
+PASSAGE_RANGE = re.compile(r"(?:지문|passage)\s*(\d+)\s*[~∼～\-–]\s*(\d+)", re.IGNORECASE)
+# A numbered problem's title is normally just its marker ("1.", "12번"); this
+# is the only free-form title shape considered safe to echo back verbatim.
+NUMBER_MARKER_TITLE = re.compile(r"\d+\s*번?\.?")
 
 
 def bench_dir(name: str, root: Path = BENCH_ROOT) -> Path:
@@ -58,26 +64,49 @@ def problem_key(number: int | None, title: str | None) -> str:
     return f"t:{title or ''}"
 
 
+def _safe_title(number: int | None, title: str | None, span: list[int] | None) -> str | None:
+    """Label-only title: a passage marker or a short number marker.
+
+    Anything else is exam text a fallback-grouped or mis-numbered unit can
+    carry (segment.py's ``display_title = text[:120]``), which spec 5-1 says
+    must not appear here, so it is dropped rather than echoed back.
+    """
+    if span:
+        return f"지문 {span[0]}~{span[1]}"
+    if number is not None and title and NUMBER_MARKER_TITLE.fullmatch(title.strip()):
+        return title
+    return None
+
+
 def observation_from_result(case: str, result: Any, *, crops_dir: Path | None = None) -> dict[str, Any]:
     """Privacy-minimized view of a ParseResult: numbers, boxes, flags. No text."""
     page_index = {page.page_id: page.index for page in result.pages}
     problems: list[dict[str, Any]] = []
     passage_ranges: list[list[int]] = []
+    seen_keys: dict[str, int] = {}
     for problem in result.problems:
         key = problem_key(problem.number, problem.title)
+        seen_keys[key] = seen_keys.get(key, 0) + 1
+        if seen_keys[key] > 1:
+            # Unnumbered fallback-grouped units (e.g. every "이어지는 자료"
+            # marker-continuation page) can share the same title and thus the
+            # same key; without this, later entries would silently collapse
+            # onto the first in both this JSON and the crop file on disk.
+            key = f"{key}#{seen_keys[key]}"
         span = None if problem.number is not None else passage_range_from_title(problem.title)
         if span:
             passage_ranges.append(span)
         crop_path: Path | None = None
         if crops_dir is not None:
             crops_dir.mkdir(parents=True, exist_ok=True)
-            crop_path = crops_dir / f"{key.replace(':', '_')}.png"
+            safe_name = re.sub(r"[^\w가-힣.-]+", "_", key).strip("_")[:80] or "problem"
+            crop_path = crops_dir / f"{safe_name}.png"
             problem.image.save(crop_path)
         problems.append(
             {
                 "key": key,
                 "number": problem.number,
-                "title": problem.title,
+                "title": _safe_title(problem.number, problem.title, span),
                 "passage_range": span,
                 "regions": [
                     {

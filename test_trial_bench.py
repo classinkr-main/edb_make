@@ -48,6 +48,13 @@ class TestCommon(unittest.TestCase):
         self.assertIsNone(common.passage_range_from_title("3번"))
         self.assertIsNone(common.passage_range_from_title(None))
 
+    def test_passage_range_requires_the_passage_marker(self):
+        # A bare "<digits><sep><digits>" run in free exam text is not a
+        # passage range: the parser hands us this title verbatim whenever it
+        # cannot number the unit, and it routinely contains ranges like this.
+        self.assertIsNone(common.passage_range_from_title("표는 1-3족 원소의 성질을 나타낸 것이다"))
+        self.assertIsNone(common.passage_range_from_title("2020~2023년 사이의 인구 변화를 나타낸 그래프이다"))
+
     def test_problem_key(self):
         self.assertEqual("q12", common.problem_key(12, "12번"))
         self.assertEqual("p1-3", common.problem_key(None, "지문 1~3"))
@@ -66,7 +73,132 @@ class TestCommon(unittest.TestCase):
         self.assertEqual(0, observation["problems"][0]["regions"][0]["page_index"])
         self.assertEqual({"left": 10.0, "top": 10.0, "width": 200.0, "height": 80.0}, observation["problems"][0]["regions"][0]["bbox"])
         self.assertEqual([[600, 800]], observation["page_sizes"])
-        self.assertNotIn("text", json.dumps(observation, ensure_ascii=False))
+
+    def test_title_drops_free_text_but_keeps_labels(self):
+        # segment.py sets display_title = text[:120] whenever a unit cannot be
+        # numbered or grouped into a passage; that raw exam text must never
+        # reach the observation (spec 5-1: "텍스트는 넣지 않는다"), unlike a
+        # genuine number or passage marker, which is just a short label.
+        sentence = "표는 1-3족 원소의 성질을 비교하여 나타낸 것이다 다음 물음에 답하시오"
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problems = [
+            ParsedProblem(
+                problem_id="q9", number=9, title=sentence,
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=0.0, width=10.0, height=10.0))],
+                risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+            ),
+            ParsedProblem(
+                problem_id="c1", number=None, title="이어지는 자료",
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=20.0, width=10.0, height=10.0))],
+                risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+            ),
+        ]
+        result = ParseResult(pages=[page], problems=problems, source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        observation = common.observation_from_result("case", result)
+        self.assertIsNone(observation["problems"][0]["title"])
+        self.assertIsNone(observation["problems"][1]["title"])
+        self.assertNotIn(sentence, json.dumps(observation, ensure_ascii=False))
+        # The numbered path stays clean: a real marker is not exam text.
+        self.assertEqual("1번", common.observation_from_result(
+            "case",
+            ParseResult(
+                pages=[page],
+                problems=[ParsedProblem(problem_id="q1", number=1, title="1번", regions=[], risk_flags=[], image=Image.new("RGB", (1, 1)))],
+                source_page_count=1, parser_version="dev", timing_ms={"total": 1},
+            ),
+        )["problems"][0]["title"])
+
+    def test_duplicate_fallback_titles_get_unique_keys_and_crops(self):
+        # build_problem_board_edb.py gives every marker-continuation unit the
+        # same constant title ("이어지는 자료"), so the fallback key collides
+        # for any exam with more than one such unit.
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problems = [
+            ParsedProblem(
+                problem_id="c1", number=None, title="이어지는 자료",
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=0.0, width=10.0, height=10.0))],
+                risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+            ),
+            ParsedProblem(
+                problem_id="c2", number=None, title="이어지는 자료",
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=20.0, width=10.0, height=10.0))],
+                risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+            ),
+        ]
+        result = ParseResult(pages=[page], problems=problems, source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            crops_dir = Path(temp_dir) / "crops"
+            observation = common.observation_from_result("case", result, crops_dir=crops_dir)
+            crop_files = sorted(p.name for p in crops_dir.iterdir())
+        keys = [problem["key"] for problem in observation["problems"]]
+        self.assertEqual(2, len(set(keys)))
+        self.assertEqual(2, len(crop_files))
+
+    def test_duplicate_numbers_get_unique_keys_and_crops(self):
+        # A parser mistake that numbers two units the same must not overwrite
+        # the first crop with the second, nor collapse both JSON entries onto
+        # one key (Task 10's expected/trial maps are keyed by "key").
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problems = [
+            ParsedProblem(
+                problem_id="c1", number=3, title="3번",
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=0.0, width=10.0, height=10.0))],
+                risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+            ),
+            ParsedProblem(
+                problem_id="c2", number=3, title="3번",
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=20.0, width=20.0, height=20.0))],
+                risk_flags=[], image=Image.new("RGB", (20, 20), "white"),
+            ),
+        ]
+        result = ParseResult(pages=[page], problems=problems, source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            crops_dir = Path(temp_dir) / "crops"
+            observation = common.observation_from_result("case", result, crops_dir=crops_dir)
+            crop_files = sorted(crops_dir.iterdir())
+            self.assertEqual(2, len(crop_files))
+            with Image.open(crop_files[0]) as first_crop:
+                first_size = first_crop.size
+            with Image.open(crop_files[1]) as second_crop:
+                second_size = second_crop.size
+        self.assertEqual(["q3", "q3#2"], [problem["key"] for problem in observation["problems"]])
+        self.assertEqual((10, 10), first_size)
+        self.assertEqual((20, 20), second_size)
+
+    def test_crop_filename_sanitizes_unsafe_characters(self):
+        # problem.image.save() treats "/" as a directory separator; a raw
+        # fallback title routinely contains one (m/s, g/cm3, A/B, ...).
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problem = ParsedProblem(
+            problem_id="c1", number=None, title="Which of A/B is correct?",
+            regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=0.0, width=10.0, height=10.0))],
+            risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+        )
+        result = ParseResult(pages=[page], problems=[problem], source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            crops_dir = Path(temp_dir) / "crops"
+            common.observation_from_result("case", result, crops_dir=crops_dir)
+            crop_files = list(crops_dir.iterdir())
+        self.assertEqual(1, len(crop_files))
+        self.assertNotIn("/", crop_files[0].name)
+
+    def test_crop_filename_truncates_long_titles(self):
+        # A raw Korean title over ~85 characters is over 255 bytes and would
+        # otherwise raise OSError ENAMETOOLONG when saving the crop.
+        long_title = "가" * 200
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problem = ParsedProblem(
+            problem_id="c1", number=None, title=long_title,
+            regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=0.0, width=10.0, height=10.0))],
+            risk_flags=[], image=Image.new("RGB", (10, 10), "white"),
+        )
+        result = ParseResult(pages=[page], problems=[problem], source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            crops_dir = Path(temp_dir) / "crops"
+            common.observation_from_result("case", result, crops_dir=crops_dir)
+            crop_files = list(crops_dir.iterdir())
+        self.assertEqual(1, len(crop_files))
+        self.assertLessEqual(len(crop_files[0].stem), 80)
 
     def test_percentile_is_nearest_rank(self):
         self.assertEqual(10, common.percentile(range(1, 11), 95))
@@ -76,6 +208,33 @@ class TestCommon(unittest.TestCase):
     def test_markdown_table(self):
         table = common.markdown_table(["a", "b"], [[1, None]])
         self.assertEqual("| a | b |\n|---|---|\n| 1 |  |", table)
+
+
+class TestParseInScratch(unittest.TestCase):
+    def test_copies_into_a_fresh_temp_dir_and_forwards_kwargs(self):
+        captured: dict = {}
+
+        def _spy(src, *, work_dir, max_pages, **kw):
+            # Read the copy's bytes now: parse_in_scratch's temp dir is gone
+            # by the time this call returns to the test.
+            captured.update(source=src, work_dir=work_dir, max_pages=max_pages, source_bytes=src.read_bytes(), extra=kw)
+            return src
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "exam.pdf"
+            source.write_bytes(b"%PDF-1.4 fake exam bytes for the spy to copy")
+            original_bytes = source.read_bytes()
+            common.parse_in_scratch(source, _spy, subject="korean")
+
+            self.assertNotEqual(source, captured["source"])
+            self.assertEqual(original_bytes, captured["source_bytes"])
+            self.assertEqual(captured["source"].parent, captured["work_dir"].parent)
+            self.assertEqual(common.MAX_PAGES, captured["max_pages"])
+            self.assertEqual({"subject": "korean"}, captured["extra"])
+
+        # No .pipeline_cache warm start on a second run: the copy's directory
+        # is cleaned up once parse_in_scratch returns.
+        self.assertFalse(captured["source"].parent.exists())
 
 
 class TestMakeInputs(unittest.TestCase):
@@ -93,10 +252,19 @@ class TestMakeInputs(unittest.TestCase):
     def test_short_documents_are_copied_whole(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "bench"
-            source = _write_pdf(Path(temp_dir) / "short.pdf", page_count=2)
-            target = make_input(source, "science", root=root)
-            with fitz.open(target) as copied:
+            short_source = _write_pdf(Path(temp_dir) / "short.pdf", page_count=2)
+            long_source = _write_pdf(Path(temp_dir) / "긴 시험지.pdf", page_count=5)
+            # Two calls into the same root exercise the cases.json merge
+            # branch (load_json(...) if cases_path.is_file() else {}).
+            short_target = make_input(short_source, "science", root=root)
+            long_target = make_input(long_source, "korean", root=root)
+            with fitz.open(short_target) as copied:
                 self.assertEqual(2, copied.page_count)
+            cases = json.loads((root / "cases.json").read_text(encoding="utf-8"))
+        self.assertEqual({"subject": "science", "source_page_count": 2, "source_name": "short.pdf"}, cases["short"])
+        self.assertEqual({"subject": "korean", "source_page_count": 5, "source_name": "긴 시험지.pdf"}, cases["긴_시험지"])
+        self.assertEqual(root / "inputs" / "short.pdf", short_target)
+        self.assertEqual(root / "inputs" / "긴_시험지.pdf", long_target)
 
 
 if __name__ == "__main__":
