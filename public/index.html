@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>문제 파서 무료 체험 · ClassIn EDB</title>
+  <meta name="description" content="시험지 PDF를 올리면 문항과 지문을 나눠 드려요. 설치 없이 무료로 체험해 보세요.">
+  <link rel="preconnect" href="https://challenges.cloudflare.com">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/trial_logic.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-header__inner">
+      <span class="brand">ClassIn EDB <span class="brand__tag">문제 파서</span></span>
+      <a class="header-link" id="header-inquiry" href="https://classin.co.kr/contact" target="_blank" rel="noopener">프리미엄 도입 문의</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="view view--upload" id="view-upload" aria-labelledby="upload-title">
+      <div class="hero">
+        <p class="eyebrow">무료 체험 · 설치 없이</p>
+        <h1 id="upload-title">시험지를 올리면<br>문항을 나눠 드려요</h1>
+        <p class="lead">글자가 들어 있는 PDF(예: 모의고사 원본)를 올려 보세요. 앞 3쪽의 문항과 지문을 바로 찾아 드려요.</p>
+      </div>
+
+      <label class="dropzone" id="dropzone" for="file-input">
+        <input id="file-input" class="visually-hidden" type="file" accept="application/pdf,.pdf">
+        <span class="dropzone__icon" aria-hidden="true">PDF</span>
+        <span class="dropzone__title">PDF를 끌어놓거나 눌러서 고르세요</span>
+        <span class="dropzone__limits" id="limits-text">앞 3쪽 · 4MB · 하루 3회</span>
+      </label>
+
+      <!-- Not id="turnstile": element ids become window globals and would shadow the Turnstile API. -->
+      <div class="turnstile" id="turnstile-widget"></div>
+      <p class="notice" id="upload-message" role="alert" hidden></p>
+
+      <ul class="assurances">
+        <li>올린 파일은 처리 후 바로 삭제하고 저장하지 않아요</li>
+        <li>스캔본·사진은 <button type="button" class="text-button" data-premium="scan">프리미엄 AI 인식 ✦</button>으로 처리해요</li>
+      </ul>
+    </section>
+
+    <section class="view view--processing" id="view-processing" aria-live="polite" hidden>
+      <div class="spinner" aria-hidden="true"></div>
+      <h2>문항을 찾는 중이에요</h2>
+      <p class="muted" id="processing-file"></p>
+      <p class="muted">보통 5~10초 걸려요 · <span id="processing-elapsed">0초</span></p>
+    </section>
+
+    <section class="view view--result" id="view-result" aria-labelledby="result-title" hidden>
+      <div class="result-head">
+        <div>
+          <h2 id="result-title"></h2>
+          <p class="muted" id="result-meta"></p>
+        </div>
+        <div class="premium-actions" role="group" aria-label="프리미엄 기능">
+          <button type="button" class="premium-button" data-premium="edb">EDB 내보내기 <span aria-hidden="true">✦</span></button>
+          <button type="button" class="premium-button" data-premium="image">이미지 저장 <span aria-hidden="true">✦</span></button>
+          <button type="button" class="premium-button" data-premium="edit">문항 수정 <span aria-hidden="true">✦</span></button>
+        </div>
+      </div>
+
+      <button type="button" class="pages-banner" id="pages-banner" hidden></button>
+
+      <div class="empty-result" id="empty-result" hidden>
+        <p>문항 번호를 찾지 못했어요. 글자가 윤곽선으로 바뀐 PDF이거나 특이한 배치일 수 있어요.</p>
+        <button type="button" class="premium-button" data-premium="ai">AI로 더 정확하게 <span aria-hidden="true">✦</span></button>
+      </div>
+
+      <div class="result-body" id="result-body">
+        <div class="pages" id="pages" aria-label="페이지 미리보기"></div>
+        <ol class="problems" id="problems" aria-label="찾은 문항"></ol>
+      </div>
+
+      <div class="result-foot">
+        <button type="button" class="secondary-button" id="retry-button">다른 파일 해보기</button>
+        <span class="muted" id="remaining-text"></span>
+        <button type="button" class="text-button text-button--accent" data-premium="limit_daily">✦ 프리미엄으로 더 누려보세요 →</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>접속 IP는 하루 이용 횟수 확인에만 쓰이고, 되돌릴 수 없는 형태로 바꿔 보관해요.</p>
+  </footer>
+
+  <dialog class="premium-dialog" id="premium-dialog" aria-labelledby="premium-title">
+    <form method="dialog" class="premium-dialog__inner">
+      <p class="premium-dialog__badge" id="premium-badge">✦ 프리미엄</p>
+      <h2 id="premium-title"></h2>
+      <p id="premium-body"></p>
+      <div class="premium-dialog__actions">
+        <a class="primary-button" id="premium-inquiry" href="https://classin.co.kr/contact" target="_blank" rel="noopener">프리미엄 도입 문의</a>
+        <button class="secondary-button" id="premium-close" value="close">계속 체험하기</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
