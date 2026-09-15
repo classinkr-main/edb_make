@@ -281,6 +281,29 @@ class TestTrialSql(unittest.TestCase):
         self.psql(MIGRATION.read_text(encoding="utf-8"))
         self.assertEqual("t|2|", self.consume("ip-after-rerun"))
 
+    def test_events_accept_timing_instance_detail_and_complexity(self):
+        self.psql(
+            "insert into public.trial_events (kind, status, reject_code, reject_detail, instance_id, timing, complexity) "
+            "values ('parse', 503, 'busy', 'slot_wait', 'abcd1234', "
+            "'{\"render\": 120, \"segment\": 300}'::jsonb, '{\"words\": 674, \"drawings\": 191}'::jsonb);",
+            role="service_role",
+        )
+        out = self.psql(
+            "select reject_detail, instance_id, timing->>'render', complexity->>'words' from public.trial_events;",
+            role="service_role",
+        ).stdout
+        for expected in ("slot_wait", "abcd1234", "120", "674"):
+            self.assertIn(expected, out)
+
+    def test_migration_is_rerunnable_with_new_columns(self):
+        self.psql(MIGRATION.read_text(encoding="utf-8"))
+        out = self.psql(
+            "select column_name from information_schema.columns "
+            "where table_name = 'trial_events' and column_name in ('timing', 'instance_id', 'reject_detail', 'complexity');"
+        ).stdout
+        for column in ("timing", "instance_id", "reject_detail", "complexity"):
+            self.assertIn(column, out)
+
 
 if __name__ == "__main__":
     unittest.main()

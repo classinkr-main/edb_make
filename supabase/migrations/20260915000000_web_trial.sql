@@ -46,6 +46,13 @@ alter table public.trial_events
   alter column problems type integer,
   alter column risk_problems type integer;
 
+-- 2026-09-15 quality/load design: stage timings, instance id, busy reason, page complexity.
+alter table public.trial_events
+  add column if not exists timing jsonb,
+  add column if not exists instance_id text,
+  add column if not exists reject_detail text,
+  add column if not exists complexity jsonb;
+
 create index if not exists trial_events_created_at_idx on public.trial_events (created_at);
 create index if not exists trial_charges_day_idx on public.trial_charges (day);
 
