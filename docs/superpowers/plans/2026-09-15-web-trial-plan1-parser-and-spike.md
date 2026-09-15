@@ -1131,7 +1131,7 @@ Expected: `{"status":"ok","commit":"<7자리>"}`
 
 - [ ] **Step 6: 측정**
 
-합성 파일과 실제 텍스트 PDF(3쪽 이하로 자른 모의고사) 각각:
+합성 파일, 실제 텍스트 PDF 원본(16쪽, 상한 측정), 같은 PDF의 앞 3쪽 각각 (`garbage=4` 없이 자르면 지운 쪽의 글꼴이 남아 크기가 원본과 같아진다):
 
 ```bash
 TRIAL_SPIKE_TOKEN=... .venv/bin/python scripts/trial_spike_probe.py https://<production-domain> <pdf> --repeat 5
@@ -1140,7 +1140,7 @@ TRIAL_SPIKE_TOKEN=... .venv/bin/python scripts/trial_spike_probe.py https://<pro
 콜드 스타트를 다시 보려면 10분 이상 기다렸다가 한 번 더 부른다. 3쪽 넘는 PDF를 자르는 법:
 
 ```bash
-.venv/bin/python -c "import fitz,sys; d=fitz.open(sys.argv[1]); d.select(range(min(3,d.page_count))); d.save(sys.argv[2])" in.pdf out-3p.pdf
+.venv/bin/python -c "import fitz,sys; d=fitz.open(sys.argv[1]); d.select(range(min(3,d.page_count))); d.save(sys.argv[2], garbage=4, deflate=True)" in.pdf out-3p.pdf
 ```
 
 - [ ] **Step 7: 결과 문서** (`docs/web-trial-spike-results.md`)
