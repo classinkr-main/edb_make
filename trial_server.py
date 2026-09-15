@@ -42,6 +42,15 @@ SLOT_POLL_SECONDS = 0.05
 
 logger = logging.getLogger("trial_server")
 
+# One id per Python process: shows instance churn and cold starts in trial_events.
+INSTANCE_ID = uuid.uuid4().hex[:8]
+INSTANCE_STARTED_AT = time.time()
+
+
+def _ms(started_at: float) -> int:
+    return int(round((time.perf_counter() - started_at) * 1000))
+
+
 def client_ip(request: Request) -> str:
     # Vercel overwrites x-real-ip and x-forwarded-for, so clients cannot spoof them.
     real_ip = (request.headers.get("x-real-ip") or "").strip()
@@ -147,16 +156,29 @@ def create_app(
             await asyncio.sleep(SLOT_POLL_SECONDS)
         return True
 
-    def parse_and_encode(source: Path, work_dir: Path, remaining_today: int, started_at: float) -> tuple[bytes, dict[str, int]]:
+    def parse_and_encode(
+        source: Path, work_dir: Path, remaining_today: int, started_at: float
+    ) -> tuple[bytes, dict[str, int], dict[str, int]]:
+        parse_started_at = time.perf_counter()
         try:
             result = parser(source, work_dir=work_dir, max_pages=config.limits.max_pages)
+            timing: dict[str, int] = dict(result.timing_ms)
+            encode_started_at = time.perf_counter()
             payload = build_parse_payload(
                 result,
                 remaining_today=remaining_today,
-                elapsed_ms=int(round((time.perf_counter() - started_at) * 1000)),
+                elapsed_ms=_ms(started_at),
                 processed_page_limit=config.limits.max_pages,
+                extra={
+                    "timing_ms": dict(timing),
+                    "instance_id": INSTANCE_ID,
+                    "instance_age_s": round(time.time() - INSTANCE_STARTED_AT, 1),
+                },
             )
             body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            # encode is measured after the body exists, so the response cannot include it; the event does.
+            timing["encode"] = _ms(encode_started_at)
+            timing["parse_total"] = _ms(parse_started_at)
         except Exception as error:
             logger.exception("trial parse failed")
             raise reject("parse_failed") from error
@@ -165,7 +187,7 @@ def create_app(
             "problems": len(payload["problems"]),
             "risk_problems": sum(1 for problem in payload["problems"] if problem["needs_review"]),
         }
-        return body, counts
+        return body, counts, timing
 
     def refund_quietly(request_id: str) -> None:
         try:
@@ -193,7 +215,16 @@ def create_app(
 
     @app.get("/api/health")
     async def health() -> JSONResponse:
-        return JSONResponse({"status": "ok", "commit": parser_version(), "ready": ready()}, headers=NO_STORE)
+        return JSONResponse(
+            {
+                "status": "ok",
+                "commit": parser_version(),
+                "ready": ready(),
+                "instance_id": INSTANCE_ID,
+                "instance_age_s": round(time.time() - INSTANCE_STARTED_AT, 1),
+            },
+            headers=NO_STORE,
+        )
 
     @app.post("/api/parse")
     async def parse(request: Request) -> Response:
@@ -214,6 +245,9 @@ def create_app(
             "bytes": None,
             "elapsed_ms": None,
             "ip_hash": subject,
+            "timing": None,
+            "instance_id": INSTANCE_ID,
+            "complexity": None,
         }
         try:
             if not ready():
@@ -265,12 +299,12 @@ def create_app(
                         raise reject("busy", "global_limit")
                     # From here the use stays charged even if parsing fails: a crashing PDF
                     # still spent parse CPU, and refunds would let it bypass both caps.
-                    body, counts = await run_in_threadpool(
+                    body, counts, timing = await run_in_threadpool(
                         parse_and_encode, source, Path(temp_dir) / "work", decision.remaining, started_at
                     )
                 finally:
                     parse_slots.release()
-            event.update(status=200, **counts)
+            event.update(status=200, timing=timing, **counts)
             response = Response(body, media_type="application/json", headers=NO_STORE)
         except TrialRejected as rejected:
             response = rejection_response(rejected.rejection, event, rejected.detail)

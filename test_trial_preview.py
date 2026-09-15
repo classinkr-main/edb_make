@@ -98,6 +98,19 @@ class TestBuildParsePayload(unittest.TestCase):
         second = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
         self.assertEqual(first, second)
 
+    def test_extra_fields_are_merged_into_the_payload(self):
+        payload = build_parse_payload(
+            _result(),
+            remaining_today=2,
+            elapsed_ms=10,
+            processed_page_limit=3,
+            extra={"timing_ms": {"render": 1}, "instance_id": "abcd1234", "instance_age_s": 12.5},
+        )
+        self.assertEqual({"render": 1}, payload["timing_ms"])
+        self.assertEqual("abcd1234", payload["instance_id"])
+        self.assertEqual(12.5, payload["instance_age_s"])
+        self.assertNotIn("timing_ms", build_parse_payload(_result(), remaining_today=2, elapsed_ms=10, processed_page_limit=3))
+
 
 if __name__ == "__main__":
     unittest.main()

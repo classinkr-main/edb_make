@@ -70,9 +70,10 @@ def _payload_for_step(
     remaining_today: int,
     elapsed_ms: int,
     processed_page_limit: int,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step = PREVIEW_STEPS[step_index]
-    return {
+    payload: dict[str, Any] = {
         "parser_version": result.parser_version,
         "elapsed_ms": elapsed_ms,
         "source_page_count": result.source_page_count,
@@ -107,6 +108,9 @@ def _payload_for_step(
             for problem in result.problems
         ],
     }
+    if extra:
+        payload.update(extra)
+    return payload
 
 
 def build_parse_payload(
@@ -116,6 +120,7 @@ def build_parse_payload(
     elapsed_ms: int,
     processed_page_limit: int,
     budget_bytes: int = RESPONSE_BUDGET_BYTES,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the first preview step whose JSON fits the budget, else the smallest step."""
     payload: dict[str, Any] = {}
@@ -126,6 +131,7 @@ def build_parse_payload(
             remaining_today=remaining_today,
             elapsed_ms=elapsed_ms,
             processed_page_limit=processed_page_limit,
+            extra=extra,
         )
         if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= budget_bytes:
             return payload

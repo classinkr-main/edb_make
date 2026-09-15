@@ -213,6 +213,21 @@ class TestParseSuccess(TrialApiCase):
         client = self.make_client(store=FlakyEventStore())
         self.assertEqual(200, self.post_pdf(client).status_code)
 
+    def test_response_and_event_carry_timing_and_instance(self):
+        client = self.make_client()
+        response = self.post_pdf(client)
+        self.assertEqual(200, response.status_code)
+        payload = response.json()
+        self.assertEqual({"total": 5}, payload["timing_ms"])
+        self.assertRegex(payload["instance_id"], r"^[0-9a-f]{8}$")
+        self.assertGreaterEqual(payload["instance_age_s"], 0)
+        event = self.store.events[-1]
+        self.assertEqual(payload["instance_id"], event["instance_id"])
+        self.assertEqual(5, event["timing"]["total"])
+        for key in ("encode", "parse_total"):
+            self.assertIsInstance(event["timing"][key], int)
+            self.assertGreaterEqual(event["timing"][key], 0)
+
 
 class TestParseRejections(TrialApiCase):
     def assertRejected(self, response, status, code, feature=None):
@@ -333,6 +348,12 @@ class TestParseRejections(TrialApiCase):
         response = self.post_pdf(client)
         self.assertEqual(503, response.status_code)
         self.assertEqual("not_ready", self.store.events[-1]["reject_detail"])
+
+    def test_rejections_still_carry_instance_id(self):
+        client = self.make_client(config=TrialConfig(production=True, ip_salt="salt", cron_secret="cron-secret"))
+        self.post_pdf(client)
+        self.assertRegex(self.store.events[-1]["instance_id"], r"^[0-9a-f]{8}$")
+        self.assertIsNone(self.store.events[-1]["timing"])
 
     def test_turnstile_outage_records_reason_and_does_not_charge(self):
         client = self.make_client(verifier=FakeVerifier(error=TurnstileUnavailable("down")))
