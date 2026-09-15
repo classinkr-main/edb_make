@@ -90,6 +90,8 @@ class TestTrialConfig(unittest.TestCase):
         defaults = TrialConfig.from_env({})
         self.assertEqual(8000, defaults.limits.max_words_per_page)
         self.assertEqual(10000, defaults.limits.max_drawings_per_page)
+        # The dataclass defaults and the from_env defaults are the same numbers, named once.
+        self.assertEqual(TrialConfig().limits, TrialConfig.from_env({}).limits)
 
 
 if __name__ == "__main__":

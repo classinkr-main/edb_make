@@ -20,19 +20,36 @@ from structured_schema import Box
 MIN_TEXT_CHARS_PER_PAGE = 20
 PDF_RENDER_DPI = 200
 
-# 2×A3 at 200 DPI is about 15.5M pixels; larger renders are decompression bombs for this service.
-Image.MAX_IMAGE_PIXELS = 40_000_000
+# Pillow only warns between this value and twice it, and raises DecompressionBombError
+# above twice it, so this setting is a 40M-pixel hard ceiling with a 20M-pixel warning
+# threshold. 2×A3 at 200 DPI is about 15.5M pixels, which stays below the warning threshold;
+# anything that warns is already larger than this trial renders. Assigning the attribute is
+# process-global, so every importer of problem_parser inherits the limit -- which is what the
+# trial server wants, and why it lives next to the render settings rather than in a caller.
+Image.MAX_IMAGE_PIXELS = 20_000_000
 
-# page.get_drawings() materialises one Python object per vector path, so its own cost is
-# unbounded in the number of paths on the page -- exactly what max_drawings_per_page exists
-# to bound. A page whose decompressed content stream is this large already trips that bound
-# in practice (the exam corpus this trial was calibrated against stays well under 1 MB per
-# page), so once the content stream crosses this threshold we skip get_drawings() entirely
-# and report a sentinel drawings count that always exceeds any configured
-# max_drawings_per_page instead of paying its unbounded cost. Reading the content-stream
-# length via xref_stream() is cheap regardless of how many paths it encodes.
+# inspect_pdf runs after the Turnstile check but before the parse slot and the quota charge,
+# so everything it spends is free to a caller and endlessly repeatable. Its per-page work is
+# therefore ordered cheapest-first, and a page that trips either gate below is reported with
+# a sentinel count that exceeds any configured word/drawing limit, so check_pdf_info rejects
+# it as page_too_complex without the page ever being interpreted.
+#
+# Measured locally on a one-page PDF whose content stream is "100 100 1 1 re S" repeated two
+# million times (34 MB decompressed, 83 KB once flate-compressed -- an 83 KB upload):
+#     xref_stream_raw()   (compressed length)        0.0 ms
+#     xref_stream()       (decompressed length)     21.8 ms
+#     page.get_text("text")                        340.5 ms
+#     page.get_drawings()                       10_329.7 ms
+#
+# The raw gate is free but cannot see a flate bomb, so it cannot replace the decompressed
+# gate; its job is to bound how much the decompressed gate is ever willing to inflate. Deflate
+# tops out near 1030:1 (measured), so capping the compressed stream at 1 MB caps one page's
+# transient inflation at roughly 1 GB. A page sitting at the configured 8000-word /
+# 10000-drawing limits measures about 313 KB compressed and 285 KB decompressed, so these
+# thresholds leave 3x and 7x headroom respectively over anything the trial would accept.
+MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE = 1_000_000
 MAX_CONTENT_STREAM_BYTES_PER_PAGE = 2_000_000
-PATHOLOGICAL_DRAWINGS_SENTINEL = 1_000_000_000
+PATHOLOGICAL_COUNT_SENTINEL = 1_000_000_000
 
 
 class PdfUnreadableError(ValueError):
@@ -47,6 +64,20 @@ class PdfInfo:
     max_page_area_pt: float
     max_words_per_page: int = 0
     max_drawings_per_page: int = 0
+
+
+def _content_stream_is_pathological(doc: fitz.Document, page: fitz.Page) -> bool:
+    """True when a page's content stream is too big to be worth interpreting at all.
+
+    Both checks run before get_text() or get_drawings() ever touch the page, cheapest first:
+    the compressed length is free, and the decompressed length costs a single inflate that the
+    raw gate has already bounded.
+    """
+    xrefs = page.get_contents()
+    raw_bytes = sum(len(doc.xref_stream_raw(xref)) for xref in xrefs)
+    if raw_bytes > MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE:
+        return True
+    return sum(len(doc.xref_stream(xref)) for xref in xrefs) > MAX_CONTENT_STREAM_BYTES_PER_PAGE
 
 
 def inspect_pdf(source: Path, *, max_pages: int) -> PdfInfo:
@@ -70,17 +101,20 @@ def inspect_pdf(source: Path, *, max_pages: int) -> PdfInfo:
         max_drawings_per_page = 0
         for index in range(scanned_pages):
             page = doc[index]
+            # page.rect is metadata, not content, so page size stays measurable for every page.
+            max_page_area_pt = max(max_page_area_pt, float(page.rect.width * page.rect.height))
+            if _content_stream_is_pathological(doc, page):
+                # Skipped pages are deliberately left out of pages_without_text: check_pdf_info
+                # raises no_text_layer before page_too_complex, so counting a page we refused to
+                # read as textless would report the wrong reason for refusing it.
+                max_words_per_page = max(max_words_per_page, PATHOLOGICAL_COUNT_SENTINEL)
+                max_drawings_per_page = max(max_drawings_per_page, PATHOLOGICAL_COUNT_SENTINEL)
+                continue
             text = page.get_text("text")
             if len("".join(text.split())) < MIN_TEXT_CHARS_PER_PAGE:
                 pages_without_text += 1
             max_words_per_page = max(max_words_per_page, len(text.split()))
-            content_bytes = sum(len(doc.xref_stream(xref)) for xref in page.get_contents())
-            if content_bytes > MAX_CONTENT_STREAM_BYTES_PER_PAGE:
-                drawings_count = PATHOLOGICAL_DRAWINGS_SENTINEL
-            else:
-                drawings_count = len(page.get_drawings())
-            max_drawings_per_page = max(max_drawings_per_page, drawings_count)
-            max_page_area_pt = max(max_page_area_pt, float(page.rect.width * page.rect.height))
+            max_drawings_per_page = max(max_drawings_per_page, len(page.get_drawings()))
     return PdfInfo(
         page_count=page_count,
         scanned_pages=scanned_pages,

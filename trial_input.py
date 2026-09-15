@@ -14,6 +14,10 @@ from problem_parser import PdfInfo
 A3_AREA_PT = 841.89 * 1190.55
 MAGIC_SCAN_BYTES = 1024
 
+# Named here so InputLimits and trial_config.from_env cannot drift apart.
+DEFAULT_MAX_WORDS_PER_PAGE = 8000
+DEFAULT_MAX_DRAWINGS_PER_PAGE = 10000
+
 
 @dataclass(frozen=True)
 class Rejection:
@@ -61,10 +65,11 @@ class InputLimits:
     max_pages: int
     max_source_pages: int
     max_page_area_pt: float
-    # Pathological PDFs (thousands of text spans or vector paths per page) could run past
-    # Vercel's 60 s limit; the corpus maximum is 674 words and 613 drawings per page.
-    max_words_per_page: int = 8000
-    max_drawings_per_page: int = 10000
+    # Pathological PDFs could run past Vercel's 60 s limit. "Words" are the whitespace-separated
+    # tokens of the page's text layer and "drawings" are its vector paths, both as inspect_pdf
+    # counts them; the corpus maximum is 674 words and 613 drawings per page.
+    max_words_per_page: int = DEFAULT_MAX_WORDS_PER_PAGE
+    max_drawings_per_page: int = DEFAULT_MAX_DRAWINGS_PER_PAGE
 
 
 def reject(code: str, detail: str | None = None) -> TrialRejected:

@@ -8,7 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from trial_input import A3_AREA_PT, InputLimits
+from trial_input import (
+    A3_AREA_PT,
+    DEFAULT_MAX_DRAWINGS_PER_PAGE,
+    DEFAULT_MAX_WORDS_PER_PAGE,
+    InputLimits,
+)
 
 DEFAULT_INQUIRY_URL = "https://classin.co.kr/contact"
 
@@ -85,8 +90,10 @@ class TrialConfig:
                 max_pages=_positive_int(env, "TRIAL_MAX_PAGES", 3),
                 max_source_pages=_positive_int(env, "TRIAL_MAX_SOURCE_PAGES", 100),
                 max_page_area_pt=2 * A3_AREA_PT,
-                max_words_per_page=_positive_int(env, "TRIAL_MAX_WORDS_PER_PAGE", 8000),
-                max_drawings_per_page=_positive_int(env, "TRIAL_MAX_DRAWINGS_PER_PAGE", 10000),
+                max_words_per_page=_positive_int(env, "TRIAL_MAX_WORDS_PER_PAGE", DEFAULT_MAX_WORDS_PER_PAGE),
+                max_drawings_per_page=_positive_int(
+                    env, "TRIAL_MAX_DRAWINGS_PER_PAGE", DEFAULT_MAX_DRAWINGS_PER_PAGE
+                ),
             ),
             daily_limit=_positive_int(env, "TRIAL_DAILY_LIMIT", 3),
             global_daily_limit=_positive_int(env, "TRIAL_GLOBAL_DAILY_LIMIT", 500),

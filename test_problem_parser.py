@@ -1,6 +1,7 @@
 import io
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from unittest import mock
 
@@ -11,8 +12,15 @@ from assemble_page import group_problem_units
 from build_problem_board_edb import build_problem_entries
 from layout_template_schema import LayoutTemplate
 from preprocess import PreparedPage
-from problem_parser import PDF_RENDER_DPI, PdfUnreadableError, inspect_pdf, parse_problems
+from problem_parser import (
+    MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE,
+    PDF_RENDER_DPI,
+    PdfUnreadableError,
+    inspect_pdf,
+    parse_problems,
+)
 from structured_schema import BlockType, Box, ContentBlock, PageModel, ProblemUnit, Subject
+from trial_input import A3_AREA_PT, InputLimits, TrialRejected, check_pdf_info
 
 
 def _block(block_id: str, block_type: BlockType, top: float, text: str | None, *, height: float = 80.0) -> ContentBlock:
@@ -145,6 +153,17 @@ class TestRenderBoardAssetsSwitch(unittest.TestCase):
                 self.assertEqual(kept.crop_path.read_bytes(), lean.crop_path.read_bytes())
 
 
+def _write_flate_bomb_pdf(path: Path) -> Path:
+    """A one-page PDF that is tiny on disk but whose content stream inflates to 34 MB."""
+    doc = fitz.open()
+    page = doc.new_page()
+    page.draw_rect(fitz.Rect(0, 0, 1, 1))  # establishes a content-stream xref
+    doc.update_stream(page.get_contents()[0], b"100 100 1 1 re S\n" * 2_000_000)
+    doc.save(path, deflate=True)
+    doc.close()
+    return path
+
+
 class TestInspectPdf(unittest.TestCase):
     def test_text_pdf_reports_pages_and_no_textless_pages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -226,28 +245,65 @@ class TestInspectPdf(unittest.TestCase):
         self.assertEqual(3, info.max_drawings_per_page)
 
     def test_pathological_content_stream_short_circuits_drawing_scan(self):
-        # A page whose content stream repeats a trivial path-painting operator millions of
-        # times makes get_drawings() itself the expensive, unbounded operation it exists to
-        # bound: it materialises one Python object per path. inspect_pdf must reject such a
-        # page as complex without ever paying that cost. Proven structurally (get_drawings
-        # raises if invoked) rather than by timing, per this project's rule against
-        # wall-clock-dependent tests.
+        # A page whose content stream repeats a trivial path-painting operator two million
+        # times makes get_text() and get_drawings() the expensive, unbounded operations that
+        # max_words_per_page/max_drawings_per_page exist to bound -- get_drawings() alone
+        # measured 10.3 s on this fixture. Flate-compressed the whole PDF is only ~83 KB, so
+        # it sails through the upload size limit, and inspect_pdf runs before the parse slot
+        # and the quota charge: paying either cost here would be a free, repeatable overload.
+        # Proven structurally (both calls raise if invoked) rather than by timing, per this
+        # project's rule against wall-clock-dependent tests.
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "bomb.pdf"
+            path = _write_flate_bomb_pdf(Path(temp_dir) / "bomb.pdf")
+            self.assertLess(path.stat().st_size, 4_000_000)  # passes the 4 MB upload limit
+
+            def _fail_if_called(name):
+                def _raise(*_args, **_kwargs):
+                    raise AssertionError(f"{name} must not be called on a pathological content stream")
+
+                return _raise
+
+            with mock.patch.object(fitz.Page, "get_drawings", _fail_if_called("get_drawings()")):
+                with mock.patch.object(fitz.Page, "get_text", _fail_if_called("get_text()")):
+                    info = inspect_pdf(path, max_pages=3)
+        self.assertGreater(info.max_drawings_per_page, 10_000)
+        self.assertGreater(info.max_words_per_page, 10_000)
+
+    def test_uncompressed_content_stream_is_rejected_without_decompressing(self):
+        # The raw gate exists to bound how much the decompressed gate is ever willing to
+        # inflate, so it has to fire first. An uncompressed content stream over the raw cap
+        # proves the ordering: xref_stream() (which decompresses) is never reached.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bulky.pdf"
             doc = fitz.open()
             page = doc.new_page()
             page.draw_rect(fitz.Rect(0, 0, 1, 1))  # establishes a content-stream xref
-            xref = page.get_contents()[0]
-            doc.update_stream(xref, b"100 100 1 1 re S\n" * 500_000)  # ~8.5 MB decompressed
-            doc.save(path)
+            # compress=False stores the stream verbatim, so the raw length is the real length.
+            doc.update_stream(page.get_contents()[0], b"100 100 1 1 re S\n" * 100_000, compress=False)
+            doc.save(path)  # ~1.7 MB raw, over MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE
             doc.close()
+            self.assertGreater(path.stat().st_size, MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE)
 
             def _fail_if_called(*_args, **_kwargs):
-                raise AssertionError("get_drawings() must not be called on a pathological content stream")
+                raise AssertionError("xref_stream() must not decompress a stream the raw gate already refused")
 
-            with mock.patch.object(fitz.Page, "get_drawings", _fail_if_called):
+            with mock.patch.object(fitz.Document, "xref_stream", _fail_if_called):
                 info = inspect_pdf(path, max_pages=3)
         self.assertGreater(info.max_drawings_per_page, 10_000)
+        self.assertEqual(0, info.pages_without_text)
+
+    def test_pathological_page_is_reported_as_complex_rather_than_textless(self):
+        # Skipping get_text() leaves the page with no measured text, but check_pdf_info raises
+        # no_text_layer before page_too_complex, so a pathological page must not be counted in
+        # pages_without_text -- otherwise the user is told to upload a PDF with a text layer
+        # when the real reason is complexity.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            info = inspect_pdf(_write_flate_bomb_pdf(Path(temp_dir) / "bomb.pdf"), max_pages=3)
+        self.assertEqual(0, info.pages_without_text)
+        limits = InputLimits(max_bytes=4_000_000, max_pages=3, max_source_pages=100, max_page_area_pt=2 * A3_AREA_PT)
+        with self.assertRaises(TrialRejected) as rejected:
+            check_pdf_info(info, limits)
+        self.assertEqual("page_too_complex", rejected.exception.rejection.code)
 
 
 class TestImageLimits(unittest.TestCase):
@@ -256,7 +312,28 @@ class TestImageLimits(unittest.TestCase):
 
         import problem_parser  # noqa: F401  (import side effect under test)
 
-        self.assertEqual(40_000_000, Image.MAX_IMAGE_PIXELS)
+        self.assertEqual(20_000_000, Image.MAX_IMAGE_PIXELS)
+
+    def test_pillow_warns_at_the_limit_and_raises_at_twice_it(self):
+        # Pillow's contract: warn above MAX_IMAGE_PIXELS, raise above 2x it. The setting is
+        # therefore a 40M-pixel hard ceiling, well above the ~15.5M pixels of 2xA3 at 200 DPI
+        # that this trial actually renders. Asserted against Pillow's own size check so an
+        # upgrade that changes the warn/raise semantics fails here rather than in production.
+        import problem_parser  # noqa: F401  (import side effect under test)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            Image._decompression_bomb_check((3000, 3000))  # 9M px: a page this trial renders
+        self.assertEqual([], [str(entry.message) for entry in caught])
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            Image._decompression_bomb_check((4500, 4500))  # 20.25M px: over the warn threshold
+        self.assertEqual(1, len(caught))
+        self.assertTrue(issubclass(caught[0].category, Image.DecompressionBombWarning))
+
+        with self.assertRaises(Image.DecompressionBombError):
+            Image._decompression_bomb_check((7000, 7000))  # 49M px: over the 40M hard ceiling
 
 
 class TestParseProblems(unittest.TestCase):
