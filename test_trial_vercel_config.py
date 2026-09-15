@@ -23,6 +23,22 @@ class TestVercelConfig(unittest.TestCase):
         self.assertEqual("app", variable)
         self.assertEqual([f"{module}.py"], list(VERCEL["functions"]))
 
+    def test_runtime_dependencies_are_fully_pinned(self):
+        # Without a uv.lock, Vercel re-resolves unpinned transitive packages on every build.
+        dependencies = PYPROJECT["project"]["dependencies"]
+        names = set()
+        for requirement in dependencies:
+            name, separator, version = requirement.partition("==")
+            self.assertEqual("==", separator, requirement)
+            self.assertTrue(version and all(part.isdigit() for part in version.split(".")), requirement)
+            names.add(name.lower().replace("_", "-"))
+        expected = {
+            "fastapi", "starlette", "pydantic", "pydantic-core", "anyio", "idna", "typing-extensions",
+            "annotated-types", "typing-inspection", "annotated-doc", "numpy", "opencv-python-headless",
+            "pillow", "pymupdf",
+        }
+        self.assertEqual(expected, names)
+
     def test_memory_is_not_set_in_vercel_json(self):
         # Fluid compute ignores it with a build warning; memory is a dashboard setting.
         for settings in VERCEL["functions"].values():

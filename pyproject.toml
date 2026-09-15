@@ -1,15 +1,28 @@
 # Vercel deploy manifest for the web trial only (trial_server.py).
 # The desktop app keeps using requirements-*.lock; nothing else reads this file.
+#
+# Vercel re-resolves dependencies on every build when no uv.lock is committed,
+# so every runtime package, transitive ones included, is pinned to the versions
+# the test suite ran with (requirements-web.lock and requirements-release.lock).
 [project]
 name = "edb-parser-trial"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "annotated-doc==0.0.5",
+    "annotated-types==0.7.0",
+    "anyio==4.14.2",
     "fastapi==0.141.1",
+    "idna==3.19",
     "numpy==2.4.6",
     "opencv-python-headless==4.13.0.92",
     "Pillow==12.2.0",
+    "pydantic==2.13.4",
+    "pydantic-core==2.46.4",
     "PyMuPDF==1.27.2.3",
+    "starlette==1.6.0",
+    "typing-extensions==4.15.0",
+    "typing-inspection==0.4.2",
 ]
 
 [tool.vercel]
