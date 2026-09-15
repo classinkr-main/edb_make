@@ -12,7 +12,7 @@ from assemble_page import group_problem_units
 from build_problem_board_edb import build_problem_entries
 from layout_template_schema import LayoutTemplate
 from preprocess import PreparedPage
-from problem_parser import PdfUnreadableError, inspect_pdf, parse_problems
+from problem_parser import PDF_RENDER_DPI, PdfUnreadableError, inspect_pdf, parse_problems
 from structured_schema import BlockType, Box, ContentBlock, PageModel, ProblemUnit, Subject
 
 
@@ -286,46 +286,40 @@ class TestParseProblems(unittest.TestCase):
             result.timing_ms["crops"] + 50,
         )
 
-    def test_crop_size_lookup_is_attributed_to_coalesce_not_assets(self):
-        # Regression seam test for the Task 4 fix round: `crop_sizes = [...]`
-        # drains the iterator `_render_problem_assets` returns, and a review
-        # round previously found that draining counted toward the "assets"
-        # stage instead of "coalesce". Delaying the `_render_problem_assets`
-        # call itself cannot observe that boundary (the call finishes, and
-        # both the buggy and fixed orderings record "assets" right after it
-        # returns); delaying iteration of its *result* isolates the exact
-        # code whose stage attribution is under test.
+    def test_render_timing_stops_before_segmentation(self):
+        # Seam test for the render/segment boundary. Both stages are sub-spans of
+        # "recognize", so the breakdown assertions above hold whichever side of
+        # build_page_models_for_prepared_pages the render stop-mark sits on.
+        # Delaying segmentation and checking which stage absorbs the delay is what
+        # tells a drifted stop-mark (segmentation double-counted into "render")
+        # apart from the correct ordering.
         import build_problem_board_edb as board
+
+        real_segment = board.build_page_models_for_prepared_pages
+
+        def slow_segment(*args, **kwargs):
+            time.sleep(0.3)
+            return real_segment(*args, **kwargs)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            pages, models = _cross_page_passage_fixture(root / "src")
-            real = board._render_problem_assets
-
-            class _SlowCropSizes:
-                def __init__(self, sizes):
-                    self._sizes = sizes
-
-                def __iter__(self):
-                    for size in self._sizes:
-                        time.sleep(0.05)
-                        yield size
-
-            def slow(tasks):
-                return _SlowCropSizes(real(tasks))
-
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2]])
             timings: dict[str, int] = {}
-            with mock.patch.object(board, "_render_problem_assets", slow):
-                board.build_problem_entries(
-                    pages,
-                    models,
-                    root / "out",
-                    LayoutTemplate(name="academy-default"),
-                    render_board_assets=False,
+            with mock.patch.object(board, "build_page_models_for_prepared_pages", slow_segment):
+                board.build_pages(
+                    path,
+                    subject=board.resolve_subject("unknown"),
+                    ocr_mode="none",
+                    ai_fallback_config=None,
+                    pdf_dpi=PDF_RENDER_DPI,
+                    detect_perspective=False,
+                    deskew=True,
+                    crop_margins=True,
+                    max_dimension=None,
                     timings=timings,
                 )
-        self.assertLess(timings["assets"], 150)
-        self.assertGreaterEqual(timings["coalesce"], 150)
+        self.assertGreaterEqual(timings["segment"], 250, timings)
+        self.assertLess(timings["render"], 250, timings)
 
 if __name__ == "__main__":
     unittest.main()
