@@ -219,8 +219,35 @@ class TestInspectPdf(unittest.TestCase):
             doc.saveIncr()
             doc.close()
             info = inspect_pdf(path, max_pages=3)
-        self.assertGreaterEqual(info.max_words_per_page, 6)  # "1. problem stem" + choices on the fuller page
-        self.assertGreaterEqual(info.max_drawings_per_page, 1)
+        # Page 0 (numbers [1, 2] plus the extra draw_rect above) is the fuller page: 18 words,
+        # 3 drawings. Page 1 (number [3] only) has 9 words, 1 drawing. Exact equality (rather
+        # than >=) is required so a min/max swap or a "first/last page only" bug fails.
+        self.assertEqual(18, info.max_words_per_page)
+        self.assertEqual(3, info.max_drawings_per_page)
+
+    def test_pathological_content_stream_short_circuits_drawing_scan(self):
+        # A page whose content stream repeats a trivial path-painting operator millions of
+        # times makes get_drawings() itself the expensive, unbounded operation it exists to
+        # bound: it materialises one Python object per path. inspect_pdf must reject such a
+        # page as complex without ever paying that cost. Proven structurally (get_drawings
+        # raises if invoked) rather than by timing, per this project's rule against
+        # wall-clock-dependent tests.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "bomb.pdf"
+            doc = fitz.open()
+            page = doc.new_page()
+            page.draw_rect(fitz.Rect(0, 0, 1, 1))  # establishes a content-stream xref
+            xref = page.get_contents()[0]
+            doc.update_stream(xref, b"100 100 1 1 re S\n" * 500_000)  # ~8.5 MB decompressed
+            doc.save(path)
+            doc.close()
+
+            def _fail_if_called(*_args, **_kwargs):
+                raise AssertionError("get_drawings() must not be called on a pathological content stream")
+
+            with mock.patch.object(fitz.Page, "get_drawings", _fail_if_called):
+                info = inspect_pdf(path, max_pages=3)
+        self.assertGreater(info.max_drawings_per_page, 10_000)
 
 
 class TestImageLimits(unittest.TestCase):

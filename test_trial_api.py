@@ -291,6 +291,7 @@ class TestParseRejections(TrialApiCase):
         self.assertEqual("page_too_complex", response.json()["error"]["code"])
         self.assertEqual("ai", response.json()["error"]["feature"])
         self.assertEqual(0, self.used())
+        self.assertEqual({"words": 9000, "drawings": 0}, self.store.events[-1]["complexity"])
 
     def test_daily_limit_after_three_uses(self):
         client = self.make_client()

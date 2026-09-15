@@ -23,6 +23,17 @@ PDF_RENDER_DPI = 200
 # 2×A3 at 200 DPI is about 15.5M pixels; larger renders are decompression bombs for this service.
 Image.MAX_IMAGE_PIXELS = 40_000_000
 
+# page.get_drawings() materialises one Python object per vector path, so its own cost is
+# unbounded in the number of paths on the page -- exactly what max_drawings_per_page exists
+# to bound. A page whose decompressed content stream is this large already trips that bound
+# in practice (the exam corpus this trial was calibrated against stays well under 1 MB per
+# page), so once the content stream crosses this threshold we skip get_drawings() entirely
+# and report a sentinel drawings count that always exceeds any configured
+# max_drawings_per_page instead of paying its unbounded cost. Reading the content-stream
+# length via xref_stream() is cheap regardless of how many paths it encodes.
+MAX_CONTENT_STREAM_BYTES_PER_PAGE = 2_000_000
+PATHOLOGICAL_DRAWINGS_SENTINEL = 1_000_000_000
+
 
 class PdfUnreadableError(ValueError):
     """The file is not a PDF PyMuPDF can open without a password."""
@@ -63,7 +74,12 @@ def inspect_pdf(source: Path, *, max_pages: int) -> PdfInfo:
             if len("".join(text.split())) < MIN_TEXT_CHARS_PER_PAGE:
                 pages_without_text += 1
             max_words_per_page = max(max_words_per_page, len(text.split()))
-            max_drawings_per_page = max(max_drawings_per_page, len(page.get_drawings()))
+            content_bytes = sum(len(doc.xref_stream(xref)) for xref in page.get_contents())
+            if content_bytes > MAX_CONTENT_STREAM_BYTES_PER_PAGE:
+                drawings_count = PATHOLOGICAL_DRAWINGS_SENTINEL
+            else:
+                drawings_count = len(page.get_drawings())
+            max_drawings_per_page = max(max_drawings_per_page, drawings_count)
             max_page_area_pt = max(max_page_area_pt, float(page.rect.width * page.rect.height))
     return PdfInfo(
         page_count=page_count,
