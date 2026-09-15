@@ -58,7 +58,13 @@ from edb_builder import (
     write_edb,
 )
 from layout_template_schema import LayoutTemplate, ProblemLayoutInput
-from image_ops import channel_extrema, channel_magnitude, channel_saturation
+from image_ops import (
+    channel_extrema,
+    channel_luminance,
+    channel_magnitude,
+    channel_saturation,
+    seeded_components,
+)
 from image_reconstruction_backend import clean_problem_image_transparency
 from page_repair import AIFallbackConfig, build_ai_fallback_config as build_page_ai_fallback_config
 from page_repair import DEFAULT_GEMINI_REPAIR_MODEL
@@ -484,7 +490,6 @@ def _trim_edge_vertical_guides(image: Image.Image) -> Image.Image:
     if ImageStat.Stat(gray).mean[0] <= DARK_BOARD_BRIGHTNESS_THRESHOLD:
         return image
 
-    pixels = gray.load()
     scan_width = min(int(round(width * EDGE_GUIDE_SCAN_RATIO)), EDGE_GUIDE_SCAN_MAX_PX)
     if scan_width <= 0:
         return image
@@ -493,27 +498,41 @@ def _trim_edge_vertical_guides(image: Image.Image) -> Image.Image:
     min_cluster_column_pixels = max(4, int(round(height * EDGE_GUIDE_CLUSTER_MIN_COLUMN_RATIO)))
     min_cluster_coverage = int(round(height * EDGE_GUIDE_CLUSTER_MIN_COVERAGE_RATIO))
 
+    # Both passes below ask the same question of the same edge columns, so the
+    # dark mask is built once instead of re-walking every column twice.
+    if np is not None:
+        dark = np.asarray(gray, dtype=np.uint8) <= EDGE_GUIDE_DARK_THRESHOLD
+        dark_column_counts = np.count_nonzero(dark, axis=0)
+
+        def column_dark_count(x: int) -> int:
+            return int(dark_column_counts[x])
+
+        def covered_row_count(x_values: list[int]) -> int:
+            return int(np.count_nonzero(dark[:, x_values].any(axis=1)))
+    else:
+        pixels = gray.load()
+
+        def column_dark_count(x: int) -> int:
+            return sum(1 for y in range(height) if pixels[x, y] <= EDGE_GUIDE_DARK_THRESHOLD)
+
+        def covered_row_count(x_values: list[int]) -> int:
+            covered_rows: set[int] = set()
+            for x in x_values:
+                for y in range(height):
+                    if pixels[x, y] <= EDGE_GUIDE_DARK_THRESHOLD:
+                        covered_rows.add(y)
+            return len(covered_rows)
+
     def is_guide_column(x: int) -> bool:
-        dark_count = 0
-        for y in range(height):
-            if pixels[x, y] <= EDGE_GUIDE_DARK_THRESHOLD:
-                dark_count += 1
-        return dark_count >= min_dark_pixels
+        return column_dark_count(x) >= min_dark_pixels
 
     def find_slanted_guide_cluster(x_values: range) -> tuple[int, int] | None:
-        candidates: list[tuple[int, int, set[int]]] = []
-        for x in x_values:
-            dark_rows: set[int] = set()
-            for y in range(height):
-                if pixels[x, y] <= EDGE_GUIDE_DARK_THRESHOLD:
-                    dark_rows.add(y)
-            if len(dark_rows) >= min_cluster_column_pixels:
-                candidates.append((x, len(dark_rows), dark_rows))
+        candidates = [x for x in x_values if column_dark_count(x) >= min_cluster_column_pixels]
 
-        clusters: list[list[tuple[int, int, set[int]]]] = []
-        current: list[tuple[int, int, set[int]]] = []
+        clusters: list[list[int]] = []
+        current: list[int] = []
         for candidate in candidates:
-            if current and candidate[0] > current[-1][0] + EDGE_GUIDE_CLUSTER_GAP_PX + 1:
+            if current and candidate > current[-1] + EDGE_GUIDE_CLUSTER_GAP_PX + 1:
                 clusters.append(current)
                 current = []
             current.append(candidate)
@@ -522,14 +541,11 @@ def _trim_edge_vertical_guides(image: Image.Image) -> Image.Image:
 
         valid_clusters: list[tuple[int, int]] = []
         for cluster in clusters:
-            start_x = min(item[0] for item in cluster)
-            end_x = max(item[0] for item in cluster)
+            start_x = cluster[0]
+            end_x = cluster[-1]
             if end_x - start_x + 1 > EDGE_GUIDE_CLUSTER_MAX_WIDTH_PX:
                 continue
-            covered_rows: set[int] = set()
-            for item in cluster:
-                covered_rows.update(item[2])
-            if len(covered_rows) >= min_cluster_coverage:
+            if covered_row_count(cluster) >= min_cluster_coverage:
                 valid_clusters.append((start_x, end_x))
 
         if not valid_clusters:
@@ -568,46 +584,6 @@ def _trim_edge_attached_page_chrome(image: Image.Image) -> Image.Image:
         return image
 
     rgb = image.convert("RGB")
-    if np is not None:
-        arr = np.asarray(rgb, dtype=np.uint8)
-        rgb_float = arr.astype(np.float32)
-        luminance = (
-            0.299 * rgb_float[..., 0]
-            + 0.587 * rgb_float[..., 1]
-            + 0.114 * rgb_float[..., 2]
-        )
-        saturation = channel_saturation(rgb_float)
-        foreground = (luminance <= 246.0) | (saturation >= 24.0)
-
-        def is_foreground(x: int, y: int) -> bool:
-            return bool(foreground[y, x])
-
-        def new_visited() -> Any:
-            return np.zeros((height, scan_width), dtype=bool)
-
-        def visited_get(visited: Any, y: int, x: int) -> bool:
-            return bool(visited[y, x])
-
-        def visited_set(visited: Any, y: int, x: int) -> None:
-            visited[y, x] = True
-    else:
-        pixels = rgb.load()
-
-        def is_foreground(x: int, y: int) -> bool:
-            red, green, blue = pixels[x, y]
-            luminance = 0.299 * red + 0.587 * green + 0.114 * blue
-            saturation = max(red, green, blue) - min(red, green, blue)
-            return luminance <= 246.0 or saturation >= 24.0
-
-        def new_visited() -> Any:
-            return [[False] * scan_width for _ in range(height)]
-
-        def visited_get(visited: Any, y: int, x: int) -> bool:
-            return bool(visited[y][x])
-
-        def visited_set(visited: Any, y: int, x: int) -> None:
-            visited[y][x] = True
-
     scan_width = min(
         width,
         max(32, min(SIDE_PAGE_CHROME_SCAN_MAX_PX, int(round(width * SIDE_PAGE_CHROME_SCAN_RATIO)))),
@@ -617,46 +593,53 @@ def _trim_edge_attached_page_chrome(image: Image.Image) -> Image.Image:
     max_tab_width = max(18, int(round(width * SIDE_PAGE_CHROME_TAB_MAX_WIDTH_RATIO)))
     max_line_width = max(8, int(round(width * 0.018)))
 
+    # Only the two scan strips are ever read, so the foreground mask is built
+    # per strip instead of over the whole crop.
+    if np is not None:
+        arr = np.asarray(rgb, dtype=np.uint8)
+
+        def strip_foreground(x_min: int, x_max: int) -> Any:
+            strip = arr[:, x_min:x_max, :].astype(np.float32)
+            luminance = channel_luminance(strip)
+            saturation = channel_saturation(strip)
+            return (luminance <= 246.0) | (saturation >= 24.0)
+    else:
+        pixels = rgb.load()
+
+        def strip_foreground(x_min: int, x_max: int) -> Any:
+            rows = []
+            for y in range(height):
+                row = []
+                for x in range(x_min, x_max):
+                    red, green, blue = pixels[x, y]
+                    luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+                    saturation = max(red, green, blue) - min(red, green, blue)
+                    row.append(luminance <= 246.0 or saturation >= 24.0)
+                rows.append(row)
+            return rows
+
     def edge_components(side: str) -> list[tuple[int, int, int, int, int]]:
         seed_width = max(4, min(scan_width, max(20, int(round(width * 0.035)))))
         if side == "left":
             x_min, x_max = 0, scan_width
-            edge_columns = range(0, min(seed_width, scan_width))
+            seed_start, seed_stop = 0, min(seed_width, scan_width)
         else:
             x_min, x_max = width - scan_width, width
-            edge_columns = range(max(width - seed_width, x_min), width)
+            seed_start, seed_stop = max(width - seed_width, x_min) - x_min, scan_width
 
-        visited = new_visited()
-        components: list[tuple[int, int, int, int, int]] = []
-        for y in range(height):
-            for x in edge_columns:
-                if not is_foreground(x, y):
-                    continue
-                local_x = x - x_min
-                if local_x < 0 or local_x >= scan_width or visited_get(visited, y, local_x):
-                    continue
-                stack = [(x, y)]
-                visited_set(visited, y, local_x)
-                min_x = max_x = x
-                min_y = max_y = y
-                count = 0
-                while stack:
-                    cx, cy = stack.pop()
-                    count += 1
-                    min_x = min(min_x, cx)
-                    max_x = max(max_x, cx)
-                    min_y = min(min_y, cy)
-                    max_y = max(max_y, cy)
-                    for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
-                        if nx < x_min or nx >= x_max or ny < 0 or ny >= height:
-                            continue
-                        lx = nx - x_min
-                        if visited_get(visited, ny, lx) or not is_foreground(nx, ny):
-                            continue
-                        visited_set(visited, ny, lx)
-                        stack.append((nx, ny))
-                components.append((min_x, min_y, max_x, max_y, count))
-        return components
+        foreground = strip_foreground(x_min, x_max)
+        if np is not None:
+            seeds = np.zeros_like(foreground)
+            seeds[:, seed_start:seed_stop] = True
+        else:
+            seeds = [
+                [seed_start <= x < seed_stop for x in range(x_max - x_min)]
+                for _ in range(height)
+            ]
+        return [
+            (min_x + x_min, min_y, max_x + x_min, max_y, count)
+            for min_x, min_y, max_x, max_y, count in seeded_components(foreground, seeds)
+        ]
 
     left_trim = 0
     right_trim = width
@@ -937,46 +920,31 @@ def _erase_corner_page_badges(image: Image.Image) -> Image.Image:
 
     mode = image.mode
     rgba = image.convert("RGBA")
+    # Only the four corner ROIs are ever inspected, so the foreground mask is
+    # built per ROI instead of over the whole crop.
     if np is not None:
         arr = np.asarray(rgba, dtype=np.uint8)
-        rgb_float = arr[..., :3].astype(np.float32)
-        luminance = (
-            0.299 * rgb_float[..., 0]
-            + 0.587 * rgb_float[..., 1]
-            + 0.114 * rgb_float[..., 2]
-        )
-        saturation = channel_saturation(rgb_float)
-        alpha = arr[..., 3]
-        foreground = (alpha > 24) & ((luminance <= 246.0) | (saturation >= 24.0))
 
-        def is_foreground(x: int, y: int) -> bool:
-            return bool(foreground[y, x])
-
-        def new_visited() -> Any:
-            return np.zeros((roi_height, roi_width), dtype=bool)
-
-        def visited_get(visited: Any, y: int, x: int) -> bool:
-            return bool(visited[y, x])
-
-        def visited_set(visited: Any, y: int, x: int) -> None:
-            visited[y, x] = True
+        def roi_foreground(left: int, top: int, roi_width: int, roi_height: int) -> Any:
+            region = arr[top : top + roi_height, left : left + roi_width]
+            rgb_float = region[..., :3].astype(np.float32)
+            luminance = channel_luminance(rgb_float)
+            saturation = channel_saturation(rgb_float)
+            return (region[..., 3] > 24) & ((luminance <= 246.0) | (saturation >= 24.0))
     else:
         pixels = rgba.load()
 
-        def is_foreground(x: int, y: int) -> bool:
-            red, green, blue, alpha = pixels[x, y]
-            luminance = 0.299 * red + 0.587 * green + 0.114 * blue
-            saturation = max(red, green, blue) - min(red, green, blue)
-            return alpha > 24 and (luminance <= 246.0 or saturation >= 24.0)
-
-        def new_visited() -> Any:
-            return [[False] * roi_width for _ in range(roi_height)]
-
-        def visited_get(visited: Any, y: int, x: int) -> bool:
-            return bool(visited[y][x])
-
-        def visited_set(visited: Any, y: int, x: int) -> None:
-            visited[y][x] = True
+        def roi_foreground(left: int, top: int, roi_width: int, roi_height: int) -> Any:
+            rows = []
+            for y in range(top, top + roi_height):
+                row = []
+                for x in range(left, left + roi_width):
+                    red, green, blue, alpha = pixels[x, y]
+                    luminance = 0.299 * red + 0.587 * green + 0.114 * blue
+                    saturation = max(red, green, blue) - min(red, green, blue)
+                    row.append(alpha > 24 and (luminance <= 246.0 or saturation >= 24.0))
+                rows.append(row)
+            return rows
 
     roi_width = min(width, max(48, min(CORNER_PAGE_BADGE_SCAN_MAX_PX, int(round(width * CORNER_PAGE_BADGE_SCAN_RATIO)))))
     roi_height = min(height, max(48, min(CORNER_PAGE_BADGE_SCAN_MAX_PX, int(round(height * CORNER_PAGE_BADGE_SCAN_RATIO)))))
@@ -992,42 +960,29 @@ def _erase_corner_page_badges(image: Image.Image) -> Image.Image:
     )
 
     for horizontal, vertical, left, top in corner_specs:
-        visited = new_visited()
-        seeds: list[tuple[int, int]] = []
-        x_edge = range(0, seed_px) if horizontal == "left" else range(roi_width - seed_px, roi_width)
-        y_edge = range(roi_height - seed_px, roi_height) if vertical == "bottom" else range(0, seed_px)
-        for y in range(roi_height):
-            for x in x_edge:
-                if is_foreground(left + x, top + y):
-                    seeds.append((x, y))
-        for y in y_edge:
-            for x in range(roi_width):
-                if is_foreground(left + x, top + y):
-                    seeds.append((x, y))
+        foreground = roi_foreground(left, top, roi_width, roi_height)
+        if horizontal == "left":
+            x_seed_start, x_seed_stop = 0, seed_px
+        else:
+            x_seed_start, x_seed_stop = roi_width - seed_px, roi_width
+        if vertical == "bottom":
+            y_seed_start, y_seed_stop = roi_height - seed_px, roi_height
+        else:
+            y_seed_start, y_seed_stop = 0, seed_px
+        if np is not None:
+            seeds = np.zeros((roi_height, roi_width), dtype=bool)
+            seeds[:, x_seed_start:x_seed_stop] = True
+            seeds[y_seed_start:y_seed_stop, :] = True
+        else:
+            seeds = [
+                [
+                    (x_seed_start <= x < x_seed_stop) or (y_seed_start <= y < y_seed_stop)
+                    for x in range(roi_width)
+                ]
+                for y in range(roi_height)
+            ]
 
-        for seed_x, seed_y in seeds:
-            if visited_get(visited, seed_y, seed_x) or not is_foreground(left + seed_x, top + seed_y):
-                continue
-            stack = [(seed_x, seed_y)]
-            visited_set(visited, seed_y, seed_x)
-            min_x = max_x = seed_x
-            min_y = max_y = seed_y
-            count = 0
-            while stack:
-                cx, cy = stack.pop()
-                count += 1
-                min_x = min(min_x, cx)
-                max_x = max(max_x, cx)
-                min_y = min(min_y, cy)
-                max_y = max(max_y, cy)
-                for nx, ny in ((cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)):
-                    if nx < 0 or nx >= roi_width or ny < 0 or ny >= roi_height:
-                        continue
-                    if visited_get(visited, ny, nx) or not is_foreground(left + nx, top + ny):
-                        continue
-                    visited_set(visited, ny, nx)
-                    stack.append((nx, ny))
-
+        for min_x, min_y, max_x, max_y, count in seeded_components(foreground, seeds):
             component_width = max_x - min_x + 1
             component_height = max_y - min_y + 1
             touches_horizontal = min_x <= seed_px if horizontal == "left" else max_x >= roi_width - seed_px - 1
