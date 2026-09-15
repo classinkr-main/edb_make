@@ -28,7 +28,7 @@ from starlette.concurrency import run_in_threadpool
 from problem_parser import PdfUnreadableError, inspect_pdf, parse_problems, parser_version
 from trial_config import TrialConfig
 from trial_input import REJECTIONS, TrialRejected, check_pdf_info, check_upload_head, reject
-from trial_preview import build_parse_payload
+from trial_preview import build_parse_body
 from trial_quota import MemoryQuotaStore, QuotaUnavailable, SupabaseQuotaStore, SupabaseRest, hash_ip, kst_day
 from trial_turnstile import TurnstileUnavailable, verify_turnstile
 
@@ -164,7 +164,7 @@ def create_app(
             result = parser(source, work_dir=work_dir, max_pages=config.limits.max_pages)
             timing: dict[str, int] = dict(result.timing_ms)
             encode_started_at = time.perf_counter()
-            payload = build_parse_payload(
+            payload, body = build_parse_body(
                 result,
                 remaining_today=remaining_today,
                 elapsed_ms=_ms(started_at),
@@ -175,7 +175,6 @@ def create_app(
                     "instance_age_s": round(time.time() - INSTANCE_STARTED_AT, 1),
                 },
             )
-            body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             # encode is measured after the body exists, so the response cannot include it; the event does.
             timing["encode"] = _ms(encode_started_at)
             timing["parse_total"] = _ms(parse_started_at)

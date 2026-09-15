@@ -9,7 +9,7 @@ from PIL import Image
 
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from structured_schema import Box
-from trial_preview import PREVIEW_STEPS, build_parse_payload, encode_jpeg_data_uri
+from trial_preview import PREVIEW_STEPS, build_parse_body, build_parse_payload, encode_jpeg_data_uri
 
 
 def _noise(width: int, height: int, seed: int) -> Image.Image:
@@ -81,7 +81,7 @@ class TestBuildParsePayload(unittest.TestCase):
 
     def test_falls_back_to_smaller_step_when_over_budget(self):
         roomy = build_parse_payload(_result(problem_count=4), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
-        roomy_size = len(json.dumps(roomy, ensure_ascii=False).encode("utf-8"))
+        roomy_size = len(json.dumps(roomy, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         tight = build_parse_payload(
             _result(problem_count=4),
             remaining_today=1,
@@ -90,7 +90,7 @@ class TestBuildParsePayload(unittest.TestCase):
             budget_bytes=roomy_size - 1,
         )
         self.assertGreater(tight["preview_step"], 0)
-        self.assertLessEqual(len(json.dumps(tight, ensure_ascii=False).encode("utf-8")), roomy_size - 1)
+        self.assertLessEqual(len(json.dumps(tight, ensure_ascii=False, separators=(",", ":")).encode("utf-8")), roomy_size - 1)
 
     def test_uses_last_step_when_nothing_fits(self):
         payload = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3, budget_bytes=10)
@@ -121,6 +121,11 @@ class TestBuildParsePayload(unittest.TestCase):
         self.assertEqual("abcd1234", payload["instance_id"])
         self.assertEqual(12.5, payload["instance_age_s"])
         self.assertNotIn("timing_ms", build_parse_payload(_result(), remaining_today=2, elapsed_ms=10, processed_page_limit=3))
+
+    def test_build_parse_body_returns_the_bytes_it_measured(self):
+        payload, body = build_parse_body(_result(), remaining_today=2, elapsed_ms=10, processed_page_limit=3)
+        self.assertEqual(json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"), body)
+        self.assertEqual(payload, build_parse_payload(_result(), remaining_today=2, elapsed_ms=10, processed_page_limit=3))
 
 
 if __name__ == "__main__":

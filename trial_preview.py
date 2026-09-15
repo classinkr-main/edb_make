@@ -117,7 +117,7 @@ def _payload_for_step(
     return payload
 
 
-def build_parse_payload(
+def build_parse_body(
     result: ParseResult,
     *,
     remaining_today: int,
@@ -125,9 +125,10 @@ def build_parse_payload(
     processed_page_limit: int,
     budget_bytes: int = RESPONSE_BUDGET_BYTES,
     extra: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Return the first preview step whose JSON fits the budget, else the smallest step."""
+) -> tuple[dict[str, Any], bytes]:
+    """Return the first preview step whose compact JSON fits the budget (else the smallest) and that JSON."""
     payload: dict[str, Any] = {}
+    body = b""
     for step_index in range(len(PREVIEW_STEPS)):
         payload = _payload_for_step(
             result,
@@ -137,6 +138,26 @@ def build_parse_payload(
             processed_page_limit=processed_page_limit,
             extra=extra,
         )
-        if len(json.dumps(payload, ensure_ascii=False).encode("utf-8")) <= budget_bytes:
-            return payload
-    return payload
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        if len(body) <= budget_bytes:
+            return payload, body
+    return payload, body
+
+
+def build_parse_payload(
+    result: ParseResult,
+    *,
+    remaining_today: int,
+    elapsed_ms: int,
+    processed_page_limit: int,
+    budget_bytes: int = RESPONSE_BUDGET_BYTES,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return build_parse_body(
+        result,
+        remaining_today=remaining_today,
+        elapsed_ms=elapsed_ms,
+        processed_page_limit=processed_page_limit,
+        budget_bytes=budget_bytes,
+        extra=extra,
+    )[0]
