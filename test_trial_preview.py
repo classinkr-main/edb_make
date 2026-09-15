@@ -24,7 +24,7 @@ def _result(problem_count: int = 2, page_size=(1915, 2811), problem_size=(1600, 
             number=index,
             title=f"{index}.",
             regions=[ParsedRegion(page_id="p1", bbox=Box(left=10.5, top=20.25, width=300.0, height=200.0))],
-            risk_flags=["low_confidence"] if index == 1 else [],
+            risk_flags=["passage_cross_page_merge_check"] if index == 1 else (["marker_conflicts"] if index == 2 else []),
             image=_noise(*problem_size, seed=index + 10),
         )
         for index in range(1, problem_count + 1)
@@ -59,9 +59,10 @@ class TestBuildParsePayload(unittest.TestCase):
         self.assertEqual({"page_id": "p1", "index": 0, "width": 1915, "height": 2811}, {k: page[k] for k in ("page_id", "index", "width", "height")})
         problem = payload["problems"][0]
         self.assertEqual(
-            {"problem_id": "q1", "number": 1, "title": "1.", "risk_flags": ["low_confidence"]},
-            {k: problem[k] for k in ("problem_id", "number", "title", "risk_flags")},
+            {"problem_id": "q1", "number": 1, "title": "1.", "risk_flags": ["passage_cross_page_merge_check"], "needs_review": False},
+            {k: problem[k] for k in ("problem_id", "number", "title", "risk_flags", "needs_review")},
         )
+        self.assertTrue(payload["problems"][1]["needs_review"])
         self.assertEqual([{"page_id": "p1", "bbox": {"left": 10.5, "top": 20.25, "width": 300.0, "height": 200.0}}], problem["regions"])
         self.assertEqual(0, payload["preview_step"])
         self.assertEqual(PREVIEW_STEPS[0].page_long_side, max(_decode(page["preview"]).size))

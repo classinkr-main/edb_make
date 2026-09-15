@@ -15,6 +15,15 @@ from problem_parser import ParseResult
 # Vercel caps function response bodies at 4.5 MB; leave room for headers and slack.
 RESPONSE_BUDGET_BYTES = 3_500_000
 
+# Flags that mean the problem boundary itself is uncertain. Desktop review
+# hints such as passage_cross_page_merge_check tag half of a normal Korean
+# exam, so the trial does not badge them.
+REVIEW_WORTHY_FLAGS = frozenset({"fallback_grouping", "merged_problem_block", "marker_conflicts", "hwp_oversegmentation"})
+
+
+def needs_review(risk_flags: list[str]) -> bool:
+    return any(flag in REVIEW_WORTHY_FLAGS for flag in risk_flags)
+
 
 @dataclass(frozen=True)
 class PreviewStep:
@@ -87,6 +96,7 @@ def _payload_for_step(
                     for region in problem.regions
                 ],
                 "risk_flags": list(problem.risk_flags),
+                "needs_review": needs_review(problem.risk_flags),
                 "preview": encode_jpeg_data_uri(problem.image, long_side=step.problem_long_side, quality=step.quality),
             }
             for problem in result.problems
