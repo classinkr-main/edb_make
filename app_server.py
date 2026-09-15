@@ -34,6 +34,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
@@ -513,6 +514,10 @@ DEFAULT_ARTIFACT_RETENTION_DAYS = 30.0
 FILE_PREVIEW_MIN_DIMENSION = 256
 FILE_PREVIEW_MAX_DIMENSION = 2048
 FILE_PREVIEW_JPEG_QUALITY = 82
+# A board can hold several hundred tiles, so a fixed entry count evicted a
+# preview long before the teacher scrolled back to it and paid for the resize
+# and re-encode again. Bound the cache by bytes instead.
+FILE_PREVIEW_CACHE_MAX_BYTES = 96 * 1024 * 1024
 _session_storage_lock = threading.RLock()
 
 
@@ -2847,8 +2852,51 @@ def _parse_file_preview_max_dimension(query: dict[str, list[str]]) -> int | None
     return max(FILE_PREVIEW_MIN_DIMENSION, min(FILE_PREVIEW_MAX_DIMENSION, requested))
 
 
-@lru_cache(maxsize=32)
+_file_preview_cache: "OrderedDict[tuple[str, int, int, int], tuple[bytes, str] | None]" = OrderedDict()
+_file_preview_cache_bytes = 0
+_file_preview_cache_lock = threading.Lock()
+
+
+def clear_file_preview_cache() -> None:
+    global _file_preview_cache_bytes
+    with _file_preview_cache_lock:
+        _file_preview_cache.clear()
+        _file_preview_cache_bytes = 0
+
+
+def file_preview_cache_stats() -> dict[str, int]:
+    with _file_preview_cache_lock:
+        return {"entries": len(_file_preview_cache), "bytes": _file_preview_cache_bytes}
+
+
 def _build_file_preview_payload(
+    path_value: str,
+    modified_ns: int,
+    file_size: int,
+    max_dimension: int,
+) -> tuple[bytes, str] | None:
+    global _file_preview_cache_bytes
+    cache_key = (path_value, modified_ns, file_size, max_dimension)
+    with _file_preview_cache_lock:
+        if cache_key in _file_preview_cache:
+            _file_preview_cache.move_to_end(cache_key)
+            return _file_preview_cache[cache_key]
+
+    payload = _render_file_preview_payload(path_value, modified_ns, file_size, max_dimension)
+
+    with _file_preview_cache_lock:
+        if cache_key in _file_preview_cache:
+            _file_preview_cache.move_to_end(cache_key)
+            return _file_preview_cache[cache_key]
+        _file_preview_cache[cache_key] = payload
+        _file_preview_cache_bytes += len(payload[0]) if payload else 0
+        while _file_preview_cache_bytes > FILE_PREVIEW_CACHE_MAX_BYTES and len(_file_preview_cache) > 1:
+            _, evicted = _file_preview_cache.popitem(last=False)
+            _file_preview_cache_bytes -= len(evicted[0]) if evicted else 0
+    return payload
+
+
+def _render_file_preview_payload(
     path_value: str,
     modified_ns: int,
     file_size: int,

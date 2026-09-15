@@ -1611,7 +1611,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             handler.end_headers = lambda: None
             handler.send_error = lambda status, message=None: statuses.append(status)
 
-            app_server._build_file_preview_payload.cache_clear()
+            app_server.clear_file_preview_cache()
             parsed = app_server.urlparse(
                 f"{app_server.path_to_api_url(artifact)}&previewMax=1024"
             )
@@ -1626,7 +1626,7 @@ class TestStaticAssetCaching(unittest.TestCase):
             with Image.open(artifact) as source:
                 self.assertEqual((2400, 1600), source.size)
             self.assertEqual(original_size, artifact.stat().st_size)
-            app_server._build_file_preview_payload.cache_clear()
+            app_server.clear_file_preview_cache()
 
     def test_file_download_marks_zip_as_attachment(self):
         with TemporaryDirectory() as raw_tmp:

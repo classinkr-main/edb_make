@@ -211,6 +211,85 @@ class TestPagesJsonParsing(unittest.TestCase):
             self.assertEqual([], app_server._session_pages_json_pages({"pages_json_path": str(not_a_list)}))
 
 
+class TestFilePreviewCache(unittest.TestCase):
+    def setUp(self) -> None:
+        app_server.clear_file_preview_cache()
+
+    def _write_image(self, path: Path, size=(2400, 1600)) -> None:
+        from PIL import Image
+
+        Image.new("RGB", size, "white").save(path, format="PNG")
+
+    def _payload(self, path: Path, max_dimension: int = 512):
+        stat = path.stat()
+        return app_server._build_file_preview_payload(
+            str(path), stat.st_mtime_ns, stat.st_size, max_dimension
+        )
+
+    def test_a_second_request_reuses_the_rendered_preview(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "page.png"
+            self._write_image(source)
+
+            renders = []
+            real_render = app_server._render_file_preview_payload
+            with patch.object(
+                app_server,
+                "_render_file_preview_payload",
+                lambda *args: (renders.append(args), real_render(*args))[1],
+            ):
+                first = self._payload(source)
+                second = self._payload(source)
+
+            self.assertEqual(1, len(renders))
+            self.assertIs(first, second)
+            self.assertEqual(1, app_server.file_preview_cache_stats()["entries"])
+
+    def test_a_rewritten_source_is_re_rendered(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "page.png"
+            self._write_image(source)
+            self._payload(source)
+
+            self._write_image(source, size=(1800, 1200))
+            renders = []
+            real_render = app_server._render_file_preview_payload
+            with patch.object(
+                app_server,
+                "_render_file_preview_payload",
+                lambda *args: (renders.append(args), real_render(*args))[1],
+            ):
+                self._payload(source)
+
+            self.assertEqual(1, len(renders))
+
+    def test_the_cache_is_bounded_by_bytes(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            sources = []
+            for index in range(4):
+                source = root / f"page-{index}.png"
+                self._write_image(source, size=(2400 + index, 1600))
+                sources.append(source)
+
+            with patch.object(app_server, "FILE_PREVIEW_CACHE_MAX_BYTES", 1):
+                for source in sources:
+                    self._payload(source)
+
+            stats = app_server.file_preview_cache_stats()
+            self.assertEqual(1, stats["entries"])
+            self.assertGreater(stats["bytes"], 0)
+
+    def test_a_small_source_needs_no_preview_and_is_still_remembered(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            source = Path(raw_tmp) / "small.png"
+            self._write_image(source, size=(120, 90))
+
+            self.assertIsNone(self._payload(source))
+            self.assertEqual(1, app_server.file_preview_cache_stats()["entries"])
+            self.assertEqual(0, app_server.file_preview_cache_stats()["bytes"])
+
+
 class TestSessionFilePathCollection(unittest.TestCase):
     def setUp(self) -> None:
         app_server._canonical_reference_path.cache_clear()
