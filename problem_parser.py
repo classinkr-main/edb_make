@@ -183,6 +183,7 @@ def parse_problems(
         deskew=True,
         crop_margins=True,
         max_dimension=None,
+        timings=timing_ms,
     )
     timing_ms["recognize"] = _elapsed_ms(recognize_started_at)
 
@@ -193,7 +194,9 @@ def parse_problems(
         work_dir,
         LayoutTemplate(name="academy-default"),
         render_board_assets=False,
+        timings=timing_ms,
     )
+    load_started_at = time.perf_counter()
     problems = [
         ParsedProblem(
             problem_id=entry.problem_id,
@@ -205,6 +208,7 @@ def parse_problems(
         )
         for entry in entries
     ]
+    timing_ms["load"] = _elapsed_ms(load_started_at)
     timing_ms["crops"] = _elapsed_ms(crops_started_at)
 
     pages = [

@@ -268,5 +268,21 @@ class TestParseProblems(unittest.TestCase):
             self.assertEqual(2, len(result.pages))
             self.assertFalse((root / "work" / "leading-pages.pdf").exists())
 
+    def test_timing_has_stage_breakdown(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2], [3, 4]])
+            result = parse_problems(path, work_dir=root / "work")
+        expected_keys = {"render", "segment", "recognize", "entries", "assets", "coalesce", "finish", "load", "crops", "total"}
+        self.assertTrue(expected_keys <= set(result.timing_ms), result.timing_ms)
+        for key in expected_keys:
+            self.assertIsInstance(result.timing_ms[key], int)
+            self.assertGreaterEqual(result.timing_ms[key], 0)
+        self.assertLessEqual(result.timing_ms["render"] + result.timing_ms["segment"], result.timing_ms["recognize"] + 50)
+        self.assertLessEqual(
+            result.timing_ms["entries"] + result.timing_ms["assets"] + result.timing_ms["coalesce"] + result.timing_ms["finish"],
+            result.timing_ms["crops"] + 50,
+        )
+
 if __name__ == "__main__":
     unittest.main()

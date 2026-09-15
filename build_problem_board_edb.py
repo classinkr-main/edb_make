@@ -1949,6 +1949,12 @@ class _ImageOnlyRecordImage:
     resolution_policy: str = "source-preserving"
 
 
+def _record_ms(timings: dict[str, int] | None, key: str, started_at: float) -> None:
+    """Store a stage duration when the caller asked for timings; no-op otherwise."""
+    if timings is not None:
+        timings[key] = int(round((time.perf_counter() - started_at) * 1000))
+
+
 def _resolve_problem_asset_worker_count(task_count: int) -> int:
     if task_count <= 1:
         return 1
@@ -2621,7 +2627,9 @@ def build_pages(
     input_intent: str = "auto",
     ocr_semaphore: threading.BoundedSemaphore | None = None,
     global_ocr_worker_limit: int | None = None,
+    timings: dict[str, int] | None = None,
 ) -> tuple[list[PreparedPage], list[PageModel]]:
+    render_started_at = time.perf_counter()
     prepared_pages = prepare_source_pages(
         source,
         pdf_dpi=pdf_dpi,
@@ -2630,6 +2638,7 @@ def build_pages(
         crop_margins=crop_margins,
         max_dimension=max_dimension,
     )
+    _record_ms(timings, "render", render_started_at)
     if _normalize_input_intent(input_intent) == "page-as-is":
         prepared_pages = _tile_page_as_is_prepared_pages(
             prepared_pages,
@@ -2638,6 +2647,7 @@ def build_pages(
         return prepared_pages, _build_page_as_is_models(prepared_pages, subject=subject)
 
     page_ai_config = _to_page_ai_config(ai_fallback_config)
+    segment_started_at = time.perf_counter()
     page_models = build_page_models_for_prepared_pages(
         prepared_pages,
         subject=subject,
@@ -2646,6 +2656,7 @@ def build_pages(
         ocr_semaphore=ocr_semaphore,
         global_ocr_worker_limit=global_ocr_worker_limit,
     )
+    _record_ms(timings, "segment", segment_started_at)
     if debug_segments_dir is not None:
         for prepared_page, page in zip(prepared_pages, page_models):
             debug_path = debug_segments_dir / f"{page.page_id}_segments.png"
@@ -6023,7 +6034,9 @@ def build_problem_entries(
     board_theme: str = DEFAULT_BOARD_THEME,
     content_target: str = "all",
     render_board_assets: bool = True,
+    timings: dict[str, int] | None = None,
 ) -> list[ProblemEntry]:
+    entries_started_at = time.perf_counter()
     crop_dir = output_dir / "problem_crops"
     crop_dir.mkdir(parents=True, exist_ok=True)
     cutout_dir = output_dir / "problem_cutouts"
@@ -6361,6 +6374,8 @@ def build_problem_entries(
                 )
             )
 
+    _record_ms(timings, "entries", entries_started_at)
+    assets_started_at = time.perf_counter()
     rendered_crop_sizes = iter(
         _render_problem_assets([draft.asset_task for draft in drafts if draft.asset_task is not None])
     )
@@ -6368,6 +6383,8 @@ def build_problem_entries(
         draft.prepared_page.image.size if draft.asset_task is None else next(rendered_crop_sizes)
         for draft in drafts
     ]
+    _record_ms(timings, "assets", assets_started_at)
+    coalesce_started_at = time.perf_counter()
     for draft in drafts:
         if draft.asset_task is not None:
             draft.preserve_media_regions = list(draft.asset_task.rendered_media_regions)
@@ -6378,6 +6395,8 @@ def build_problem_entries(
         render_board_assets=render_board_assets,
     )
     _annotate_passage_crop_quality(drafts, pages)
+    _record_ms(timings, "coalesce", coalesce_started_at)
+    finish_started_at = time.perf_counter()
     entries: list[ProblemEntry] = []
     for draft, crop_size in zip(drafts, crop_sizes):
         actual_height_pages = (
@@ -6412,6 +6431,7 @@ def build_problem_entries(
                 board_render_preprocessed=draft.asset_task is not None,
             )
         )
+    _record_ms(timings, "finish", finish_started_at)
     return entries
 
 
