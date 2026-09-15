@@ -3,9 +3,25 @@
   "regions": ["icn1"],
   "functions": {
     "trial_server.py": {
-      "memory": 2048,
       "maxDuration": 60,
-      "excludeFiles": "{test_*.py,docs/**,scripts/**,ui_prototype/**,assets/**,quality/**,reports_worker/**,release/**,resources/**,.audit/**,.github/**,**/*.md,**/*.ipynb}"
+      "excludeFiles": "{test_*.py,docs/**,scripts/**,ui_prototype/**,assets/**,quality/**,reports_worker/**,release/**,resources/**,supabase/**,.audit/**,.github/**,**/*.md,**/*.ipynb}"
     }
-  }
+  },
+  "crons": [
+    { "path": "/api/cron/daily", "schedule": "10 15 * * *" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; img-src 'self' data:; style-src 'self'; connect-src 'self'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        },
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
+      ]
+    }
+  ]
 }
