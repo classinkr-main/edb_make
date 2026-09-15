@@ -165,18 +165,27 @@ class TestInspectPdf(unittest.TestCase):
         self.assertEqual(2, info.page_count)
         self.assertEqual(1, info.pages_without_text)
 
-    def test_over_limit_skips_page_scan(self):
+    def test_scans_only_leading_pages(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "long.pdf"
-            doc = fitz.open()
-            for _ in range(5):
-                doc.new_page(width=600, height=800)
-            doc.save(path)
+            path = _write_text_exam_pdf(Path(temp_dir) / "long.pdf", [[1, 2], [3, 4], [5, 6]])
+            doc = fitz.open(path)
+            for _ in range(2):
+                scanned = doc.new_page(width=1684, height=2384)
+                scanned.insert_image(scanned.rect, stream=_png_bytes())
+            doc.saveIncr()
             doc.close()
             info = inspect_pdf(path, max_pages=3)
         self.assertEqual(5, info.page_count)
+        self.assertEqual(3, info.scanned_pages)
         self.assertEqual(0, info.pages_without_text)
-        self.assertEqual(0.0, info.max_page_area_pt)
+        self.assertAlmostEqual(600 * 800, info.max_page_area_pt)
+
+    def test_short_document_scans_every_page(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = _write_text_exam_pdf(Path(temp_dir) / "short.pdf", [[1, 2]])
+            info = inspect_pdf(path, max_pages=3)
+        self.assertEqual(1, info.page_count)
+        self.assertEqual(1, info.scanned_pages)
 
     def test_reports_largest_page_area(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -237,6 +246,27 @@ class TestParseProblems(unittest.TestCase):
             self.assertEqual(result.problems[0].image.size, result.problems[0].image.copy().size)
             self.assertIsNotNone(result.pages[0].image.getpixel((0, 0)))
 
+    def test_max_pages_parses_only_leading_pages_from_a_compacted_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10]])
+            result = parse_problems(path, work_dir=root / "work", max_pages=3)
+            trimmed = root / "work" / "leading-pages.pdf"
+
+            self.assertEqual(5, result.source_page_count)
+            self.assertEqual(3, len(result.pages))
+            self.assertEqual([1, 2, 3, 4, 5, 6], [problem.number for problem in result.problems])
+            self.assertTrue(trimmed.is_file())
+            self.assertLess(trimmed.stat().st_size, path.stat().st_size)
+
+    def test_without_max_pages_parses_whole_document(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2], [3, 4]])
+            result = parse_problems(path, work_dir=root / "work")
+            self.assertEqual(2, result.source_page_count)
+            self.assertEqual(2, len(result.pages))
+            self.assertFalse((root / "work" / "leading-pages.pdf").exists())
 
 if __name__ == "__main__":
     unittest.main()
