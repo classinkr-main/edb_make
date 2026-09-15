@@ -17,6 +17,7 @@ from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult,
 from structured_schema import Box
 from trial_config import TrialConfig
 from trial_quota import MemoryQuotaStore, QuotaUnavailable, hash_ip
+import trial_server
 from trial_server import create_app
 from trial_turnstile import TurnstileOutcome, TurnstileUnavailable
 
@@ -42,14 +43,17 @@ def _result(problem_count: int = 2) -> ParseResult:
 
 
 class FakeParser:
-    def __init__(self, result=None, error=None, gate=None):
+    def __init__(self, result=None, error=None, gate=None, delay=0.0):
         self.result = result or _result()
         self.error = error
         self.gate = gate
+        self.delay = delay
         self.calls = []
 
     def __call__(self, source: Path, *, work_dir: Path, max_pages: int):
         self.calls.append({"source": source, "work_dir": work_dir, "max_pages": max_pages, "bytes": source.read_bytes()})
+        if self.delay:
+            time.sleep(self.delay)
         if self.gate is not None:
             self.gate.wait(timeout=5)
         if self.error is not None:
@@ -214,19 +218,24 @@ class TestParseSuccess(TrialApiCase):
         self.assertEqual(200, self.post_pdf(client).status_code)
 
     def test_response_and_event_carry_timing_and_instance(self):
-        client = self.make_client()
-        response = self.post_pdf(client)
+        client = self.make_client(parser=FakeParser(delay=0.03))
+        with mock.patch.object(trial_server, "INSTANCE_STARTED_AT", time.time() - 60):
+            response = self.post_pdf(client)
         self.assertEqual(200, response.status_code)
         payload = response.json()
         self.assertEqual({"total": 5}, payload["timing_ms"])
         self.assertRegex(payload["instance_id"], r"^[0-9a-f]{8}$")
-        self.assertGreaterEqual(payload["instance_age_s"], 0)
+        self.assertGreaterEqual(payload["instance_age_s"], 60)
         event = self.store.events[-1]
         self.assertEqual(payload["instance_id"], event["instance_id"])
         self.assertEqual(5, event["timing"]["total"])
-        for key in ("encode", "parse_total"):
-            self.assertIsInstance(event["timing"][key], int)
-            self.assertGreaterEqual(event["timing"][key], 0)
+        self.assertIsInstance(event["timing"]["encode"], int)
+        self.assertIsInstance(event["timing"]["parse_total"], int)
+        self.assertGreaterEqual(event["timing"]["parse_total"], 30)
+        self.assertLess(event["timing"]["encode"], event["timing"]["parse_total"])
+
+        second_response = self.post_pdf(client)
+        self.assertEqual(payload["instance_id"], second_response.json()["instance_id"])
 
 
 class TestParseRejections(TrialApiCase):
