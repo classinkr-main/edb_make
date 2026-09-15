@@ -144,7 +144,7 @@ git commit -m "feat: record stage timing, instance, busy reason, and complexity 
         self.assertEqual(0, self.used())
 
     def test_quota_store_outage_records_reason(self):
-        client = self.make_client(store=ExplodingStore())
+        client = self.make_client(store=CommitThenTimeoutStore())
         response = self.post_pdf(client)
         self.assertEqual(503, response.status_code)
         self.assertEqual("quota_store", self.store.events[-1]["reject_detail"])
@@ -166,11 +166,14 @@ git commit -m "feat: record stage timing, instance, busy reason, and complexity 
             first = pool.submit(self.post_pdf, client, ip="203.0.113.1")
             time.sleep(0.2)  # let the first request take the only slot
             second = self.post_pdf(client, ip="203.0.113.2")
+            # Check right away: the still-blocked first request only finishes (and
+            # records its own event) after gate.set() below, which would otherwise
+            # shadow the busy event we're checking for here.
+            self.assertEqual(503, second.status_code)
+            self.assertEqual("slot_wait", self.store.events[-1]["reject_detail"])
+            self.assertEqual(0, self.used("203.0.113.2"))
             gate.set()
             self.assertEqual(200, first.result().status_code)
-        self.assertEqual(503, second.status_code)
-        self.assertEqual("slot_wait", self.store.events[-1]["reject_detail"])
-        self.assertEqual(0, self.used("203.0.113.2"))
 
     def test_parser_crash_stays_charged_and_has_no_detail(self):
         client = self.make_client(parser=FakeParser(error=RuntimeError("boom")))
