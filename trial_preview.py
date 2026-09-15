@@ -57,7 +57,9 @@ def encode_jpeg_data_uri(image: Image.Image, *, long_side: int, quality: int) ->
     scale = long_side / max(preview.size)
     if scale < 1:
         size = (max(1, round(preview.width * scale)), max(1, round(preview.height * scale)))
-        preview = preview.resize(size, Image.Resampling.LANCZOS)
+        # Two-step: integer reduce() first, then a cheap filter. LANCZOS from 200 DPI cost 0.17 s
+        # per request locally (about 0.7 s on Vercel) for no visible gain at preview sizes.
+        preview = preview.resize(size, Image.Resampling.HAMMING, reducing_gap=2.0)
     buffer = io.BytesIO()
     preview.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=False)
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")

@@ -3,6 +3,7 @@ import io
 import json
 import random
 import unittest
+from unittest import mock
 
 from PIL import Image
 
@@ -44,6 +45,16 @@ class TestEncodeJpegDataUri(unittest.TestCase):
         self.assertEqual((800, 400), big.size)
         small = _decode(encode_jpeg_data_uri(_noise(300, 200, 1), long_side=800, quality=70))
         self.assertEqual((300, 200), small.size)
+
+    def test_downscale_uses_two_step_reduce(self):
+        with mock.patch.object(Image.Image, "resize", wraps=Image.new("RGB", (2339, 3308), "white").resize) as resize:
+            encode_jpeg_data_uri(Image.new("RGB", (2339, 3308), "white"), long_side=1200, quality=70)
+        self.assertEqual(Image.Resampling.HAMMING, resize.call_args.args[1])
+        self.assertEqual(2.0, resize.call_args.kwargs["reducing_gap"])
+
+    def test_downscaled_dimensions_are_unchanged(self):
+        preview = _decode(encode_jpeg_data_uri(_noise(2339, 3308, seed=1), long_side=1200, quality=70))
+        self.assertEqual((848, 1200), preview.size)
 
 
 class TestBuildParsePayload(unittest.TestCase):
