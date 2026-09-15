@@ -10,7 +10,7 @@ from assemble_page import group_problem_units
 from build_problem_board_edb import build_problem_entries
 from layout_template_schema import LayoutTemplate
 from preprocess import PreparedPage
-from problem_parser import PdfUnreadableError, inspect_pdf
+from problem_parser import PdfUnreadableError, inspect_pdf, parse_problems
 from structured_schema import BlockType, Box, ContentBlock, PageModel, ProblemUnit, Subject
 
 
@@ -200,6 +200,42 @@ class TestInspectPdf(unittest.TestCase):
             doc.close()
             with self.assertRaises(PdfUnreadableError):
                 inspect_pdf(path, max_pages=3)
+
+
+class TestParseProblems(unittest.TestCase):
+    def test_text_pdf_yields_numbered_problems_inside_their_pages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2, 3, 4], [5, 6]])
+            result = parse_problems(path, work_dir=root / "work")
+
+            self.assertEqual(2, len(result.pages))
+            self.assertEqual([1, 2, 3, 4, 5, 6], [problem.number for problem in result.problems])
+            pages_by_id = {page.page_id: page for page in result.pages}
+            for problem in result.problems:
+                self.assertTrue(problem.regions)
+                for region in problem.regions:
+                    page = pages_by_id[region.page_id]
+                    self.assertGreaterEqual(region.bbox.left, 0.0)
+                    self.assertGreaterEqual(region.bbox.top, 0.0)
+                    self.assertLessEqual(region.bbox.left + region.bbox.width, page.width + 1)
+                    self.assertLessEqual(region.bbox.top + region.bbox.height, page.height + 1)
+                self.assertEqual("RGB", problem.image.mode)
+                self.assertGreater(problem.image.width, 0)
+            for page in result.pages:
+                self.assertEqual((page.width, page.height), page.image.size)
+            self.assertFalse((root / "work" / "problem_cutouts").exists())
+            self.assertIn("recognize", result.timing_ms)
+            self.assertIn("crops", result.timing_ms)
+
+    def test_images_survive_work_dir_removal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2]])
+            with tempfile.TemporaryDirectory() as work_dir:
+                result = parse_problems(path, work_dir=Path(work_dir))
+            self.assertEqual(result.problems[0].image.size, result.problems[0].image.copy().size)
+            self.assertIsNotNone(result.pages[0].image.getpixel((0, 0)))
 
 
 if __name__ == "__main__":
