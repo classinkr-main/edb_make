@@ -1,6 +1,5 @@
 import io
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -287,25 +286,36 @@ class TestParseProblems(unittest.TestCase):
         )
 
     def test_render_timing_stops_before_segmentation(self):
-        # Seam test for the render/segment boundary. Both stages are sub-spans of
-        # "recognize", so the breakdown assertions above hold whichever side of
-        # build_page_models_for_prepared_pages the render stop-mark sits on.
-        # Delaying segmentation and checking which stage absorbs the delay is what
-        # tells a drifted stop-mark (segmentation double-counted into "render")
-        # apart from the correct ordering.
+        # Seam test for the render/segment boundary. A fake clock replaces
+        # time.perf_counter, so the test cannot depend on machine speed: every
+        # clock read advances 1 ms and the patched segmentation step jumps 5 s.
+        # If the render stop-mark drifted past segmentation, "render" would
+        # absorb the 5 s instead of "segment".
         import build_problem_board_edb as board
 
+        class FakeClock:
+            def __init__(self) -> None:
+                self.now = 1000.0
+
+            def __call__(self) -> float:
+                self.now += 0.001
+                return self.now
+
+        clock = FakeClock()
         real_segment = board.build_page_models_for_prepared_pages
 
         def slow_segment(*args, **kwargs):
-            time.sleep(0.3)
+            clock.now += 5.0
             return real_segment(*args, **kwargs)
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2]])
             timings: dict[str, int] = {}
-            with mock.patch.object(board, "build_page_models_for_prepared_pages", slow_segment):
+            with (
+                mock.patch.object(board.time, "perf_counter", clock),
+                mock.patch.object(board, "build_page_models_for_prepared_pages", slow_segment),
+            ):
                 board.build_pages(
                     path,
                     subject=board.resolve_subject("unknown"),
@@ -318,8 +328,49 @@ class TestParseProblems(unittest.TestCase):
                     max_dimension=None,
                     timings=timings,
                 )
-        self.assertGreaterEqual(timings["segment"], 250, timings)
-        self.assertLess(timings["render"], 250, timings)
+        self.assertGreaterEqual(timings["segment"], 5000, timings)
+        self.assertLess(timings["render"], 1000, timings)
+
+    def test_assets_timing_covers_only_asset_rendering(self):
+        # Same fake-clock seam test for build_problem_entries: only the
+        # _render_problem_assets span may absorb the 5 s jump.
+        import build_problem_board_edb as board
+
+        class FakeClock:
+            def __init__(self) -> None:
+                self.now = 2000.0
+
+            def __call__(self) -> float:
+                self.now += 0.001
+                return self.now
+
+        clock = FakeClock()
+        real_render = board._render_problem_assets
+
+        def slow_render(tasks):
+            clock.now += 5.0
+            return real_render(tasks)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prepared_pages, page_models = _cross_page_passage_fixture(root)
+            timings: dict[str, int] = {}
+            with (
+                mock.patch.object(board.time, "perf_counter", clock),
+                mock.patch.object(board, "_render_problem_assets", slow_render),
+            ):
+                board.build_problem_entries(
+                    prepared_pages,
+                    page_models,
+                    root / "out",
+                    LayoutTemplate(name="academy-default"),
+                    render_board_assets=False,
+                    timings=timings,
+                )
+        self.assertGreaterEqual(timings["assets"], 5000, timings)
+        for key in ("entries", "coalesce", "finish"):
+            self.assertLess(timings[key], 1000, timings)
+
 
 if __name__ == "__main__":
     unittest.main()
