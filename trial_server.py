@@ -11,6 +11,7 @@ import time
 
 IMPORT_STARTED_AT = time.perf_counter()
 
+import asyncio
 import hmac
 import json
 import logging
@@ -19,6 +20,7 @@ import resource
 import sys
 import tempfile
 import threading
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,8 +32,8 @@ from starlette.concurrency import run_in_threadpool
 
 from problem_parser import PdfUnreadableError, inspect_pdf, parse_problems, parser_version
 from trial_config import TrialConfig
-from trial_input import TrialRejected, check_pdf_info, check_upload_head, reject
-from trial_preview import build_parse_payload, needs_review
+from trial_input import REJECTIONS, TrialRejected, check_pdf_info, check_upload_head, reject
+from trial_preview import build_parse_payload
 from trial_quota import MemoryQuotaStore, QuotaUnavailable, SupabaseQuotaStore, SupabaseRest, hash_ip, kst_day
 from trial_turnstile import TurnstileUnavailable, verify_turnstile
 
@@ -43,6 +45,7 @@ EVENT_ACTIONS = frozenset({"open", "inquiry"})
 EVENT_MAX_BYTES = 1024
 EVENT_RATE_PER_MINUTE = 20
 NO_STORE = {"Cache-Control": "no-store"}
+SLOT_POLL_SECONDS = 0.05
 
 logger = logging.getLogger("trial_server")
 
@@ -152,27 +155,50 @@ def create_app(
         except Exception:  # events are best effort; the visitor still gets a response
             logger.warning("trial event not recorded", exc_info=True)
 
-    def parse_with_slot(source: Path, work_dir: Path, remaining_today: int, started_at: float) -> dict[str, Any]:
-        if not parse_slots.acquire(timeout=config.parse_wait_seconds):
-            raise reject("busy")
+    async def acquire_parse_slot() -> bool:
+        # Poll on the event loop instead of blocking a worker thread: Fluid compute
+        # shares one process, and a blocked thread per queued request would starve
+        # anyio's 40-thread pool that every other route and Supabase call needs.
+        deadline = time.monotonic() + config.parse_wait_seconds
+        while not parse_slots.acquire(blocking=False):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(SLOT_POLL_SECONDS)
+        return True
+
+    def parse_and_encode(source: Path, work_dir: Path, remaining_today: int, started_at: float) -> tuple[bytes, dict[str, int]]:
         try:
-            try:
-                result = parser(source, work_dir=work_dir, max_pages=config.limits.max_pages)
-                payload = build_parse_payload(
-                    result,
-                    remaining_today=remaining_today,
-                    elapsed_ms=int(round((time.perf_counter() - started_at) * 1000)),
-                    processed_page_limit=config.limits.max_pages,
-                )
-            except Exception as error:
-                logger.exception("trial parse failed")
-                raise reject("parse_failed") from error
-            return payload
-        finally:
-            parse_slots.release()
+            result = parser(source, work_dir=work_dir, max_pages=config.limits.max_pages)
+            payload = build_parse_payload(
+                result,
+                remaining_today=remaining_today,
+                elapsed_ms=int(round((time.perf_counter() - started_at) * 1000)),
+                processed_page_limit=config.limits.max_pages,
+            )
+            body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except Exception as error:
+            logger.exception("trial parse failed")
+            raise reject("parse_failed") from error
+        counts = {
+            "pages": len(payload["pages"]),
+            "problems": len(payload["problems"]),
+            "risk_problems": sum(1 for problem in payload["problems"] if problem["needs_review"]),
+        }
+        return body, counts
+
+    def refund_quietly(request_id: str) -> None:
+        try:
+            store.refund(request_id=request_id)
+        except Exception:
+            logger.warning("trial refund failed", exc_info=True)
+
+    def rejection_response(rejection: Any, event: dict[str, Any]) -> JSONResponse:
+        event.update(status=rejection.status, reject_code=rejection.code)
+        extra = {"remaining_today": 0} if rejection.code == "daily_limit" else {}
+        return JSONResponse(rejection.payload(**extra), status_code=rejection.status, headers=NO_STORE)
 
     @app.get("/api/config")
-    def public_config() -> JSONResponse:
+    async def public_config() -> JSONResponse:
         return JSONResponse(
             {
                 "inquiry_url": config.inquiry_url,
@@ -185,12 +211,13 @@ def create_app(
         )
 
     @app.get("/api/health")
-    def health() -> JSONResponse:
+    async def health() -> JSONResponse:
         return JSONResponse({"status": "ok", "commit": parser_version(), "ready": ready()}, headers=NO_STORE)
 
     @app.post("/api/parse")
-    async def parse(request: Request) -> JSONResponse:
+    async def parse(request: Request) -> Response:
         started_at = time.perf_counter()
+        request_id = str(uuid.uuid4())
         ip = client_ip(request)
         today = kst_day(now())
         subject = hash_ip(ip, salt=salt, day=today)
@@ -206,7 +233,6 @@ def create_app(
             "elapsed_ms": None,
             "ip_hash": subject,
         }
-        consumed = False
         try:
             if not ready():
                 raise reject("busy")
@@ -230,41 +256,43 @@ def create_app(
                     raise reject("unreadable_pdf") from error
                 event["source_pages"] = info.page_count
                 check_pdf_info(info, config.limits)
+                # Take a parse slot before charging, so a request that only waits and
+                # then times out never counts against anyone's daily limit.
+                if not await acquire_parse_slot():
+                    raise reject("busy")
                 try:
-                    decision = await run_in_threadpool(
-                        lambda: store.consume(
-                            day=today,
-                            subject=subject,
-                            limit=config.daily_limit,
-                            global_limit=config.global_daily_limit,
+                    try:
+                        decision = await run_in_threadpool(
+                            lambda: store.consume(
+                                request_id=request_id,
+                                day=today,
+                                subject=subject,
+                                limit=config.daily_limit,
+                                global_limit=config.global_daily_limit,
+                            )
                         )
+                    except QuotaUnavailable as error:
+                        # The charge may have committed before the reply was lost. Refunds
+                        # are keyed by request id, so undoing an unknown outcome is safe.
+                        logger.warning("quota unavailable: %s", error)
+                        await run_in_threadpool(refund_quietly, request_id)
+                        raise reject("busy") from error
+                    if not decision.allowed:
+                        raise reject("daily_limit" if decision.reason == "ip" else "busy")
+                    # From here the use stays charged even if parsing fails: a crashing PDF
+                    # still spent parse CPU, and refunds would let it bypass both caps.
+                    body, counts = await run_in_threadpool(
+                        parse_and_encode, source, Path(temp_dir) / "work", decision.remaining, started_at
                     )
-                except QuotaUnavailable as error:
-                    logger.warning("quota unavailable: %s", error)
-                    raise reject("busy") from error
-                if not decision.allowed:
-                    raise reject("daily_limit" if decision.reason == "ip" else "busy")
-                consumed = True
-                payload = await run_in_threadpool(
-                    parse_with_slot, source, Path(temp_dir) / "work", decision.remaining, started_at
-                )
-            event.update(
-                status=200,
-                pages=len(payload["pages"]),
-                problems=len(payload["problems"]),
-                risk_problems=sum(1 for problem in payload["problems"] if problem["needs_review"]),
-            )
-            response = JSONResponse(payload, headers=NO_STORE)
+                finally:
+                    parse_slots.release()
+            event.update(status=200, **counts)
+            response = Response(body, media_type="application/json", headers=NO_STORE)
         except TrialRejected as rejected:
-            rejection = rejected.rejection
-            if consumed and rejection.status >= 500:
-                try:
-                    await run_in_threadpool(lambda: store.refund(day=today, subject=subject))
-                except Exception:
-                    logger.warning("trial refund failed", exc_info=True)
-            event.update(status=rejection.status, reject_code=rejection.code)
-            extra = {"remaining_today": 0} if rejection.code == "daily_limit" else {}
-            response = JSONResponse(rejection.payload(**extra), status_code=rejection.status, headers=NO_STORE)
+            response = rejection_response(rejected.rejection, event)
+        except Exception:
+            logger.exception("trial parse crashed")
+            response = rejection_response(REJECTIONS["parse_failed"], event)
         event["elapsed_ms"] = int(round((time.perf_counter() - started_at) * 1000))
         await run_in_threadpool(record_event, event)
         logger.info(json.dumps({"event": "trial_parse", **{k: v for k, v in event.items() if k != "ip_hash"}}))

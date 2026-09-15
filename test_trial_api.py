@@ -88,6 +88,27 @@ class FlakyEventStore(MemoryQuotaStore):
         raise QuotaUnavailable("events down")
 
 
+class CommitThenTimeoutStore(MemoryQuotaStore):
+    """trial_consume committed on the server, but the HTTP reply never arrived."""
+
+    def __init__(self):
+        super().__init__()
+        self.refund_calls = []
+
+    def consume(self, **kwargs):
+        super().consume(**kwargs)
+        raise QuotaUnavailable("read timed out after commit")
+
+    def refund(self, *, request_id):
+        self.refund_calls.append(request_id)
+        return super().refund(request_id=request_id)
+
+
+class ExplodingStore(MemoryQuotaStore):
+    def consume(self, **kwargs):
+        raise RuntimeError("unexpected bug")
+
+
 class TrialApiCase(unittest.TestCase):
     def make_client(self, *, config=None, store=None, parser=None, inspector=None, verifier=None):
         self.config = config or TrialConfig(ip_salt="salt", cron_secret="cron-secret")
@@ -268,12 +289,38 @@ class TestParseRejections(TrialApiCase):
         self.assertRejected(self.post_pdf(client), 503, "busy")
         self.assertEqual([], self.parser.calls)
 
-    def test_parser_crash_refunds_the_use(self):
+    def test_parser_crash_keeps_the_use_charged(self):
+        # A PDF that crashes the parser still spent parse CPU; refunding it would let
+        # one crafted file bypass both daily caps.
         client = self.make_client(parser=FakeParser(error=RuntimeError("boom")))
         body = self.assertRejected(self.post_pdf(client), 500, "parse_failed", "ai")
         self.assertNotIn("boom", str(body))
-        self.assertEqual(0, self.used())
+        self.assertEqual(1, self.used())
         self.assertEqual("parse_failed", self.store.events[-1]["reject_code"])
+
+    def test_consume_with_unknown_outcome_is_refunded_by_request_id(self):
+        store = CommitThenTimeoutStore()
+        client = self.make_client(store=store)
+        self.assertRejected(self.post_pdf(client), 503, "busy")
+        self.assertEqual(1, len(store.refund_calls))
+        self.assertIn(store.refund_calls[0], store.charges)
+        self.assertEqual(0, self.used())
+        self.assertEqual([], self.parser.calls)
+
+    def test_unexpected_exception_returns_json_500_and_records_event(self):
+        client = self.make_client(store=ExplodingStore())
+        body = self.assertRejected(self.post_pdf(client), 500, "parse_failed", "ai")
+        self.assertNotIn("unexpected bug", str(body))
+        self.assertEqual("parse_failed", self.store.events[-1]["reject_code"])
+        self.assertEqual(500, self.store.events[-1]["status"])
+
+    def test_non_finite_coordinates_do_not_break_the_response(self):
+        result = _result()
+        result.problems[0].regions[0] = ParsedRegion(page_id="p1", bbox=Box(left=float("nan"), top=1.0, width=2.0, height=3.0))
+        client = self.make_client(parser=FakeParser(result=result))
+        response = self.post_pdf(client)
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual([], response.json()["problems"][0]["regions"])
 
     def test_production_without_secrets_is_busy(self):
         client = self.make_client(config=TrialConfig(production=True, ip_salt="salt"))
@@ -281,7 +328,7 @@ class TestParseRejections(TrialApiCase):
         self.assertEqual([], self.verifier.calls)
         self.assertEqual([], self.parser.calls)
 
-    def test_concurrency_limit_answers_busy_and_refunds(self):
+    def test_concurrency_limit_answers_busy_without_charging(self):
         gate = threading.Event()
         config = TrialConfig(ip_salt="salt", parse_concurrency=1, parse_wait_seconds=0.2)
         client = self.make_client(config=config, parser=FakeParser(gate=gate))
@@ -296,6 +343,27 @@ class TestParseRejections(TrialApiCase):
         self.assertRejected(second, 503, "busy")
         self.assertEqual(0, self.used("203.0.113.2"))
         self.assertEqual(1, self.used("203.0.113.1"))
+        self.assertEqual(1, len(self.store.charges))
+
+    def test_waiting_requests_are_not_charged_and_do_not_block_other_routes(self):
+        gate = threading.Event()
+        config = TrialConfig(ip_salt="salt", parse_concurrency=1, parse_wait_seconds=3.0)
+        client = self.make_client(config=config, parser=FakeParser(gate=gate))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(self.post_pdf, client, ip="203.0.113.1")
+            deadline = time.monotonic() + 5
+            while not self.parser.calls and time.monotonic() < deadline:
+                time.sleep(0.01)
+            second = pool.submit(self.post_pdf, client, ip="203.0.113.2")
+            time.sleep(0.3)
+            self.assertEqual(0, self.used("203.0.113.2"))
+            started = time.monotonic()
+            self.assertEqual(200, client.get("/api/health").status_code)
+            self.assertLess(time.monotonic() - started, 1.0)
+            gate.set()
+            self.assertEqual(200, first.result().status_code)
+            self.assertEqual(200, second.result().status_code)
+        self.assertEqual(1, self.used("203.0.113.2"))
 
 
 class TestDefaultDependencies(unittest.TestCase):

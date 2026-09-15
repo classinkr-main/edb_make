@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,17 @@ REVIEW_WORTHY_FLAGS = frozenset({"fallback_grouping", "merged_problem_block", "m
 
 def needs_review(risk_flags: list[str]) -> bool:
     return any(flag in REVIEW_WORTHY_FLAGS for flag in risk_flags)
+
+
+def _finite_bbox(region: Any) -> dict[str, float] | None:
+    values = {
+        "left": float(region.bbox.left),
+        "top": float(region.bbox.top),
+        "width": float(region.bbox.width),
+        "height": float(region.bbox.height),
+    }
+    # Strict JSON has no NaN or Infinity; a region we cannot draw is better dropped.
+    return values if all(math.isfinite(value) for value in values.values()) else None
 
 
 @dataclass(frozen=True)
@@ -84,16 +96,9 @@ def _payload_for_step(
                 "number": problem.number,
                 "title": problem.title,
                 "regions": [
-                    {
-                        "page_id": region.page_id,
-                        "bbox": {
-                            "left": float(region.bbox.left),
-                            "top": float(region.bbox.top),
-                            "width": float(region.bbox.width),
-                            "height": float(region.bbox.height),
-                        },
-                    }
+                    {"page_id": region.page_id, "bbox": bbox}
                     for region in problem.regions
+                    if (bbox := _finite_bbox(region)) is not None
                 ],
                 "risk_flags": list(problem.risk_flags),
                 "needs_review": needs_review(problem.risk_flags),

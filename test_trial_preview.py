@@ -85,6 +85,14 @@ class TestBuildParsePayload(unittest.TestCase):
         payload = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3, budget_bytes=10)
         self.assertEqual(len(PREVIEW_STEPS) - 1, payload["preview_step"])
 
+    def test_regions_with_non_finite_coordinates_are_dropped(self):
+        result = _result()
+        result.problems[0].regions.append(ParsedRegion(page_id="p1", bbox=Box(left=float("inf"), top=0.0, width=1.0, height=1.0)))
+        result.problems[0].regions.append(ParsedRegion(page_id="p1", bbox=Box(left=1.0, top=float("nan"), width=1.0, height=1.0)))
+        payload = build_parse_payload(result, remaining_today=1, elapsed_ms=1, processed_page_limit=3)
+        self.assertEqual(1, len(payload["problems"][0]["regions"]))
+        json.dumps(payload, allow_nan=False)
+
     def test_is_deterministic(self):
         first = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
         second = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
