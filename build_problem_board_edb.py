@@ -1903,6 +1903,7 @@ class _ProblemAssetTask:
     subject: Subject = Subject.UNKNOWN
     source_hints: tuple[str, ...] = ()
     source_media_regions: tuple[dict[str, Any], ...] = ()
+    render_board_asset: bool = True
     rendered_media_regions: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -2288,7 +2289,8 @@ def _render_problem_asset(task: _ProblemAssetTask) -> tuple[int, int]:
             compress_level=INTERMEDIATE_PNG_COMPRESSION_LEVEL,
             optimize=False,
         )
-        _render_problem_board_asset(crop, task)
+        if task.render_board_asset:
+            _render_problem_board_asset(crop, task)
         return crop.size
 
     passage_column_divider_x = (
@@ -2425,7 +2427,8 @@ def _render_problem_asset(task: _ProblemAssetTask) -> tuple[int, int]:
         compress_level=INTERMEDIATE_PNG_COMPRESSION_LEVEL,
         optimize=False,
     )
-    _render_problem_board_asset(crop, task)
+    if task.render_board_asset:
+        _render_problem_board_asset(crop, task)
     return crop.size
 
 
@@ -2502,7 +2505,8 @@ def _render_problem_assets(tasks: list[_ProblemAssetTask]) -> list[tuple[int, in
         if task is canonical:
             continue
         _copy_problem_asset(canonical.crop_path, task.crop_path)
-        _copy_problem_asset(canonical.board_render_path, task.board_render_path)
+        if task.render_board_asset:
+            _copy_problem_asset(canonical.board_render_path, task.board_render_path)
         task.rendered_media_regions = [
             dict(region)
             for region in canonical.rendered_media_regions
@@ -5780,6 +5784,8 @@ def _coalesce_cross_page_passage_drafts(
     drafts: list[_ProblemEntryDraft],
     crop_sizes: list[tuple[int, int]],
     pages: Sequence[PageModel],
+    *,
+    render_board_assets: bool = True,
 ) -> tuple[list[_ProblemEntryDraft], list[tuple[int, int]]]:
     problem_units_by_id = {
         problem.unit_id: problem
@@ -5892,11 +5898,12 @@ def _coalesce_cross_page_passage_drafts(
         ]
         if primary.asset_task is not None:
             primary.asset_task.rendered_media_regions = list(stitched_regions)
-        _stitch_passage_image_files(
-            [drafts[index].board_render_path for index in ordered_indices],
-            primary.board_render_path,
-            transparent=True,
-        )
+        if render_board_assets:
+            _stitch_passage_image_files(
+                [drafts[index].board_render_path for index in ordered_indices],
+                primary.board_render_path,
+                transparent=True,
+            )
 
         # A stitched passage is a single rendered image. Keeping blocks from
         # later pages would make mixed-mode export crop those bboxes from the
@@ -6015,11 +6022,13 @@ def build_problem_entries(
     *,
     board_theme: str = DEFAULT_BOARD_THEME,
     content_target: str = "all",
+    render_board_assets: bool = True,
 ) -> list[ProblemEntry]:
     crop_dir = output_dir / "problem_crops"
     crop_dir.mkdir(parents=True, exist_ok=True)
     cutout_dir = output_dir / "problem_cutouts"
-    cutout_dir.mkdir(parents=True, exist_ok=True)
+    if render_board_assets:
+        cutout_dir.mkdir(parents=True, exist_ok=True)
     chalk_color = _resolve_chalk_color(board_theme)
     resolved_content_target = _normalize_content_target(content_target)
     prepared_by_page_id = {page.page_id: page for page in prepared_pages}
@@ -6347,6 +6356,7 @@ def build_problem_entries(
                             if _problem_allows_selective_media_preservation(problem)
                             else ()
                         ),
+                        render_board_asset=render_board_assets,
                     ),
                 )
             )
@@ -6361,7 +6371,12 @@ def build_problem_entries(
     for draft in drafts:
         if draft.asset_task is not None:
             draft.preserve_media_regions = list(draft.asset_task.rendered_media_regions)
-    drafts, crop_sizes = _coalesce_cross_page_passage_drafts(drafts, crop_sizes, pages)
+    drafts, crop_sizes = _coalesce_cross_page_passage_drafts(
+        drafts,
+        crop_sizes,
+        pages,
+        render_board_assets=render_board_assets,
+    )
     _annotate_passage_crop_quality(drafts, pages)
     entries: list[ProblemEntry] = []
     for draft, crop_size in zip(drafts, crop_sizes):
