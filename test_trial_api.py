@@ -388,6 +388,10 @@ class TestParseRejections(TrialApiCase):
         self.post_pdf(client, body=b"\x89PNG\r\n\x1a\n" + b"0" * 100)
         self.assertEqual("image_not_supported", self.store.events[-1]["reject_code"])
         self.assertIsNone(self.store.events[-1]["reject_detail"])
+        for _ in range(3):
+            self.post_pdf(client)
+        self.assertEqual("daily_limit", self.store.events[-1]["reject_code"])
+        self.assertIsNone(self.store.events[-1]["reject_detail"])
 
     def test_concurrency_limit_answers_busy_without_charging(self):
         gate = threading.Event()
