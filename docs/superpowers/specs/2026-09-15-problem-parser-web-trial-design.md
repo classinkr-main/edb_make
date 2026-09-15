@@ -2,7 +2,7 @@
 
 - 작성일: 2026-09-15
 - 브랜치: `web-trial` (베이스 `up3_mac` @ 5ff735b)
-- 상태: 초안 — 사용자 검토 대기
+- 상태: 구현됨 (Plan 1·2, 2026-09-15). 운영 설정은 `docs/web-trial-operations.md`
 - 선행 문서: `docs/problem-parser-web-trial.md` (2026-09-14, 방향·용량 검토)
 
 ## 1. 결정 사항
@@ -82,7 +82,8 @@
    │                         ├── GET  /              trial_web/ 정적 파일
    │                         ├── POST /api/parse     업로드 → 결과 JSON (동기)
    │                         ├── POST /api/event     추천 팝업 클릭 기록
-   │                         └── GET  /api/health    Vercel Cron이 하루 1회 호출
+   │                         ├── GET  /api/health    배포 점검용 (ready 여부)
+   │                         └── GET  /api/cron/daily Vercel Cron 00:10 KST, Bearer CRON_SECRET
    │                                  │
    │                     /tmp/<요청별 폴더>          [Supabase Postgres · 서울]
    │                     problem_parser               trial_quota (IP·날짜별 횟수)
@@ -171,7 +172,9 @@ def parse_problems(source: Path, *, work_dir: Path, max_pages: int, subject: str
 **`POST /api/event`** — `{"feature": "edb" | "image" | "edit" | "ai" | "scan" | "limit_pages" | "limit_size" | "limit_daily", "action": "open" | "inquiry"}`.
 허용 목록 밖의 값은 버린다. `trial_events`에 기록한다. IP당 분당 20회를 넘으면 조용히 버린다(서버 메모리 기준, 인스턴스별 근사치로 충분).
 
-**`GET /api/health`** — 버전, Supabase 연결 확인(가벼운 `select 1` RPC). Vercel Cron이 하루 1회 호출해 실패하면 알린다.
+**`GET /api/health`** — 버전과 `ready`(필수 비밀값·한도 저장소 준비 여부). 비밀값 이름은 내보내지 않는다.
+
+**`GET /api/cron/daily`** — Vercel Cron이 매일 00:10 KST에 `Authorization: Bearer $CRON_SECRET`으로 호출한다. Supabase 연결 확인(`trial_quota` 1행 조회) 후 `trial_cleanup()`을 부르고 실패하면 503을 돌려 함수 로그에 남긴다. `CRON_SECRET`이 없으면 404.
 
 **설정 (Vercel 환경변수)**
 
@@ -179,7 +182,7 @@ def parse_problems(source: Path, *, work_dir: Path, max_pages: int, subject: str
 |---|---|---|
 | `TRIAL_INQUIRY_URL` | `https://classin.co.kr/contact` | 팝업 버튼 링크. 페이지에 주입한다 |
 | `TRIAL_TURNSTILE_SITE_KEY` / `TRIAL_TURNSTILE_SECRET` | 없음 | 없으면 봇 확인을 건너뛴다(로컬 개발용). `VERCEL_ENV=production`에서 비어 있으면 모든 파싱 요청을 503으로 거부한다 |
-| `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | 없음 | 서버 전용. 브라우저에 절대 내보내지 않는다 |
+| `SUPABASE_URL` / `SUPABASE_SECRET_KEY` | 없음 | 서버 전용 secret key(`sb_secret_...`, `apikey` 헤더). 브라우저에 절대 내보내지 않는다 |
 | `TRIAL_IP_SALT` | 없음 | IP 해시용 비밀값 |
 | `TRIAL_MAX_BYTES` | `4000000` | 업로드 상한 |
 | `TRIAL_MAX_PAGES` | `3` | 처리할 앞쪽 수 |

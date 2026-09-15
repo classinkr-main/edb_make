@@ -27,7 +27,7 @@
 | `trial_turnstile.py` | 신규 | Turnstile siteverify 호출과 결과 해석 |
 | `trial_quota.py` | 신규 | KST 날짜·IP 해시, Supabase PostgREST 클라이언트, `QuotaStore` |
 | `trial_config.py` | 신규 | `TrialConfig` 데이터클래스와 `from_env()` |
-| `trial_server.py` | 수정 | `create_app()` 팩토리: `/api/config`, `/api/parse`, `/api/event`, `/api/health`, `/api/cron/cleanup` |
+| `trial_server.py` | 수정 | `create_app()` 팩토리: `/api/config`, `/api/parse`, `/api/event`, `/api/health`, `/api/cron/daily` |
 | `supabase/migrations/20260915000000_web_trial.sql` | 신규 | 테이블·함수·권한·RLS·퍼널 뷰 |
 | `public/index.html`, `public/style.css`, `public/app.js` | 신규 | 체험판 화면 |
 | `public/trial_logic.js` | 신규 | 화면에서 쓰는 순수 함수(팝업 문구, 오류→상태, 좌표 변환). node로 테스트 |
