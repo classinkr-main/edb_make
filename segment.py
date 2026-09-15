@@ -408,10 +408,9 @@ def _detect_document_columns(mask: Image.Image, content_box: Box, options: Segme
     if crop.width <= 1 or crop.height <= 1:
         return [content_box]
 
-    column_projection = [
-        int(crop.crop((x, 0, x + 1, crop.height)).histogram()[255])
-        for x in range(crop.width)
-    ]
+    # Same per-column dark counts as the inline crop/histogram loop this
+    # replaced, but vectorized when NumPy is available.
+    column_projection = _column_dark_projection(crop)
     smoothed = _smooth_projection(column_projection, max(12, options.document_projection_window_px * 2))
     if not smoothed:
         return [content_box]

@@ -17,6 +17,7 @@ import unicodedata
 import zipfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 import xml.etree.ElementTree as ET
@@ -2080,7 +2081,7 @@ def _looks_like_decimal_continuation(text: str, match: Any) -> bool:
     return after_dot_index < len(text) and text[after_dot_index].isdigit()
 
 
-def _file_sha1(path: Path, chunk_size: int = 1024 * 1024) -> str:
+def _hash_file_sha1(path: Path, chunk_size: int) -> str:
     digest = hashlib.sha1()
     with path.open("rb") as handle:
         while True:
@@ -2089,6 +2090,26 @@ def _file_sha1(path: Path, chunk_size: int = 1024 * 1024) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+@lru_cache(maxsize=64)
+def _cached_file_sha1(path_value: str, modified_ns: int, file_size: int, chunk_size: int) -> str:
+    del modified_ns, file_size  # cache-key inputs; the path is read below
+    return _hash_file_sha1(Path(path_value), chunk_size)
+
+
+def _file_sha1(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    """SHA-1 of ``path``, reused while its size and mtime are unchanged.
+
+    A dozen cache-key sites ask for the digest of the same source document
+    during one `prepare_pages` call, and each one re-read the whole file.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        # Preserve the original failure by reading the file directly.
+        return _hash_file_sha1(path, chunk_size)
+    return _cached_file_sha1(str(path), stat.st_mtime_ns, stat.st_size, chunk_size)
 
 
 def _hwp_conversion_cache_path(target_dir: Path, source_path: Path) -> Path:
@@ -3695,9 +3716,13 @@ def deskew_image(image: Image.Image) -> Image.Image:
     image_bgr = _pil_to_bgr(image)
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    coords = np.column_stack(np.where(thresh > 0))
-    if len(coords) < 50:
+    # cv2.findNonZero walks the mask in C and returns the same points as
+    # np.column_stack(np.where(...)); the [:, ::-1] restores the (row, column)
+    # order the angle convention below is written against.
+    found = cv2.findNonZero(thresh)
+    if found is None or len(found) < 50:
         return image
+    coords = np.ascontiguousarray(found.reshape(-1, 2)[:, ::-1])
 
     angle = cv2.minAreaRect(coords)[-1]
     if angle < -45:

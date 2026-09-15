@@ -1899,6 +1899,10 @@ class _ProblemAssetTask:
     source_hints: tuple[str, ...] = ()
     source_media_regions: tuple[dict[str, Any], ...] = ()
     rendered_media_regions: list[dict[str, Any]] = field(default_factory=list)
+    # Filled in once per source page by _render_problem_assets; the detector
+    # gives the same answer for every passage problem cropped from that page.
+    passage_column_divider_x: float | None = None
+    passage_column_divider_resolved: bool = False
 
 
 @dataclass(slots=True)
@@ -2316,11 +2320,14 @@ def _render_problem_asset(task: _ProblemAssetTask) -> tuple[int, int]:
         _render_problem_board_asset(crop, task)
         return crop.size
 
-    passage_column_divider_x = (
-        detect_pdf_visual_column_divider_x(task.source_image)
-        if task.preserve_horizontal_bounds
-        else None
-    )
+    if task.passage_column_divider_resolved:
+        passage_column_divider_x = task.passage_column_divider_x
+    else:
+        passage_column_divider_x = (
+            detect_pdf_visual_column_divider_x(task.source_image)
+            if task.preserve_horizontal_bounds
+            else None
+        )
 
     def crop_segment(
         bounds: Box,
@@ -2514,6 +2521,18 @@ def _render_problem_assets(tasks: list[_ProblemAssetTask]) -> list[tuple[int, in
             canonical_index_by_key[key] = canonical_index
             canonical_tasks.append(task)
         canonical_index_by_task.append(canonical_index)
+
+    # The passage column divider is a property of the source page, not of the
+    # problem, so resolve it once per page instead of once per passage crop.
+    divider_by_source_image: dict[int, float | None] = {}
+    for task in canonical_tasks:
+        if not task.preserve_horizontal_bounds or task.passage_column_divider_resolved:
+            continue
+        source_key = id(task.source_image)
+        if source_key not in divider_by_source_image:
+            divider_by_source_image[source_key] = detect_pdf_visual_column_divider_x(task.source_image)
+        task.passage_column_divider_x = divider_by_source_image[source_key]
+        task.passage_column_divider_resolved = True
 
     worker_count = _resolve_problem_asset_worker_count(len(canonical_tasks))
     if worker_count <= 1:
