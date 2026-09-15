@@ -56,3 +56,4 @@ test_output_*/
 !assets/app_icon.png
 !assets/app_icon_source.png
 !ui_prototype/favicon.png
+.gstack/
