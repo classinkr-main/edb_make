@@ -495,6 +495,15 @@ class TestParseProblems(unittest.TestCase):
         for key in ("entries", "coalesce", "finish"):
             self.assertLess(timings[key], 1000, timings)
 
+    def test_explicit_no_ai_arguments_match_the_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2], [3, 4]])
+            default = parse_problems(path, work_dir=root / "a")
+            explicit = parse_problems(path, work_dir=root / "b", ocr_mode="none", ai_fallback_config=None)
+        self.assertEqual([p.number for p in default.problems], [p.number for p in explicit.problems])
+        self.assertEqual([p.regions[0].bbox for p in default.problems], [p.regions[0].bbox for p in explicit.problems])
+
 
 if __name__ == "__main__":
     unittest.main()

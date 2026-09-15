@@ -10,6 +10,7 @@ from PIL import Image
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
 from scripts.trial_bench.make_inputs import make_input
+from scripts.trial_bench.oracle import force_config
 from structured_schema import Box
 
 
@@ -315,6 +316,15 @@ class TestMakeInputs(unittest.TestCase):
         self.assertEqual({"subject": "korean", "source_page_count": 5, "source_name": "긴 시험지.pdf"}, cases["긴_시험지"])
         self.assertEqual(root / "inputs" / "short.pdf", short_target)
         self.assertEqual(root / "inputs" / "긴_시험지.pdf", long_target)
+
+
+class TestOracleConfig(unittest.TestCase):
+    def test_force_config_fails_loudly_and_forces_repair(self):
+        config = force_config("")
+        self.assertEqual("force", config["mode"])
+        self.assertEqual("gemini", config["provider"])
+        self.assertTrue(config["fail_on_error"])
+        self.assertEqual("gemini-x", force_config("gemini-x")["model"])
 
 
 if __name__ == "__main__":

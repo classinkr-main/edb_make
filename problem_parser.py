@@ -11,6 +11,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import fitz
 from PIL import Image
@@ -218,8 +219,14 @@ def parse_problems(
     work_dir: Path,
     max_pages: int | None = None,
     subject: str = "unknown",
+    ocr_mode: str = "none",
+    ai_fallback_config: dict[str, Any] | None = None,
 ) -> ParseResult:
-    """Recognize problems in a text-layer PDF without OCR, AI, or board rendering.
+    """Recognize problems in a text-layer PDF.
+
+    The trial calls this with the defaults: no OCR, no AI, no board rendering.
+    The bench oracle passes ``ocr_mode="auto"`` and a forced AI repair config
+    so both sides share every downstream step and coordinate frame.
 
     With ``max_pages`` only the leading pages are parsed. Returned images are
     fully loaded copies, so ``work_dir`` may be deleted as soon as this returns.
@@ -237,8 +244,8 @@ def parse_problems(
     prepared_pages, page_models = build_pages(
         parse_source,
         subject=resolve_subject(subject),
-        ocr_mode="none",
-        ai_fallback_config=None,
+        ocr_mode=ocr_mode,
+        ai_fallback_config=ai_fallback_config,
         pdf_dpi=PDF_RENDER_DPI,
         detect_perspective=False,
         deskew=True,
