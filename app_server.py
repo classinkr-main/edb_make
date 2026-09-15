@@ -8511,6 +8511,17 @@ class AppHTTPServer(ThreadingHTTPServer):
 
 
 class AppRequestHandler(SimpleHTTPRequestHandler):
+    # Every response below sends an accurate Content-Length, so keep-alive is
+    # safe and the UI stops paying a TCP handshake plus a fresh worker thread
+    # for each of the hundreds of problem thumbnails a board loads.
+    protocol_version = "HTTP/1.1"
+    # Reap idle kept-alive connections instead of pinning a thread per tab.
+    timeout = 60
+    # Class-level defaults so a handler built without __init__ still answers.
+    _explicit_cache_control = False
+    _explicit_connection_header = False
+    _request_body_read = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
@@ -8710,9 +8721,60 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         client = self.client_address[0] if self.client_address else "-"
         print(f"[app-server] {client} - {format % args}")
 
+    def send_header(self, keyword: str, value: str) -> None:
+        normalized = keyword.lower()
+        if normalized == "cache-control":
+            self._explicit_cache_control = True
+        elif normalized == "connection":
+            self._explicit_connection_header = True
+        super().send_header(keyword, value)
+
+    def _request_body_is_unread(self) -> bool:
+        """True when this request announced a body that no handler consumed.
+
+        Leaving those bytes queued on a kept-alive connection would make the
+        next request on it start mid-payload, so the response has to announce
+        that the connection closes.
+        """
+        if self._request_body_read:
+            return False
+        command = getattr(self, "command", None)
+        if command is not None and command not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return False
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        try:
+            return int(headers.get("Content-Length", "0") or 0) > 0
+        except (TypeError, ValueError):
+            return True
+
+    def _request_is_dynamic(self) -> bool:
+        # A malformed request line can reach send_error before self.path is set.
+        raw_path = getattr(self, "path", None)
+        if not isinstance(raw_path, str):
+            return True
+        try:
+            request_path = urlparse(raw_path).path
+        except ValueError:
+            return True
+        return request_path.startswith("/api/") or request_path == "/generated_session.js"
+
     def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store, max-age=0")
-        self.send_header("Pragma", "no-cache")
+        if not self._explicit_cache_control:
+            if self._request_is_dynamic():
+                # Session state must never be replayed from a browser cache.
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Pragma", "no-cache")
+            else:
+                # Bundled UI assets are revalidated on every load, so an
+                # in-place app update is still picked up immediately, but an
+                # unchanged bundle answers 304 instead of resending ~800 KB.
+                self.send_header("Cache-Control", "no-cache")
+        if not self._explicit_connection_header and self._request_body_is_unread():
+            self.send_header("Connection", "close")
+        self._explicit_cache_control = False
+        self._explicit_connection_header = False
         super().end_headers()
 
     def _rewrite_legacy_ui_asset_path(self, path: str) -> bool:
@@ -8772,6 +8834,7 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self) -> None:
+        self._request_body_read = False
         try:
             self._dispatch_post()
         except RequestPayloadTooLarge as exc:
@@ -8789,6 +8852,8 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
                 },
                 status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
+        finally:
+            self._close_connection_when_body_unread()
 
     def _dispatch_post(self) -> None:
         parsed = urlparse(self.path)
@@ -8849,11 +8914,15 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         self._send_json({"ok": False, "error": "unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/session/latest":
-            self._handle_session_clear(parsed)
-            return
-        self._send_json({"ok": False, "error": "unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
+        self._request_body_read = False
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/session/latest":
+                self._handle_session_clear(parsed)
+                return
+            self._send_json({"ok": False, "error": "unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
+        finally:
+            self._close_connection_when_body_unread()
 
     def _handle_session_publish(self) -> None:
         session, current_revision = self._current_session_state()
@@ -10315,9 +10384,15 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         if content_length > MAX_JSON_BODY_BYTES:
             raise RequestPayloadTooLarge(content_length, MAX_JSON_BODY_BYTES)
         raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        self._request_body_read = True
         if not raw_body:
             return {}
         return json.loads(raw_body.decode("utf-8"))
+
+    def _close_connection_when_body_unread(self) -> None:
+        """Backstop for a response that never reached ``end_headers``."""
+        if self._request_body_is_unread():
+            self.close_connection = True
 
     def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
         response_payload = payload

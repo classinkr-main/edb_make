@@ -1443,16 +1443,49 @@ class TestStaticAssetCaching(unittest.TestCase):
         self.assertEqual(app_server.MAX_JSON_BODY_BYTES, payload["maxBytes"])
         self.assertEqual(2, len(payload["recoverySteps"]))
 
-    def test_static_responses_disable_browser_cache(self):
+    def _captured_end_headers(self, path):
         handler = object.__new__(app_server.AppRequestHandler)
+        handler.path = path
         headers = []
         handler.send_header = lambda name, value: headers.append((name, value))
 
         with patch.object(app_server.SimpleHTTPRequestHandler, "end_headers", lambda _self: headers.append(("END", ""))):
             handler.end_headers()
+        return headers
 
-        self.assertIn(("Cache-Control", "no-store, max-age=0"), headers)
-        self.assertIn(("Pragma", "no-cache"), headers)
+    def test_session_responses_disable_browser_cache(self):
+        for path in ("/api/session/latest", "/generated_session.js"):
+            with self.subTest(path=path):
+                headers = self._captured_end_headers(path)
+                self.assertIn(("Cache-Control", "no-store, max-age=0"), headers)
+                self.assertIn(("Pragma", "no-cache"), headers)
+
+    def test_static_assets_are_revalidated_instead_of_refetched(self):
+        headers = self._captured_end_headers("/app.bundle.js")
+
+        # `no-store` forced a fresh download of the whole UI bundle on every
+        # load; `no-cache` still revalidates, so an in-place app update is
+        # picked up while an unchanged bundle answers 304.
+        self.assertIn(("Cache-Control", "no-cache"), headers)
+        self.assertNotIn(("Cache-Control", "no-store, max-age=0"), headers)
+
+    def test_handler_supplied_cache_control_is_left_alone(self):
+        handler = object.__new__(app_server.AppRequestHandler)
+        handler.path = "/api/file?path=preview.png"
+        headers = []
+
+        def capture(name, value):
+            headers.append((name, value))
+
+        with patch.object(app_server.SimpleHTTPRequestHandler, "send_header", lambda _self, name, value: capture(name, value)):
+            handler.send_header("Cache-Control", "private, max-age=3600")
+            with patch.object(app_server.SimpleHTTPRequestHandler, "end_headers", lambda _self: headers.append(("END", ""))):
+                handler.end_headers()
+
+        self.assertEqual(
+            [("Cache-Control", "private, max-age=3600"), ("END", "")],
+            headers,
+        )
 
     def test_legacy_app_js_requests_serve_current_bundle(self):
         handler = object.__new__(app_server.AppRequestHandler)
