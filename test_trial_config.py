@@ -83,6 +83,14 @@ class TestTrialConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             TrialConfig.from_env({"TRIAL_INQUIRY_URL": "javascript:alert(1)"})
 
+    def test_complexity_limits_from_env(self):
+        config = TrialConfig.from_env({"TRIAL_MAX_WORDS_PER_PAGE": "1234", "TRIAL_MAX_DRAWINGS_PER_PAGE": "567"})
+        self.assertEqual(1234, config.limits.max_words_per_page)
+        self.assertEqual(567, config.limits.max_drawings_per_page)
+        defaults = TrialConfig.from_env({})
+        self.assertEqual(8000, defaults.limits.max_words_per_page)
+        self.assertEqual(10000, defaults.limits.max_drawings_per_page)
+
 
 if __name__ == "__main__":
     unittest.main()

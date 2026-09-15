@@ -20,6 +20,9 @@ from structured_schema import Box
 MIN_TEXT_CHARS_PER_PAGE = 20
 PDF_RENDER_DPI = 200
 
+# 2×A3 at 200 DPI is about 15.5M pixels; larger renders are decompression bombs for this service.
+Image.MAX_IMAGE_PIXELS = 40_000_000
+
 
 class PdfUnreadableError(ValueError):
     """The file is not a PDF PyMuPDF can open without a password."""
@@ -31,6 +34,8 @@ class PdfInfo:
     scanned_pages: int
     pages_without_text: int
     max_page_area_pt: float
+    max_words_per_page: int = 0
+    max_drawings_per_page: int = 0
 
 
 def inspect_pdf(source: Path, *, max_pages: int) -> PdfInfo:
@@ -50,17 +55,23 @@ def inspect_pdf(source: Path, *, max_pages: int) -> PdfInfo:
         scanned_pages = min(page_count, max_pages)
         pages_without_text = 0
         max_page_area_pt = 0.0
+        max_words_per_page = 0
+        max_drawings_per_page = 0
         for index in range(scanned_pages):
             page = doc[index]
             text = page.get_text("text")
             if len("".join(text.split())) < MIN_TEXT_CHARS_PER_PAGE:
                 pages_without_text += 1
+            max_words_per_page = max(max_words_per_page, len(text.split()))
+            max_drawings_per_page = max(max_drawings_per_page, len(page.get_drawings()))
             max_page_area_pt = max(max_page_area_pt, float(page.rect.width * page.rect.height))
     return PdfInfo(
         page_count=page_count,
         scanned_pages=scanned_pages,
         pages_without_text=pages_without_text,
         max_page_area_pt=max_page_area_pt,
+        max_words_per_page=max_words_per_page,
+        max_drawings_per_page=max_drawings_per_page,
     )
 
 

@@ -271,6 +271,7 @@ def create_app(
                 except PdfUnreadableError as error:
                     raise reject("unreadable_pdf") from error
                 event["source_pages"] = info.page_count
+                event["complexity"] = {"words": info.max_words_per_page, "drawings": info.max_drawings_per_page}
                 check_pdf_info(info, config.limits)
                 # Take a parse slot before charging, so a request that only waits and
                 # then times out never counts against anyone's daily limit.

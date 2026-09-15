@@ -237,6 +237,12 @@ class TestParseSuccess(TrialApiCase):
         second_response = self.post_pdf(client)
         self.assertEqual(payload["instance_id"], second_response.json()["instance_id"])
 
+    def test_event_records_page_complexity(self):
+        info = PdfInfo(page_count=16, scanned_pages=3, pages_without_text=0, max_page_area_pt=500_000.0, max_words_per_page=674, max_drawings_per_page=191)
+        client = self.make_client(inspector=FakeInspector(info=info))
+        self.assertEqual(200, self.post_pdf(client).status_code)
+        self.assertEqual({"words": 674, "drawings": 191}, self.store.events[-1]["complexity"])
+
 
 class TestParseRejections(TrialApiCase):
     def assertRejected(self, response, status, code, feature=None):
@@ -276,6 +282,15 @@ class TestParseRejections(TrialApiCase):
         self.assertEqual([], self.parser.calls)
         self.assertEqual(0, self.used())
         self.assertEqual(4, self.store.events[-1]["source_pages"])
+
+    def test_too_complex_pages_are_rejected_before_charging(self):
+        info = PdfInfo(page_count=3, scanned_pages=3, pages_without_text=0, max_page_area_pt=500_000.0, max_words_per_page=9000, max_drawings_per_page=0)
+        client = self.make_client(inspector=FakeInspector(info=info))
+        response = self.post_pdf(client)
+        self.assertEqual(422, response.status_code)
+        self.assertEqual("page_too_complex", response.json()["error"]["code"])
+        self.assertEqual("ai", response.json()["error"]["feature"])
+        self.assertEqual(0, self.used())
 
     def test_daily_limit_after_three_uses(self):
         client = self.make_client()

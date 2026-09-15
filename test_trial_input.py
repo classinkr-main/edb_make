@@ -89,6 +89,24 @@ class TestCheckPdfInfo(unittest.TestCase):
     def test_page_size_checked_before_text_layer(self):
         self.assertRejected(_info(pages_without_text=1, max_page_area_pt=10 * A3_AREA_PT), "page_too_large")
 
+    def test_rejects_pages_with_too_many_words_or_drawings(self):
+        limits = InputLimits(max_bytes=4_000_000, max_pages=3, max_source_pages=100, max_page_area_pt=2 * A3_AREA_PT, max_words_per_page=100, max_drawings_per_page=50)
+        base = dict(page_count=3, scanned_pages=3, pages_without_text=0, max_page_area_pt=500_000.0)
+        with self.assertRaises(TrialRejected) as too_many_words:
+            check_pdf_info(PdfInfo(**base, max_words_per_page=101, max_drawings_per_page=0), limits)
+        self.assertEqual("page_too_complex", too_many_words.exception.rejection.code)
+        with self.assertRaises(TrialRejected) as too_many_drawings:
+            check_pdf_info(PdfInfo(**base, max_words_per_page=0, max_drawings_per_page=51), limits)
+        self.assertEqual("page_too_complex", too_many_drawings.exception.rejection.code)
+        self.assertEqual("ai", REJECTIONS["page_too_complex"].feature)
+        check_pdf_info(PdfInfo(**base, max_words_per_page=100, max_drawings_per_page=50), limits)  # at the limit passes
+
+    def test_scan_rejection_wins_over_complexity(self):
+        limits = InputLimits(max_bytes=4_000_000, max_pages=3, max_source_pages=100, max_page_area_pt=2 * A3_AREA_PT, max_words_per_page=1, max_drawings_per_page=1)
+        with self.assertRaises(TrialRejected) as rejected:
+            check_pdf_info(PdfInfo(page_count=3, scanned_pages=3, pages_without_text=1, max_page_area_pt=500_000.0, max_words_per_page=9, max_drawings_per_page=9), limits)
+        self.assertEqual("no_text_layer", rejected.exception.rejection.code)
+
 
 class TestRejectionCatalog(unittest.TestCase):
     def test_codes_are_unique_and_statuses_are_client_or_server_errors(self):

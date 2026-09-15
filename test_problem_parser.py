@@ -211,6 +211,26 @@ class TestInspectPdf(unittest.TestCase):
             with self.assertRaises(PdfUnreadableError):
                 inspect_pdf(path, max_pages=3)
 
+    def test_counts_words_and_drawings_per_page(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = _write_text_exam_pdf(Path(temp_dir) / "exam.pdf", [[1, 2], [3]])
+            doc = fitz.open(path)
+            doc[0].draw_rect(fitz.Rect(10, 10, 100, 100), color=(0, 0, 0))
+            doc.saveIncr()
+            doc.close()
+            info = inspect_pdf(path, max_pages=3)
+        self.assertGreaterEqual(info.max_words_per_page, 6)  # "1. problem stem" + choices on the fuller page
+        self.assertGreaterEqual(info.max_drawings_per_page, 1)
+
+
+class TestImageLimits(unittest.TestCase):
+    def test_decompression_bomb_limit_is_set_on_import(self):
+        from PIL import Image
+
+        import problem_parser  # noqa: F401  (import side effect under test)
+
+        self.assertEqual(40_000_000, Image.MAX_IMAGE_PIXELS)
+
 
 class TestParseProblems(unittest.TestCase):
     def test_text_pdf_yields_numbered_problems_inside_their_pages(self):
