@@ -200,6 +200,56 @@ class TestCommon(unittest.TestCase):
         self.assertEqual(1, len(crop_files))
         self.assertLessEqual(len(crop_files[0].stem), 80)
 
+    def test_long_duplicate_titles_get_distinct_crops(self):
+        # The "#n" uniquifier is appended to the key, but the crop stem was
+        # truncated *after* that, so a title at segment.py's normal fallback
+        # length (display_title = text[:120]) sliced the suffix back off and
+        # every duplicate silently collapsed onto one file.
+        long_title = "가" * 90
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problems = [
+            ParsedProblem(
+                problem_id=f"c{index}", number=None, title=long_title,
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=float(index * 40), width=float(size), height=float(size)))],
+                risk_flags=[], image=Image.new("RGB", (size, size), "white"),
+            )
+            for index, size in enumerate((10, 22, 33))
+        ]
+        result = ParseResult(pages=[page], problems=problems, source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            crops_dir = Path(temp_dir) / "crops"
+            observation = common.observation_from_result("case", result, crops_dir=crops_dir)
+            crop_files = sorted(crops_dir.iterdir())
+            self.assertEqual(3, len(crop_files))
+            sizes = set()
+            for path in crop_files:
+                with Image.open(path) as crop:
+                    sizes.add(crop.size)
+        self.assertEqual({(10, 10), (22, 22), (33, 33)}, sizes)
+        self.assertEqual(3, len({problem["crop"] for problem in observation["problems"]}))
+        self.assertTrue(all(len(Path(problem["crop"]).stem) <= 80 for problem in observation["problems"]))
+
+    def test_long_titles_sharing_a_prefix_get_distinct_crops(self):
+        # Two *different* fallback titles that agree on their first 80
+        # characters have different keys, so their crops must not share a file.
+        prefix = "가" * 90
+        page = ParsedPage(page_id="p1", index=0, width=600, height=800, image=Image.new("RGB", (600, 800), "white"))
+        problems = [
+            ParsedProblem(
+                problem_id=f"c{index}", number=None, title=f"{prefix} {suffix}",
+                regions=[ParsedRegion(page_id="p1", bbox=Box(left=0.0, top=float(index * 40), width=float(size), height=float(size)))],
+                risk_flags=[], image=Image.new("RGB", (size, size), "white"),
+            )
+            for index, (suffix, size) in enumerate((("갑", 10), ("을", 22)))
+        ]
+        result = ParseResult(pages=[page], problems=problems, source_page_count=1, parser_version="dev", timing_ms={"total": 1})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            crops_dir = Path(temp_dir) / "crops"
+            observation = common.observation_from_result("case", result, crops_dir=crops_dir)
+            crop_files = list(crops_dir.iterdir())
+        self.assertEqual(2, len({problem["key"] for problem in observation["problems"]}))
+        self.assertEqual(2, len(crop_files))
+
     def test_percentile_is_nearest_rank(self):
         self.assertEqual(10, common.percentile(range(1, 11), 95))
         self.assertEqual(5, common.percentile(range(1, 11), 50))

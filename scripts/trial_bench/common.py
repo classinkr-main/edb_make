@@ -78,12 +78,33 @@ def _safe_title(number: int | None, title: str | None, span: list[int] | None) -
     return None
 
 
+def _crop_stem(key: str, used: set[str]) -> str:
+    """Filesystem-safe, collision-free crop stem for ``key``.
+
+    The counter is appended *after* the length cap, never before: an
+    unnumbered unit's key carries its display title (up to 120 characters
+    from segment.py), so a counter appended to the key itself would be
+    sliced off by the cap and the duplicates would overwrite one another.
+    Two different long keys that agree on their first characters truncate
+    onto one stem for the same reason, so the loop checks the final stem.
+    """
+    base = re.sub(r"[^\w가-힣.-]+", "_", key).strip("_")[:72] or "problem"
+    stem = base
+    counter = 1
+    while stem in used:
+        counter += 1
+        stem = f"{base}_{counter}"
+    used.add(stem)
+    return stem
+
+
 def observation_from_result(case: str, result: Any, *, crops_dir: Path | None = None) -> dict[str, Any]:
     """Privacy-minimized view of a ParseResult: numbers, boxes, flags. No text."""
     page_index = {page.page_id: page.index for page in result.pages}
     problems: list[dict[str, Any]] = []
     passage_ranges: list[list[int]] = []
     seen_keys: dict[str, int] = {}
+    crop_stems: set[str] = set()
     for problem in result.problems:
         key = problem_key(problem.number, problem.title)
         seen_keys[key] = seen_keys.get(key, 0) + 1
@@ -99,8 +120,7 @@ def observation_from_result(case: str, result: Any, *, crops_dir: Path | None = 
         crop_path: Path | None = None
         if crops_dir is not None:
             crops_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = re.sub(r"[^\w가-힣.-]+", "_", key).strip("_")[:80] or "problem"
-            crop_path = crops_dir / f"{safe_name}.png"
+            crop_path = crops_dir / f"{_crop_stem(key, crop_stems)}.png"
             problem.image.save(crop_path)
         problems.append(
             {
