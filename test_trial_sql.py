@@ -57,13 +57,14 @@ class TestTrialSql(unittest.TestCase):
             check=True,
             capture_output=True,
         )
-        # Supabase grants its API roles everything in public by default; the
-        # migration must revoke that for anon/authenticated.
+        # Older Supabase projects grant anon/authenticated everything new in public,
+        # so the migration must revoke it. Projects created after 2026-05-30 grant
+        # nothing by default, so service_role must work from the migration's own grants.
         cls.psql(
             "create role anon nologin; create role authenticated nologin; create role service_role nologin bypassrls;"
             "grant usage on schema public to anon, authenticated, service_role;"
-            "alter default privileges in schema public grant all on tables to anon, authenticated, service_role;"
-            "alter default privileges in schema public grant all on functions to anon, authenticated, service_role;"
+            "alter default privileges in schema public grant all on tables to anon, authenticated;"
+            "alter default privileges in schema public grant all on functions to anon, authenticated;"
         )
         cls.psql(MIGRATION.read_text(encoding="utf-8"))
 
