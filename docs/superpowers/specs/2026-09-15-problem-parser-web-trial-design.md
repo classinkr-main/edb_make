@@ -12,6 +12,7 @@
 | 제품 역할 | **웹 = 무료 체험판, 설치형 앱 = 프리미엄 본품.** 웹은 도입 문의로 이어지는 창구다 |
 | 대상 | 누구나. **가입 없음** |
 | 체험 범위 | **글자가 들어 있는 PDF**(모의고사 원본 PDF 등) 업로드 → 문항 인식 → 페이지 위 문항 박스와 문항 미리보기 |
+| 3쪽 넘는 PDF | **앞 3쪽만 처리한다.** 결과 위에 "무료 체험은 앞 3쪽까지예요 · 나머지 N쪽은 프리미엄으로" 배너 (2026-09-15 결정) |
 | 사진·스캔본 | 파싱하지 않는다. "스캔본·사진은 프리미엄 AI 인식으로" 추천 팝업을 띄우고 횟수를 차감하지 않는다 (§2-1 실험) |
 | 막는 기능 | EDB 내보내기, 이미지 저장, 문항 수정, AI 정밀 인식, 쪽수·용량·횟수 초과 → **프리미엄 추천 팝업** |
 | 팝업 버튼 | **프리미엄 도입 문의** → `https://classin.co.kr/contact` (설정값 `TRIAL_INQUIRY_URL`) |
@@ -119,13 +120,15 @@ class ParseResult:    pages: list[ParsedPage]; problems: list[ParsedProblem]
                       parser_version: str; timing_ms: dict[str, int]
 
 @dataclass(frozen=True)
-class PdfInfo:        page_count: int; pages_without_text: int; max_page_area_pt: float
+class PdfInfo:        page_count: int; scanned_pages: int
+                      pages_without_text: int; max_page_area_pt: float   # 앞 scanned_pages쪽 기준
 
-def inspect_pdf(source: Path) -> PdfInfo               # 렌더 없이 쪽수·텍스트 층·페이지 크기만 본다
-def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") -> ParseResult
+def inspect_pdf(source: Path, *, max_pages: int) -> PdfInfo   # 렌더 없이 전체 쪽수와 앞 max_pages쪽의 텍스트 층·크기
+def parse_problems(source: Path, *, work_dir: Path, max_pages: int, subject: str = "unknown") -> ParseResult
 ```
 
-- 텍스트 층 판정: 페이지의 `page.get_text("text")`에서 공백을 뺀 글자가 20자 미만이면 "텍스트 없는 페이지"다. 한 페이지라도 있으면 거절한다.
+- 텍스트 층 판정: 앞 `max_pages`쪽 각각의 `page.get_text("text")`에서 공백을 뺀 글자가 20자 미만이면 "텍스트 없는 페이지"다. 한 페이지라도 있으면 거절한다.
+- 쪽 자르기: 원본이 `max_pages`쪽을 넘으면 `parse_problems`가 `work_dir`에 앞 `max_pages`쪽만 `select()` 후 **`garbage=4, deflate=True`**로 저장해 그 파일을 파싱한다(`garbage` 없이 저장하면 지운 쪽의 글꼴이 남는다). `ParseResult`에 `source_page_count`를 더한다.
 - 순서: `build_pages(ocr_mode="none", ai_fallback_config=None, pdf_dpi=200, ...)` →
   `build_problem_entries(..., render_board_assets=False)` → 페이지 이미지와 crop을 메모리로 읽어 반환.
 - `regions`는 `ProblemEntry.source_segments`가 있으면 그것에서, 없으면 `source_page_id` + `bounds` 하나로 만든다.
@@ -142,7 +145,7 @@ def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") ->
   1. 본문을 4 MB 상한까지만 읽는다 (넘으면 413)
   2. Turnstile 토큰 확인 (실패 400)
   3. **파일 앞 바이트(매직 넘버)로 형식 판정**, 헤더 값은 믿지 않는다. PNG·JPEG면 415 `image_not_supported`, 그 밖은 415 `bad_type`
-  4. `inspect_pdf()`로 쪽수·페이지 크기·텍스트 층 검사 (422)
+  4. `inspect_pdf(max_pages=3)`로 전체 쪽수(100쪽 초과 422)·앞 3쪽의 페이지 크기(422)·텍스트 층(422 `no_text_layer`) 검사
   5. Supabase `trial_consume()`로 IP 하루 한도와 전체 하루 한도를 **원자적으로 차감** (429)
   6. `/tmp` 요청 폴더에서 파싱
   7. 미리보기 인코딩 (§5-4)
@@ -154,6 +157,8 @@ def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") ->
 {
   "parser_version": "<앱 버전>+5ff735b",
   "elapsed_ms": 4210,
+  "source_page_count": 16,
+  "processed_page_count": 3,
   "pages": [{"page_id": "p1", "index": 0, "width": 2339, "height": 3308,
              "preview": "data:image/jpeg;base64,..."}],
   "problems": [{"problem_id": "q1", "number": 1, "title": "1번",
@@ -177,7 +182,8 @@ def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") ->
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | 없음 | 서버 전용. 브라우저에 절대 내보내지 않는다 |
 | `TRIAL_IP_SALT` | 없음 | IP 해시용 비밀값 |
 | `TRIAL_MAX_BYTES` | `4000000` | 업로드 상한 |
-| `TRIAL_MAX_PAGES` | `3` | PDF 쪽수 상한 |
+| `TRIAL_MAX_PAGES` | `3` | 처리할 앞쪽 수 |
+| `TRIAL_MAX_SOURCE_PAGES` | `100` | 받아들이는 원본 전체 쪽수 상한 |
 | `TRIAL_DAILY_LIMIT` | `3` | IP당 하루 성공 횟수 (KST 기준 날짜) |
 | `TRIAL_GLOBAL_DAILY_LIMIT` | `500` | 전체 하루 파싱 상한. 비용 방어선 |
 
@@ -228,7 +234,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 | 큰 파일 | 4 MB 넘으면 읽기를 멈추고 413. 브라우저에서 먼저 확인해 올리기 전에 안내한다 |
 | 사진·스캔본 | 브라우저가 파일 선택 시 PDF가 아니면 올리지 않고 `scan` 팝업. 서버도 매직 넘버와 텍스트 층으로 다시 거른다 |
 | 확장자 위장 | 매직 넘버로 PDF만 허용, 나머지 415 |
-| 쪽수 폭탄 | 렌더 전에 `inspect_pdf()`로 확인, 3쪽 초과 422 |
+| 쪽수 폭탄 | 렌더 전에 `inspect_pdf()`로 전체 쪽수 확인, 100쪽 초과 422. 100쪽 이하는 앞 3쪽만 검사·처리 |
 | 거대 페이지 | PDF 페이지 면적이 A3의 2배를 넘으면 422. 렌더된 페이지 이미지 대비 `PIL.Image.MAX_IMAGE_PIXELS`를 4천만으로 둔다 |
 | 오래 걸리는 파일 | `maxDuration` 60초. 넘으면 Vercel이 504를 돌려준다(본문은 JSON이 아닐 수 있어 프론트가 일반 오류로 처리). 차감은 이미 됐으므로 되돌리지 못한다 — 드문 경우로 받아들인다 |
 | 메모리 초과 | 함수 인스턴스가 죽고 500. 위와 같이 처리 |
@@ -249,11 +255,11 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 ① 업로드                     ② 처리 중                    ③ 결과
 ┌────────────────────┐      ┌────────────────────┐      ┌─────────────────────────────────┐
 │ 시험지를 올리면      │      │ 문항을 찾는 중…     │      │ 문항 16개를 찾았어요 · 4.2초      │
-│ 문항을 나눠드려요    │      │ (보통 5~10초)       │      │ 무료 체험 결과 · 오늘 2회 남음    │
+│ 문항을 나눠드려요    │      │ (보통 5~10초)       │      │ ✦ 앞 3쪽까지 체험 · 나머지 13쪽 → │
 │                    │  →   │                    │  →   │ [EDB 내보내기 ✦][이미지 저장 ✦]   │
 │ [ PDF 끌어놓기 ]     │      │                    │      │ ┌ 페이지 ─────┐ ┌ 문항 ──────┐  │
-│ 글자가 있는 PDF·3쪽  │      │                    │      │ │ 박스 오버레이 │ │ 1번 카드    │  │
-│ 4MB · 하루 3회       │      │                    │      │ │ (클릭→카드)  │ │ 2번 확인필요 │  │
+│ 글자가 있는 PDF      │      │                    │      │ │ 박스 오버레이 │ │ 1번 카드    │  │
+│ 앞 3쪽·4MB·하루 3회  │      │                    │      │ │ (클릭→카드)  │ │ 2번 확인필요 │  │
 │ 파일은 저장하지 않아요│      │                    │      │ └────────────┘ └───────────┘  │
 └────────────────────┘      └────────────────────┘      │ [다른 파일 해보기]                 │
                                                         │ ✦ 프리미엄으로 더 누려보세요 →      │
@@ -262,6 +268,8 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 
 - 결과 화면: 왼쪽 페이지 미리보기 위에 문항 박스, 오른쪽에 문항 카드. 박스와 카드를 서로 누르면 이동한다.
   좁은 화면(400px)에서는 위아래로 쌓는다.
+- 원본이 3쪽을 넘으면 결과 맨 위에 `limit_pages` 배너를 둔다: "✦ 무료 체험은 앞 3쪽까지예요 · 나머지 {N}쪽은 프리미엄으로 →". 누르면 팝업.
+- "오늘 {n}회 남음"은 결과 하단 "다른 파일 해보기" 옆에 둔다.
 - `risk_flags`가 있는 문항에는 "확인 필요" 표시와 작은 "AI로 더 정확하게 ✦" 링크를 단다.
 - ✦ 표시는 자물쇠 대신 "프리미엄" 배지다. 누르면 추천 팝업이 열린다.
 - 결과 하단에는 늘 작은 추천 줄 "✦ 프리미엄으로 더 누려보세요 →"를 둔다.
@@ -273,7 +281,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 | 계기 (`feature`) | 제목 | 본문 |
 |---|---|---|
 | 하루 횟수 초과 (`limit_daily`) | 오늘의 무료 체험을 모두 사용했어요 | 프리미엄으로 더 누려보세요! 설치형 앱에서는 횟수 걱정 없이 시험지를 처리할 수 있어요. |
-| 3쪽 초과 (`limit_pages`) | 무료 체험은 3쪽까지예요 | 프리미엄에서는 시험지 한 권을 통째로 나눌 수 있어요. |
+| 3쪽 초과 배너 (`limit_pages`) | 무료 체험은 앞 3쪽까지예요 | 나머지 {N}쪽도 프리미엄에서 한 번에 나눠 보세요! 시험지 한 권을 통째로 처리할 수 있어요. |
 | 4MB 초과 (`limit_size`) | 무료 체험은 4MB까지 올릴 수 있어요 | 스캔본·고화질 시험지도 프리미엄에서 그대로 처리해 보세요. |
 | EDB 내보내기 (`edb`) | 클래스인 칠판으로 바로 보내보세요 | 문항을 칠판에 자동 배치해 EDB 파일로 만들어 드려요. 프리미엄 기능이에요. |
 | 이미지 저장 (`image`) | 잘라낸 문항을 수업 자료로 써보세요 | 문항 이미지를 한 번에 저장하는 건 프리미엄 기능이에요. |
@@ -296,7 +304,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 | 415 | `image_not_supported` | — | `scan` |
 | 415 | `bad_type` | PDF 파일만 올릴 수 있어요 | — |
 | 422 | `no_text_layer` | — | `scan` |
-| 422 | `too_many_pages` | — | `limit_pages` |
+| 422 | `too_many_pages` (원본 100쪽 초과) | 페이지가 너무 많은 파일이에요 | `limit_pages` |
 | 422 | `page_too_large` | 페이지 크기가 너무 커요 | — |
 | 429 | `daily_limit` | — | `limit_daily` |
 | 503 | `busy` (전체 한도·Supabase 실패·Turnstile 미설정) | 지금은 체험이 어려워요. 잠시 후 다시 시도해 주세요 | — |
@@ -324,7 +332,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 |---|---|
 | cutout 스위치 | 합성 페이지로 `build_problem_entries`를 두 번 돌려 crop 파일 바이트가 같고, `False`에서 cutout 파일이 없음을 확인. 페이지를 넘는 지문 합치기 경로 포함 |
 | 기존 동작 | 전체 `pytest` 통과 (기본값 `True`) |
-| `problem_parser` | 합성 PDF(PyMuPDF로 생성)에서 페이지·문항 수·번호, `regions` 좌표가 페이지 안. `inspect_pdf`: 텍스트 PDF, 그림만 있는 PDF(`pages_without_text`), 섞인 PDF, 쪽수, 페이지 크기 |
+| `problem_parser` | 합성 PDF(PyMuPDF로 생성)에서 페이지·문항 수·번호, `regions` 좌표가 페이지 안. `inspect_pdf`: 텍스트 PDF, 그림만 있는 PDF(`pages_without_text`), 섞인 PDF, 앞쪽만 검사(4쪽째가 그림이어도 통과), 쪽수, 페이지 크기. `parse_problems(max_pages=3)`: 5쪽 PDF에서 앞 3쪽 문항만, 잘린 파일이 원본보다 작음 |
 | 응답 예산 | 문항이 많은 합성 결과로 3.5 MB 이하로 줄어드는 단계와 결정성 |
 | 입력 검사 | 매직 넘버 위장, PNG·JPEG 거절 코드, 4 MB+1바이트, 4쪽 PDF, 거대 페이지, 텍스트 없는 PDF |
 | 한도 | 가짜 Supabase 클라이언트로 차감·되돌림·KST 날짜 경계·전체 한도·연결 실패 시 503 |
