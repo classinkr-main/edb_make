@@ -11,7 +11,8 @@
 |---|---|
 | 제품 역할 | **웹 = 무료 체험판, 설치형 앱 = 프리미엄 본품.** 웹은 도입 문의로 이어지는 창구다 |
 | 대상 | 누구나. **가입 없음** |
-| 체험 범위 | 내 파일 업로드 → 문항 인식 → 페이지 위 문항 박스와 문항 미리보기 |
+| 체험 범위 | **글자가 들어 있는 PDF**(모의고사 원본 PDF 등) 업로드 → 문항 인식 → 페이지 위 문항 박스와 문항 미리보기 |
+| 사진·스캔본 | 파싱하지 않는다. "스캔본·사진은 프리미엄 AI 인식으로" 추천 팝업을 띄우고 횟수를 차감하지 않는다 (§2-1 실험) |
 | 막는 기능 | EDB 내보내기, 이미지 저장, 문항 수정, AI 정밀 인식, 쪽수·용량·횟수 초과 → **프리미엄 추천 팝업** |
 | 팝업 버튼 | **프리미엄 도입 문의** → `https://classin.co.kr/contact` (설정값 `TRIAL_INQUIRY_URL`) |
 | 팝업 톤 | 막았다는 안내가 아니라 추천: "무료 체험은 여기까지예요 · 프리미엄으로 더 누려보세요!" (§7-2) |
@@ -33,6 +34,7 @@
 | 이미지 생성 | `_render_problem_asset()` (`:2281`)이 문항 crop을 저장한 뒤 `_render_problem_board_asset()`로 칠판용 cutout을 **따로** 만든다 | cutout만 끄는 스위치를 넣으면 된다. 큰 추출 작업이 필요 없다 |
 | 지문 합치기 | `_coalesce_cross_page_passage_drafts()`가 crop 크기를 쓰고, crop과 `board_render_path`를 **둘 다** 이어 붙인다 (`:5877~5898`) | crop은 끌 수 없다(합치기 품질에 필요). cutout 이어 붙이기만 같은 스위치로 건너뛴다 |
 | 후처리 | 이후 `build_records` → 배치 요약 → EDB 쓰기 → handoff → `ui_session` | 체험판은 **전부 호출하지 않는다** |
+| **AI 없는 인식 범위** | `ocr_mode="local"`은 PaddleOCR·Tesseract가 없으면 `none`으로 떨어진다 (`ocr_backend.py:1229~1245`). Vercel에는 둘 다 없다. 2026-09-15 실험: 4문항 합성 페이지를 PDF로 넣으면 `pdf-text-markers`로 **4문항·번호 1~4 정확**, 같은 페이지를 PNG로 넣으면 `visual-problem-markers`로 **2문항·번호 없음** | 체험판은 **텍스트 층이 있는 PDF만** 받는다. 이미지와 텍스트 없는 PDF는 파싱 전에 거른다 |
 | 파이프라인 캐시 | `default_pipeline_cache_dir()`가 **입력 파일 옆** `.pipeline_cache`에 쓴다 (`pipeline_cache.py:47`) | 입력을 `/tmp` 작업 폴더에 두면 캐시도 `/tmp`에 쓰인다. Vercel의 읽기 전용 코드 폴더를 건드리지 않는다 |
 | HWP 라이브러리 | `preprocess.py`의 `hwp_hwpx_parser`·`rhwp` import는 하위 프로세스용 스크립트 문자열 안에 있다 | 체험판 번들에서 HWP 패키지를 빼도 import 오류가 나지 않는다 (스파이크에서 확인) |
 | 웹 의존성 | `web-migration`의 `3e935da`에 FastAPI·uvicorn 해시 잠금이 있다. `python-multipart`는 없다 | 버전 선택만 참고한다. 업로드는 multipart 대신 **원본 바이트 본문**으로 받아 의존성을 늘리지 않는다. HTTP 호출(Supabase·Turnstile)은 표준 라이브러리 `urllib`를 쓴다 (`ocr_backend.py`와 같은 방식) |
@@ -65,8 +67,8 @@
 ### 제외 (YAGNI)
 
 - 계정, 결과 저장·공유 링크, 대기열
-- AI 인식, HWP 입력, EDB·ZIP 생성, 문항 수정
-- 4 MB 넘는 파일을 위한 Storage 직접 업로드 (수요가 확인되면 추가)
+- AI 인식, 이미지(PNG·JPG)·스캔 PDF 파싱, HWP 입력, EDB·ZIP 생성, 문항 수정
+- 4 MB 넘는 파일을 위한 Storage 직접 업로드
 - 샘플 시험지 갤러리
 - `app.jsx` 재사용
 
@@ -116,11 +118,15 @@ class ParsedProblem:  problem_id: str; number: int | None; title: str
 class ParseResult:    pages: list[ParsedPage]; problems: list[ParsedProblem]
                       parser_version: str; timing_ms: dict[str, int]
 
-def count_pages(source: Path) -> int                    # 렌더 전에 쪽수만 센다
+@dataclass(frozen=True)
+class PdfInfo:        page_count: int; pages_without_text: int; max_page_area_pt: float
+
+def inspect_pdf(source: Path) -> PdfInfo               # 렌더 없이 쪽수·텍스트 층·페이지 크기만 본다
 def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") -> ParseResult
 ```
 
-- 순서: `build_pages(ocr_mode="local", ai_fallback_config=None, pdf_dpi=200, ...)` →
+- 텍스트 층 판정: 페이지의 `page.get_text("text")`에서 공백을 뺀 글자가 20자 미만이면 "텍스트 없는 페이지"다. 한 페이지라도 있으면 거절한다.
+- 순서: `build_pages(ocr_mode="none", ai_fallback_config=None, pdf_dpi=200, ...)` →
   `build_problem_entries(..., render_board_assets=False)` → 페이지 이미지와 crop을 메모리로 읽어 반환.
 - `regions`는 `ProblemEntry.source_segments`가 있으면 그것에서, 없으면 `source_page_id` + `bounds` 하나로 만든다.
 - `parser_version`은 앱 버전 문자열과 커밋(Vercel이 넣어주는 `VERCEL_GIT_COMMIT_SHA` 앞 7자리)을 합친다.
@@ -130,13 +136,13 @@ def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") ->
 ### 5-3. `trial_server.py` (신규)
 
 **`POST /api/parse`**
-- 본문: 파일 바이트 그대로. 헤더 `Content-Type`(`application/pdf` | `image/png` | `image/jpeg`),
+- 본문: 파일 바이트 그대로. 헤더 `Content-Type: application/pdf`,
   `X-File-Name`(표시용), `X-Turnstile-Token`.
 - 처리 순서:
   1. 본문을 4 MB 상한까지만 읽는다 (넘으면 413)
   2. Turnstile 토큰 확인 (실패 400)
-  3. **파일 앞 바이트(매직 넘버)로 형식 판정**, 헤더 값은 믿지 않는다 (415)
-  4. 쪽수·픽셀 검사 (422)
+  3. **파일 앞 바이트(매직 넘버)로 형식 판정**, 헤더 값은 믿지 않는다. PNG·JPEG면 415 `image_not_supported`, 그 밖은 415 `bad_type`
+  4. `inspect_pdf()`로 쪽수·페이지 크기·텍스트 층 검사 (422)
   5. Supabase `trial_consume()`로 IP 하루 한도와 전체 하루 한도를 **원자적으로 차감** (429)
   6. `/tmp` 요청 폴더에서 파싱
   7. 미리보기 인코딩 (§5-4)
@@ -157,7 +163,7 @@ def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") ->
 }
 ```
 
-**`POST /api/event`** — `{"feature": "edb" | "image" | "edit" | "ai" | "limit_pages" | "limit_size" | "limit_daily", "action": "open" | "inquiry"}`.
+**`POST /api/event`** — `{"feature": "edb" | "image" | "edit" | "ai" | "scan" | "limit_pages" | "limit_size" | "limit_daily", "action": "open" | "inquiry"}`.
 허용 목록 밖의 값은 버린다. `trial_events`에 기록한다. IP당 분당 20회를 넘으면 조용히 버린다(서버 메모리 기준, 인스턴스별 근사치로 충분).
 
 **`GET /api/health`** — 버전, Supabase 연결 확인(가벼운 `select 1` RPC). Vercel Cron이 하루 1회 호출해 실패하면 알린다.
@@ -171,7 +177,7 @@ def parse_problems(source: Path, *, work_dir: Path, subject: str = "unknown") ->
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | 없음 | 서버 전용. 브라우저에 절대 내보내지 않는다 |
 | `TRIAL_IP_SALT` | 없음 | IP 해시용 비밀값 |
 | `TRIAL_MAX_BYTES` | `4000000` | 업로드 상한 |
-| `TRIAL_MAX_PAGES` | `3` | PDF 쪽수 상한. 이미지는 1장 = 1쪽 |
+| `TRIAL_MAX_PAGES` | `3` | PDF 쪽수 상한 |
 | `TRIAL_DAILY_LIMIT` | `3` | IP당 하루 성공 횟수 (KST 기준 날짜) |
 | `TRIAL_GLOBAL_DAILY_LIMIT` | `500` | 전체 하루 파싱 상한. 비용 방어선 |
 
@@ -220,10 +226,10 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 | 위험 | 방어 |
 |---|---|
 | 큰 파일 | 4 MB 넘으면 읽기를 멈추고 413. 브라우저에서 먼저 확인해 올리기 전에 안내한다 |
-| 휴대폰 사진 | 브라우저에서 긴 변 3000px·JPEG 품질 85로 줄여 올린다. PDF는 그대로 올린다 |
-| 확장자 위장 | 매직 넘버로 PDF·PNG·JPEG만 허용, 나머지 415 |
-| 쪽수 폭탄 | 렌더 전에 `count_pages()`로 확인, 3쪽 초과 422 |
-| 거대 페이지·이미지 폭탄 | PDF 페이지 면적이 A3의 2배를 넘거나 이미지가 4천만 픽셀을 넘으면 422. `PIL.Image.MAX_IMAGE_PIXELS`도 같은 값 |
+| 사진·스캔본 | 브라우저가 파일 선택 시 PDF가 아니면 올리지 않고 `scan` 팝업. 서버도 매직 넘버와 텍스트 층으로 다시 거른다 |
+| 확장자 위장 | 매직 넘버로 PDF만 허용, 나머지 415 |
+| 쪽수 폭탄 | 렌더 전에 `inspect_pdf()`로 확인, 3쪽 초과 422 |
+| 거대 페이지 | PDF 페이지 면적이 A3의 2배를 넘으면 422. 렌더된 페이지 이미지 대비 `PIL.Image.MAX_IMAGE_PIXELS`를 4천만으로 둔다 |
 | 오래 걸리는 파일 | `maxDuration` 60초. 넘으면 Vercel이 504를 돌려준다(본문은 JSON이 아닐 수 있어 프론트가 일반 오류로 처리). 차감은 이미 됐으므로 되돌리지 못한다 — 드문 경우로 받아들인다 |
 | 메모리 초과 | 함수 인스턴스가 죽고 500. 위와 같이 처리 |
 | 반복 사용 | IP당 하루 3회, 서버 사정으로 실패(5xx, 504 제외)하면 되돌린다 |
@@ -245,9 +251,9 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 │ 시험지를 올리면      │      │ 문항을 찾는 중…     │      │ 문항 16개를 찾았어요 · 4.2초      │
 │ 문항을 나눠드려요    │      │ (보통 5~10초)       │      │ 무료 체험 결과 · 오늘 2회 남음    │
 │                    │  →   │                    │  →   │ [EDB 내보내기 ✦][이미지 저장 ✦]   │
-│ [ PDF·이미지 끌어놓기]│      │                    │      │ ┌ 페이지 ─────┐ ┌ 문항 ──────┐  │
-│ 무료 체험: 3쪽·4MB   │      │                    │      │ │ 박스 오버레이 │ │ 1번 카드    │  │
-│ 하루 3회             │      │                    │      │ │ (클릭→카드)  │ │ 2번 확인필요 │  │
+│ [ PDF 끌어놓기 ]     │      │                    │      │ ┌ 페이지 ─────┐ ┌ 문항 ──────┐  │
+│ 글자가 있는 PDF·3쪽  │      │                    │      │ │ 박스 오버레이 │ │ 1번 카드    │  │
+│ 4MB · 하루 3회       │      │                    │      │ │ (클릭→카드)  │ │ 2번 확인필요 │  │
 │ 파일은 저장하지 않아요│      │                    │      │ └────────────┘ └───────────┘  │
 └────────────────────┘      └────────────────────┘      │ [다른 파일 해보기]                 │
                                                         │ ✦ 프리미엄으로 더 누려보세요 →      │
@@ -272,6 +278,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 | EDB 내보내기 (`edb`) | 클래스인 칠판으로 바로 보내보세요 | 문항을 칠판에 자동 배치해 EDB 파일로 만들어 드려요. 프리미엄 기능이에요. |
 | 이미지 저장 (`image`) | 잘라낸 문항을 수업 자료로 써보세요 | 문항 이미지를 한 번에 저장하는 건 프리미엄 기능이에요. |
 | 문항 수정 (`edit`) | 문항 경계를 직접 다듬어 보세요 | 합치기·나누기·영역 조정은 프리미엄에서 할 수 있어요. |
+| 사진·스캔본 (`scan`) | 스캔본·사진은 프리미엄 AI 인식으로 | 무료 체험은 글자가 들어 있는 PDF(예: 모의고사 원본 PDF)만 나눠 드려요. 프리미엄 AI 정밀 인식으로 스캔본·사진도 문항을 나눠 보세요! |
 | AI·확인 필요·0문항·처리 실패 (`ai`) | 더 정확한 인식이 필요하신가요? | 프리미엄 AI 정밀 인식으로 스캔본·사진도 더 깔끔하게 나눠 드려요. |
 
 - 문구 속 기능 약속(쪽수 제한 없음, AI 정밀 인식, 합치기·나누기 등)은 설치형 앱의 실제 기능과 맞는지 출시 전에 확인한다.
@@ -286,7 +293,9 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 |---|---|---|---|
 | 400 | `bot_check_failed` | 확인에 실패했어요. 새로고침 후 다시 시도해 주세요 | — |
 | 413 | `too_large` | — | `limit_size` |
-| 415 | `bad_type` | PDF, PNG, JPG 파일만 올릴 수 있어요 | — |
+| 415 | `image_not_supported` | — | `scan` |
+| 415 | `bad_type` | PDF 파일만 올릴 수 있어요 | — |
+| 422 | `no_text_layer` | — | `scan` |
 | 422 | `too_many_pages` | — | `limit_pages` |
 | 422 | `page_too_large` | 페이지 크기가 너무 커요 | — |
 | 429 | `daily_limit` | — | `limit_daily` |
@@ -300,7 +309,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
   기존 로컬 미리보기 기록: 4쪽 16~20문항 1.4~1.9초. 체험판은 cutout·배치·EDB를 빼므로 이보다 짧거나 같다.
 - Vercel 1 vCPU를 M4 코어의 1/2~1/3로 잡으면 3쪽 한 건이 수 초~10초 안팎이다. **콜드 스타트는 문서에 수치가 없다.**
   OpenCV·PyMuPDF import가 더해지므로 스파이크에서 잰다.
-- **출시 전 필수:** 실제 시험지 묶음(스캔본·사진 포함)으로 Vercel 프리뷰 배포에서 3쪽 기준 p50/p95 시간(콜드·웜 따로),
+- **출시 전 필수:** 여러 출처의 실제 텍스트 PDF 시험지 묶음(모의고사·학교·학원 자체 제작)으로 Vercel 프리뷰 배포에서 3쪽 기준 p50/p95 시간(콜드·웜 따로), 텍스트 층 판정에서 `scan`으로 빠지는 비율,
   최대 메모리, 실패율, 응답 크기를 잰다. p95가 20초를 넘거나 메모리가 1.6 GB를 넘으면 쪽수 상한이나 함수 메모리를 조정한다.
 - **비용 감:** Pro 크레딧 $20에 Active CPU 시간당 $0.128, 메모리 GB·시간당 $0.0106. 한 건 10초·2 GB로 잡으면
   한 건에 약 $0.0004(CPU) + $0.00006(메모리)라 **하루 500건 상한을 매일 채워도 월 $7 안팎**이다(추정, 정적 파일 전송 별도).
@@ -315,9 +324,9 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 |---|---|
 | cutout 스위치 | 합성 페이지로 `build_problem_entries`를 두 번 돌려 crop 파일 바이트가 같고, `False`에서 cutout 파일이 없음을 확인. 페이지를 넘는 지문 합치기 경로 포함 |
 | 기존 동작 | 전체 `pytest` 통과 (기본값 `True`) |
-| `problem_parser` | 합성 PDF(PyMuPDF로 생성)에서 페이지·문항 수, `regions` 좌표가 페이지 안, `count_pages` |
+| `problem_parser` | 합성 PDF(PyMuPDF로 생성)에서 페이지·문항 수·번호, `regions` 좌표가 페이지 안. `inspect_pdf`: 텍스트 PDF, 그림만 있는 PDF(`pages_without_text`), 섞인 PDF, 쪽수, 페이지 크기 |
 | 응답 예산 | 문항이 많은 합성 결과로 3.5 MB 이하로 줄어드는 단계와 결정성 |
-| 입력 검사 | 매직 넘버 위장, 4 MB+1바이트, 4쪽 PDF, 거대 페이지, 4천만 픽셀 초과 이미지 |
+| 입력 검사 | 매직 넘버 위장, PNG·JPEG 거절 코드, 4 MB+1바이트, 4쪽 PDF, 거대 페이지, 텍스트 없는 PDF |
 | 한도 | 가짜 Supabase 클라이언트로 차감·되돌림·KST 날짜 경계·전체 한도·연결 실패 시 503 |
 | SQL | `trial_consume`의 동시 호출 원자성은 Supabase 로컬 또는 프리뷰 DB에서 한 번 수동 확인 |
 | API | FastAPI `TestClient` + 가짜 파서·가짜 Supabase로 상태 코드·응답 형식·Turnstile 분기, `app_server` 미import |
@@ -344,9 +353,11 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 
 ## 13. 알려진 위험
 
-- **첫인상 = 로컬 인식 품질.** AI를 끄므로 스캔본·휴대폰 사진에서는 인식이 약할 수 있다. §9 실측 묶음에 스캔본을 꼭 넣고,
-  실패율이 높으면 첫 화면 안내를 "PDF 권장"으로 조정한다. 약한 결과는 "AI로 더 정확하게 ✦" 추천으로 이어진다.
-- **4 MB 상한.** 3쪽 스캔 PDF가 4 MB를 넘을 수 있다. `limit_size` 팝업 클릭 수가 많으면 Supabase Storage 직접 업로드를 추가한다.
+- **체험 가능한 파일이 좁다.** 학교 시험지는 스캔본이 많아 상당수가 `scan` 팝업으로 빠질 수 있다. 이것도 문의로 이어지는 입구지만,
+  `scan` 비율이 너무 높아 체험 자체가 안 되면 사진·스캔본에 한해 AI를 제한적으로 여는 방안을 다시 검토한다.
+- **텍스트 PDF에서도 품질 편차.** 글자가 윤곽선으로 변환된 PDF나 특이한 레이아웃은 약할 수 있다. §9 실측 묶음에 여러 출처의 PDF를 넣는다.
+  약한 결과는 "AI로 더 정확하게 ✦" 추천으로 이어진다.
+- **4 MB 상한.** 텍스트 PDF 3쪽은 대개 1 MB 안팎이라(16쪽 A3 국어 0.8 MB 실측) 거의 걸리지 않는다.
 - **콜드 스타트.** 한동안 요청이 없으면 첫 사용자가 몇 초 더 기다린다. 스파이크 수치가 나쁘면 처리 중 화면 안내 문구로 흡수하거나
   Vercel 인스턴스 예열 옵션을 검토한다.
 - **Supabase 일시정지.** 1주 동안 활동이 없으면 멈추고, 멈추면 체험판이 503을 낸다. 하루 1회 `/api/health` 점검으로 알아채고
