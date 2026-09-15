@@ -1,7 +1,9 @@
 import io
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import fitz
 from PIL import Image
@@ -283,6 +285,47 @@ class TestParseProblems(unittest.TestCase):
             result.timing_ms["entries"] + result.timing_ms["assets"] + result.timing_ms["coalesce"] + result.timing_ms["finish"],
             result.timing_ms["crops"] + 50,
         )
+
+    def test_crop_size_lookup_is_attributed_to_coalesce_not_assets(self):
+        # Regression seam test for the Task 4 fix round: `crop_sizes = [...]`
+        # drains the iterator `_render_problem_assets` returns, and a review
+        # round previously found that draining counted toward the "assets"
+        # stage instead of "coalesce". Delaying the `_render_problem_assets`
+        # call itself cannot observe that boundary (the call finishes, and
+        # both the buggy and fixed orderings record "assets" right after it
+        # returns); delaying iteration of its *result* isolates the exact
+        # code whose stage attribution is under test.
+        import build_problem_board_edb as board
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            pages, models = _cross_page_passage_fixture(root / "src")
+            real = board._render_problem_assets
+
+            class _SlowCropSizes:
+                def __init__(self, sizes):
+                    self._sizes = sizes
+
+                def __iter__(self):
+                    for size in self._sizes:
+                        time.sleep(0.05)
+                        yield size
+
+            def slow(tasks):
+                return _SlowCropSizes(real(tasks))
+
+            timings: dict[str, int] = {}
+            with mock.patch.object(board, "_render_problem_assets", slow):
+                board.build_problem_entries(
+                    pages,
+                    models,
+                    root / "out",
+                    LayoutTemplate(name="academy-default"),
+                    render_board_assets=False,
+                    timings=timings,
+                )
+        self.assertLess(timings["assets"], 150)
+        self.assertGreaterEqual(timings["coalesce"], 150)
 
 if __name__ == "__main__":
     unittest.main()
