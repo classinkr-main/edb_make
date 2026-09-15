@@ -6379,12 +6379,12 @@ def build_problem_entries(
     rendered_crop_sizes = iter(
         _render_problem_assets([draft.asset_task for draft in drafts if draft.asset_task is not None])
     )
+    _record_ms(timings, "assets", assets_started_at)
+    coalesce_started_at = time.perf_counter()
     crop_sizes = [
         draft.prepared_page.image.size if draft.asset_task is None else next(rendered_crop_sizes)
         for draft in drafts
     ]
-    _record_ms(timings, "assets", assets_started_at)
-    coalesce_started_at = time.perf_counter()
     for draft in drafts:
         if draft.asset_task is not None:
             draft.preserve_media_regions = list(draft.asset_task.rendered_media_regions)
