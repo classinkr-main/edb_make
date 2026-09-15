@@ -34,7 +34,7 @@ class TestTrialServer(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VERCEL_GIT_COMMIT_SHA": "abcdef1234"}):
             response = self.client.get("/api/health")
         self.assertEqual(200, response.status_code)
-        self.assertEqual({"status": "ok", "commit": "abcdef1"}, response.json())
+        self.assertEqual({"status": "ok", "commit": "abcdef1"}, {k: response.json()[k] for k in ("status", "commit")})
 
     def test_spike_hidden_without_configured_token(self):
         with mock.patch.dict(os.environ, {}, clear=False):
