@@ -504,6 +504,30 @@ class TestParseProblems(unittest.TestCase):
         self.assertEqual([p.number for p in default.problems], [p.number for p in explicit.problems])
         self.assertEqual([p.regions[0].bbox for p in default.problems], [p.regions[0].bbox for p in explicit.problems])
 
+    def test_recognition_arguments_reach_build_pages(self):
+        # test_explicit_no_ai_arguments_match_the_default only proves the
+        # keywords are accepted, not that they are forwarded: "none"/None
+        # produce the same numbers/bboxes as the old hardcoded call site, so
+        # a dropped-kwargs implementation would pass it too. Capture the
+        # kwargs at the build_pages boundary instead.
+        import build_problem_board_edb as board
+
+        seen: list[tuple[str, dict | None]] = []
+        real = board.build_pages
+
+        def recorder(*args, **kwargs):
+            seen.append((kwargs["ocr_mode"], kwargs["ai_fallback_config"]))
+            return real(*args, **kwargs)
+
+        config = {"mode": "force", "provider": "gemini"}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2]])
+            with mock.patch.object(board, "build_pages", recorder):
+                parse_problems(path, work_dir=root / "a")
+                parse_problems(path, work_dir=root / "b", ocr_mode="none", ai_fallback_config=config)
+        self.assertEqual([("none", None), ("none", config)], seen)
+
 
 if __name__ == "__main__":
     unittest.main()
