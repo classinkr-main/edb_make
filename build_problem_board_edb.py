@@ -58,6 +58,7 @@ from edb_builder import (
     write_edb,
 )
 from layout_template_schema import LayoutTemplate, ProblemLayoutInput
+from image_ops import channel_extrema, channel_magnitude, channel_saturation
 from image_reconstruction_backend import clean_problem_image_transparency
 from page_repair import AIFallbackConfig, build_ai_fallback_config as build_page_ai_fallback_config
 from page_repair import DEFAULT_GEMINI_REPAIR_MODEL
@@ -575,7 +576,7 @@ def _trim_edge_attached_page_chrome(image: Image.Image) -> Image.Image:
             + 0.587 * rgb_float[..., 1]
             + 0.114 * rgb_float[..., 2]
         )
-        saturation = rgb_float.max(axis=2) - rgb_float.min(axis=2)
+        saturation = channel_saturation(rgb_float)
         foreground = (luminance <= 246.0) | (saturation >= 24.0)
 
         def is_foreground(x: int, y: int) -> bool:
@@ -700,7 +701,7 @@ def _trim_bottom_blue_watermark(image: Image.Image) -> Image.Image:
         red = lower[..., 0]
         green = lower[..., 1]
         blue = lower[..., 2]
-        saturation = lower.max(axis=2) - lower.min(axis=2)
+        saturation = channel_saturation(lower)
         blue_mask = (
             (blue >= red + BOTTOM_WATERMARK_BLUE_DELTA)
             & (blue >= green + 8)
@@ -944,7 +945,7 @@ def _erase_corner_page_badges(image: Image.Image) -> Image.Image:
             + 0.587 * rgb_float[..., 1]
             + 0.114 * rgb_float[..., 2]
         )
-        saturation = rgb_float.max(axis=2) - rgb_float.min(axis=2)
+        saturation = channel_saturation(rgb_float)
         alpha = arr[..., 3]
         foreground = (alpha > 24) & ((luminance <= 246.0) | (saturation >= 24.0))
 
@@ -1624,9 +1625,9 @@ def _extract_problem_cutout(
     alpha_strength = np.clip((darkness - noise_floor) / max(1.0, 255.0 - noise_floor), 0.0, 1.0)
     alpha_strength = np.power(np.clip(alpha_strength * 1.45, 0.0, 1.0), 0.7)
 
-    max_channel = rgb_array.max(axis=2)
+    max_channel = channel_extrema(rgb_array)[0]
     whiteness = gray_array / 255.0
-    color_distance = np.linalg.norm(1.0 - rgb_array, axis=2) / np.sqrt(3.0)
+    color_distance = channel_magnitude(1.0 - rgb_array) / np.sqrt(3.0)
     keep_color = np.clip((color_distance - 0.035) / 0.42, 0.0, 1.0)
     keep_dark = np.clip((1.0 - whiteness - 0.08) / 0.7, 0.0, 1.0)
     alpha = np.maximum(alpha_strength, np.maximum(keep_color * 0.92, keep_dark))
@@ -4850,7 +4851,7 @@ def _passage_foreground_row_counts(image: Image.Image) -> list[int]:
         alpha = arr[..., 3]
         rgb = arr[..., :3].astype(np.float32)
         luminance = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-        saturation = rgb.max(axis=2) - rgb.min(axis=2)
+        saturation = channel_saturation(rgb)
         has_transparency = bool(int(alpha.min()) < 245)
         foreground = (
             alpha > 24
@@ -4906,7 +4907,7 @@ def _passage_foreground_x_span(
         alpha = arr[..., 3]
         rgb = arr[..., :3].astype(np.float32)
         luminance = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-        saturation = rgb.max(axis=2) - rgb.min(axis=2)
+        saturation = channel_saturation(rgb)
         has_transparency = bool(int(alpha.min()) < 245)
         foreground = (
             alpha > 24
@@ -5151,7 +5152,7 @@ def _passage_box_horizontal_bounds(image: Image.Image) -> tuple[int, int] | None
         alpha = arr[..., 3]
         rgb = arr[..., :3].astype(np.float32)
         luminance = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-        saturation = rgb.max(axis=2) - rgb.min(axis=2)
+        saturation = channel_saturation(rgb)
         has_transparency = bool(int(alpha.min()) < 245)
         foreground = (
             alpha > 48
@@ -5283,7 +5284,7 @@ def _erase_passage_outer_margin_page_guides(image: Image.Image) -> Image.Image:
         alpha = arr[..., 3]
         rgb = arr[..., :3].astype(np.float32)
         luminance = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-        saturation = rgb.max(axis=2) - rgb.min(axis=2)
+        saturation = channel_saturation(rgb)
         has_transparency = bool(int(alpha.min()) < 245)
         foreground = (
             alpha > 48
@@ -5545,7 +5546,7 @@ def _passage_frame_has_horizontal_closure(
         alpha = arr[..., 3]
         rgb = arr[..., :3].astype(np.float32)
         luminance = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-        saturation = rgb.max(axis=2) - rgb.min(axis=2)
+        saturation = channel_saturation(rgb)
         has_transparency = bool(int(alpha.min()) < 245)
         foreground = (
             alpha > 48
@@ -8020,7 +8021,7 @@ def _problem_image_page_chrome_artifact_stats(image: Image.Image) -> dict[str, A
         green = rgb[..., 1]
         blue = rgb[..., 2]
         luminance = (0.299 * red + 0.587 * green + 0.114 * blue).astype(np.float32)
-        saturation = rgb.max(axis=2) - rgb.min(axis=2)
+        saturation = channel_saturation(rgb)
         has_transparency = int(alpha.min()) < 245
         if has_transparency:
             foreground = alpha >= 48

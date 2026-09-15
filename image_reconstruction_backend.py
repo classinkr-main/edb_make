@@ -12,6 +12,7 @@ from typing import Any
 from urllib import error, request
 
 from ai_usage import image_generation_usage_event, summarize_ai_cost
+from image_ops import channel_distance, channel_luminance, channel_saturation
 
 try:
     import numpy as np  # type: ignore
@@ -677,8 +678,8 @@ def _normalized_content_ink_mask(image: Any) -> Any:
         ]
         border = np.concatenate(border_parts, axis=0)
         background = np.median(border, axis=0)
-        distance = np.sqrt(np.sum((rgb - background) ** 2, axis=2))
-        luminance = (0.299 * rgb[..., 0]) + (0.587 * rgb[..., 1]) + (0.114 * rgb[..., 2])
+        distance = channel_distance(rgb, background)
+        luminance = channel_luminance(rgb)
         background_luminance = _luminance(tuple(int(value) for value in background))
         contrast = (background_luminance - luminance) if background_luminance > 128 else (luminance - background_luminance)
         mask = (distance >= 24.0) | (contrast >= 20.0)
@@ -724,24 +725,54 @@ def _dilate_content_mask(mask: Any, *, radius: int) -> Any:
     return dilated
 
 
+def _content_mask_overlap_views(target: Any, moved: Any, dx: int, dy: int) -> tuple[Any, Any]:
+    """Views of ``target`` and ``moved`` that overlap once ``moved`` shifts by (dx, dy).
+
+    Pixels pushed outside the frame by the shift are zero, so they can never
+    contribute to an intersection or to the moved mask's own pixel count. Working
+    on the overlapping views therefore gives the same numbers as materializing a
+    full shifted copy, without allocating one per candidate offset.
+    """
+    height, width = target.shape
+    source_left = max(0, -dx)
+    source_right = min(width, width - dx)
+    source_top = max(0, -dy)
+    source_bottom = min(height, height - dy)
+    if source_left >= source_right or source_top >= source_bottom:
+        return None, None
+    target_view = target[source_top + dy : source_bottom + dy, source_left + dx : source_right + dx]
+    moved_view = moved[source_top:source_bottom, source_left:source_right]
+    return target_view, moved_view
+
+
 def _align_content_mask(source: Any, output: Any) -> tuple[Any, int, int, float]:
     source_for_alignment = _dilate_content_mask(source, radius=1)
     output_for_alignment = _dilate_content_mask(output, radius=1)
-    best_mask = output
     best_dx = 0
     best_dy = 0
     best_score = -1.0
+    source_ink = int(np.count_nonzero(source_for_alignment))
     for dy in range(-8, 9, 2):
         for dx in range(-8, 9, 2):
-            shifted = _shift_content_mask(output_for_alignment, dx, dy)
-            intersection = int(np.count_nonzero(source_for_alignment & shifted))
-            denominator = int(np.count_nonzero(source_for_alignment)) + int(np.count_nonzero(shifted))
+            target_view, moved_view = _content_mask_overlap_views(
+                source_for_alignment,
+                output_for_alignment,
+                dx,
+                dy,
+            )
+            if target_view is None:
+                intersection = 0
+                moved_ink = 0
+            else:
+                intersection = int(np.count_nonzero(target_view & moved_view))
+                moved_ink = int(np.count_nonzero(moved_view))
+            denominator = source_ink + moved_ink
             score = (2.0 * intersection / denominator) if denominator else 0.0
             if score > best_score:
                 best_score = score
                 best_dx = dx
                 best_dy = dy
-                best_mask = _shift_content_mask(output, dx, dy)
+    best_mask = _shift_content_mask(output, best_dx, best_dy)
     return best_mask, best_dx, best_dy, best_score
 
 
@@ -964,8 +995,16 @@ def clean_problem_image_transparency(
     if remove_corner_page_artifacts:
         removed_artifacts = _remove_corner_page_artifacts(rgba)
         if removed_artifacts:
-            alpha_pixels = rgba.getchannel("A").get_flattened_data() if hasattr(rgba.getchannel("A"), "get_flattened_data") else rgba.getchannel("A").getdata()
-            transparent_pixels = sum(1 for a in alpha_pixels if a <= 0)
+            alpha_channel = rgba.getchannel("A")
+            if np is not None:
+                transparent_pixels = int(np.count_nonzero(np.asarray(alpha_channel) <= 0))
+            else:
+                alpha_pixels = (
+                    alpha_channel.get_flattened_data()
+                    if hasattr(alpha_channel, "get_flattened_data")
+                    else alpha_channel.getdata()
+                )
+                transparent_pixels = sum(1 for a in alpha_pixels if a <= 0)
 
     stats: dict[str, Any] = {
         "background_kind": background_kind,
@@ -997,9 +1036,9 @@ def _remove_background_with_numpy(
     alpha = original_alpha.copy()
     background = np.asarray(background_color, dtype=np.float32)
 
-    luminance = (0.299 * rgb[..., 0]) + (0.587 * rgb[..., 1]) + (0.114 * rgb[..., 2])
-    saturation = rgb.max(axis=2) - rgb.min(axis=2)
-    distance = np.sqrt(np.sum((rgb - background) ** 2, axis=2))
+    luminance = channel_luminance(rgb)
+    saturation = channel_saturation(rgb)
+    distance = channel_distance(rgb, background)
     visible = original_alpha > 0
 
     if background_kind == "dark":
