@@ -71,7 +71,7 @@
 
 ### 2-4. 스파이크 정리
 
-Vercel 측정(`docs/web-trial-spike-results.md`)이 끝나면 `TRIAL_SPIKE_TOKEN` 환경변수를 지우고 `/api/spike` 코드를 제거한다.
+Vercel 측정은 `docs/web-trial-spike-results.md`에 기록했고 `/api/spike` 코드는 제거했다. Vercel에 남아 있는 `TRIAL_SPIKE_TOKEN` 환경변수는 지운다(코드가 더는 읽지 않아 남아 있어도 동작에는 영향이 없다).
 
 ## 3. 배포 후 점검
 

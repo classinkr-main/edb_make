@@ -2,24 +2,19 @@
 
 create_app() wires upload checks, Turnstile, Supabase quotas, the parser, and
 response encoding. Static pages live in public/ and are served by Vercel's
-CDN, not by this app. /api/spike remains until the Vercel spike is recorded.
+CDN, not by this app.
 """
 
 from __future__ import annotations
-
-import time
-
-IMPORT_STARTED_AT = time.perf_counter()
 
 import asyncio
 import hmac
 import json
 import logging
 import os
-import resource
-import sys
 import tempfile
 import threading
+import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -37,8 +32,6 @@ from trial_preview import build_parse_payload
 from trial_quota import MemoryQuotaStore, QuotaUnavailable, SupabaseQuotaStore, SupabaseRest, hash_ip, kst_day
 from trial_turnstile import TurnstileUnavailable, verify_turnstile
 
-SPIKE_MAX_BYTES = 4_000_000
-SPIKE_MAX_PAGES = 20
 DEV_IP_SALT = "local-development-salt"
 EVENT_FEATURES = frozenset({"edb", "image", "edit", "ai", "scan", "limit_pages", "limit_size", "limit_daily"})
 EVENT_ACTIONS = frozenset({"open", "inquiry"})
@@ -48,18 +41,6 @@ NO_STORE = {"Cache-Control": "no-store"}
 SLOT_POLL_SECONDS = 0.05
 
 logger = logging.getLogger("trial_server")
-
-_instance_started_at = time.time()
-_request_count = 0
-_import_ms = int(round((time.perf_counter() - IMPORT_STARTED_AT) * 1000))
-
-
-def _max_rss_mb() -> float:
-    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # Linux reports kilobytes, macOS reports bytes.
-    divisor = 1024 * 1024 if sys.platform == "darwin" else 1024
-    return round(usage / divisor, 1)
-
 
 def client_ip(request: Request) -> str:
     # Vercel overwrites x-real-ip and x-forwarded-for, so clients cannot spoof them.
@@ -335,50 +316,6 @@ def create_app(
             logger.error("trial cron: cleanup failed", exc_info=True)
             return JSONResponse({"ok": False}, status_code=503, headers=NO_STORE)
         return JSONResponse({"ok": True}, headers=NO_STORE)
-
-    @app.post("/api/spike")
-    async def spike(request: Request) -> JSONResponse:
-        global _request_count
-        expected = os.environ.get("TRIAL_SPIKE_TOKEN", "")
-        provided = request.headers.get("x-spike-token", "")
-        if not expected or not hmac.compare_digest(provided.encode(), expected.encode()):
-            return JSONResponse({"error": "not_found"}, status_code=404)
-
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > SPIKE_MAX_BYTES:
-                return JSONResponse({"error": "too_large"}, status_code=413)
-
-        _request_count += 1
-        request_index = _request_count
-        with tempfile.TemporaryDirectory(prefix="trial-spike-") as temp_dir:
-            source = Path(temp_dir) / "input.pdf"
-            source.write_bytes(bytes(body))
-            try:
-                info = inspect_pdf(source, max_pages=SPIKE_MAX_PAGES)
-            except PdfUnreadableError:
-                return JSONResponse({"error": "bad_pdf"}, status_code=415)
-            parse_started_at = time.perf_counter()
-            result = await run_in_threadpool(parse_problems, source, work_dir=Path(temp_dir) / "work")
-            parse_ms = int(round((time.perf_counter() - parse_started_at) * 1000))
-
-        return JSONResponse(
-            {
-                "commit": result.parser_version,
-                "bytes": len(body),
-                "page_count": info.page_count,
-                "pages_without_text": info.pages_without_text,
-                "problem_numbers": [problem.number for problem in result.problems],
-                "import_ms": _import_ms,
-                "parse_ms": parse_ms,
-                "timing_ms": result.timing_ms,
-                "max_rss_mb": _max_rss_mb(),
-                "instance_age_s": round(time.time() - _instance_started_at, 1),
-                "request_index": request_index,
-                "python": sys.version.split()[0],
-            }
-        )
 
     return app
 
