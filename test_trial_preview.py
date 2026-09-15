@@ -80,17 +80,17 @@ class TestBuildParsePayload(unittest.TestCase):
         self.assertEqual(PREVIEW_STEPS[0].problem_long_side, max(_decode(problem["preview"]).size))
 
     def test_falls_back_to_smaller_step_when_over_budget(self):
-        roomy = build_parse_payload(_result(problem_count=4), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
-        roomy_size = len(json.dumps(roomy, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-        tight = build_parse_payload(
+        roomy, roomy_body = build_parse_body(_result(problem_count=4), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
+        tight, tight_body = build_parse_body(
             _result(problem_count=4),
             remaining_today=1,
             elapsed_ms=1,
             processed_page_limit=3,
-            budget_bytes=roomy_size - 1,
+            budget_bytes=len(roomy_body) - 1,
         )
         self.assertGreater(tight["preview_step"], 0)
-        self.assertLessEqual(len(json.dumps(tight, ensure_ascii=False, separators=(",", ":")).encode("utf-8")), roomy_size - 1)
+        self.assertLessEqual(len(tight_body), len(roomy_body) - 1)
+        self.assertEqual(json.dumps(tight, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"), tight_body)
 
     def test_uses_last_step_when_nothing_fits(self):
         payload = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3, budget_bytes=10)
