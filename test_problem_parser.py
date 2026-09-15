@@ -1,13 +1,16 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
 
+import fitz
 from PIL import Image
 
 from assemble_page import group_problem_units
 from build_problem_board_edb import build_problem_entries
 from layout_template_schema import LayoutTemplate
 from preprocess import PreparedPage
+from problem_parser import PdfUnreadableError, inspect_pdf
 from structured_schema import BlockType, Box, ContentBlock, PageModel, ProblemUnit, Subject
 
 
@@ -88,6 +91,26 @@ def _cross_page_passage_fixture(root: Path) -> tuple[list[PreparedPage], list[Pa
     return prepared_pages, [page_1, page_2]
 
 
+def _write_text_exam_pdf(path: Path, pages: list[list[int]], *, width: float = 600, height: float = 800) -> Path:
+    doc = fitz.open()
+    for numbers in pages:
+        page = doc.new_page(width=width, height=height)
+        slots = ((60, 120), (60, 430), (330, 120), (330, 430))
+        for number, (x, y) in zip(numbers, slots):
+            page.insert_text((x, y), f"{number}. problem stem", fontsize=14)
+            page.draw_rect(fitz.Rect(x + 35, y + 50, x + 180, y + 140), color=(0, 0, 0), width=1)
+            page.insert_text((x, y + 210), "① a   ② b   ③ c", fontsize=12)
+    doc.save(path)
+    doc.close()
+    return path
+
+
+def _png_bytes() -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (400, 500), "white").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 class TestRenderBoardAssetsSwitch(unittest.TestCase):
     def test_disabling_board_assets_keeps_crops_and_skips_cutouts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -119,6 +142,64 @@ class TestRenderBoardAssetsSwitch(unittest.TestCase):
                 self.assertTrue(lean.crop_path.is_file())
                 self.assertFalse(lean.board_render_path.exists())
                 self.assertEqual(kept.crop_path.read_bytes(), lean.crop_path.read_bytes())
+
+
+class TestInspectPdf(unittest.TestCase):
+    def test_text_pdf_reports_pages_and_no_textless_pages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = _write_text_exam_pdf(Path(temp_dir) / "exam.pdf", [[1, 2, 3, 4], [5, 6]])
+            info = inspect_pdf(path, max_pages=3)
+        self.assertEqual(2, info.page_count)
+        self.assertEqual(0, info.pages_without_text)
+        self.assertAlmostEqual(600 * 800, info.max_page_area_pt)
+
+    def test_image_only_page_counts_as_textless(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = _write_text_exam_pdf(Path(temp_dir) / "mixed.pdf", [[1, 2, 3, 4]])
+            doc = fitz.open(path)
+            scanned = doc.new_page(width=600, height=800)
+            scanned.insert_image(scanned.rect, stream=_png_bytes())
+            doc.saveIncr()
+            doc.close()
+            info = inspect_pdf(path, max_pages=3)
+        self.assertEqual(2, info.page_count)
+        self.assertEqual(1, info.pages_without_text)
+
+    def test_over_limit_skips_page_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "long.pdf"
+            doc = fitz.open()
+            for _ in range(5):
+                doc.new_page(width=600, height=800)
+            doc.save(path)
+            doc.close()
+            info = inspect_pdf(path, max_pages=3)
+        self.assertEqual(5, info.page_count)
+        self.assertEqual(0, info.pages_without_text)
+        self.assertEqual(0.0, info.max_page_area_pt)
+
+    def test_reports_largest_page_area(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = _write_text_exam_pdf(Path(temp_dir) / "big.pdf", [[1, 2, 3, 4]], width=1684, height=2384)
+            info = inspect_pdf(path, max_pages=3)
+        self.assertAlmostEqual(1684 * 2384, info.max_page_area_pt)
+
+    def test_non_pdf_bytes_raise_unreadable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "fake.pdf"
+            path.write_bytes(_png_bytes())
+            with self.assertRaises(PdfUnreadableError):
+                inspect_pdf(path, max_pages=3)
+
+    def test_encrypted_pdf_raises_unreadable(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "locked.pdf"
+            doc = fitz.open()
+            doc.new_page()
+            doc.save(path, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="secret", owner_pw="owner")
+            doc.close()
+            with self.assertRaises(PdfUnreadableError):
+                inspect_pdf(path, max_pages=3)
 
 
 if __name__ == "__main__":
