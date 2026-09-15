@@ -46,7 +46,7 @@ class TestEncodeJpegDataUri(unittest.TestCase):
         small = _decode(encode_jpeg_data_uri(_noise(300, 200, 1), long_side=800, quality=70))
         self.assertEqual((300, 200), small.size)
 
-    def test_downscale_uses_two_step_reduce(self):
+    def test_downscale_uses_hamming_with_reducing_gap(self):
         with mock.patch.object(Image.Image, "resize", wraps=Image.new("RGB", (2339, 3308), "white").resize) as resize:
             encode_jpeg_data_uri(Image.new("RGB", (2339, 3308), "white"), long_side=1200, quality=70)
         self.assertEqual(Image.Resampling.HAMMING, resize.call_args.args[1])

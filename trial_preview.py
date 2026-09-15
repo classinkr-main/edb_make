@@ -57,8 +57,10 @@ def encode_jpeg_data_uri(image: Image.Image, *, long_side: int, quality: int) ->
     scale = long_side / max(preview.size)
     if scale < 1:
         size = (max(1, round(preview.width * scale)), max(1, round(preview.height * scale)))
-        # Two-step: integer reduce() first, then a cheap filter. LANCZOS from 200 DPI cost 0.17 s
-        # per request locally (about 0.7 s on Vercel) for no visible gain at preview sizes.
+        # HAMMING instead of LANCZOS: same preview size, roughly half the resize cost (LANCZOS
+        # resize x25 cost about 0.17 s per request locally, ~0.7 s on Vercel) for no visible gain
+        # at preview sizes. reducing_gap=2.0 additionally lets Pillow run an integer reduce()
+        # first, which only engages on the >4x fallback steps.
         preview = preview.resize(size, Image.Resampling.HAMMING, reducing_gap=2.0)
     buffer = io.BytesIO()
     preview.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=False)

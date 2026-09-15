@@ -143,7 +143,7 @@
 
 | 레버 | 내용 | 로컬 절감 | 포함 조건 | 담당 |
 |---|---|---|---|---|
-| L3 미리보기 생성 | LANCZOS 전체 축소 대신 `Image.reduce`로 정수배 축소 뒤 BILINEAR로 맞춘다. PDF를 다시 렌더하지 않는다. 미리보기는 여백 자르기·기울기 보정을 거친 페이지 이미지와 같은 좌표계여야 박스가 맞기 때문이다 | 0.15초 | 기본 | Sonnet |
+| L3 미리보기 생성 | LANCZOS 전체 축소 대신 HAMMING 필터로 축소한다(`reducing_gap=2.0`으로 호출해 4배 넘게 줄이는 예산 초과 폴백 단계에서만 Pillow가 정수배 `reduce()`를 먼저 실행하고, 기본 단계에서는 HAMMING 단독). PDF를 다시 렌더하지 않는다. 미리보기는 여백 자르기·기울기 보정을 거친 페이지 이미지와 같은 좌표계여야 박스가 맞기 때문이다(구현 중 정정, 2026-09-16: 원래 BILINEAR+`Image.reduce` 조합으로 적었으나 실제로는 HAMMING이다) | 0.15초 | 기본 | Sonnet |
 | L5 워커 1개 | `TRIAL_WORKERS=1`이면 렌더·crop 스레드 풀을 1로. 1 vCPU 경합만 줄인다 | 소폭 | 기본 | Sonnet |
 | L6 JSON 1회 직렬화 | `build_parse_payload`가 예산 확인에 쓴 직렬화 결과를 응답에 재사용 | 소폭 | 기본 | Sonnet |
 | L1 페이지 렌더 메모리 경로 | `render_pdf_pages`가 픽스맵을 `Image.frombytes`로 유지. `NormalizedPageImage`에 선택적 이미지 필드, 경로를 읽는 3곳 대응. 캐시·디버그 소비자만 PNG | 0.5초 | 분배 문제 + CPU 원인 | Opus |
