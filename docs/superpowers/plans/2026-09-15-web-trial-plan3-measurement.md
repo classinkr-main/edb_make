@@ -678,7 +678,7 @@ class TestImageLimits(unittest.TestCase):
 
         import problem_parser  # noqa: F401  (import side effect under test)
 
-        self.assertEqual(40_000_000, Image.MAX_IMAGE_PIXELS)
+        self.assertEqual(20_000_000, Image.MAX_IMAGE_PIXELS)
 ```
 
 `TestInspectPdf`에 추가:
@@ -760,7 +760,7 @@ Expected: FAIL — `TypeError: PdfInfo.__init__() got an unexpected keyword argu
 
 ```python
 # 2×A3 at 200 DPI is about 15.5M pixels; larger renders are decompression bombs for this service.
-Image.MAX_IMAGE_PIXELS = 40_000_000
+Image.MAX_IMAGE_PIXELS = 20_000_000
 ```
 
 `PdfInfo`:

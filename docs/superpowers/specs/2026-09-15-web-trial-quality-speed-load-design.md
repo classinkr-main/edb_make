@@ -85,7 +85,7 @@
 - 마이그레이션에 열 추가: `trial_events.timing jsonb`(단계별 ms), `instance_id text`(프로세스 시작 시 만든 UUID 앞 8자), `reject_detail text`(`busy`의 사유: `not_ready`·`turnstile`·`quota_store`·`global_limit`·`slot_wait`), `complexity jsonb`(앞 3쪽의 쪽당 최대 단어·드로잉 수, 상한 보정용). `add column if not exists`로 재실행 가능하게.
 - `problem_parser.timing_ms`에 `render`(페이지 렌더)와 `entries`(박스 계산)를 분리해 기록하고, 서버가 `encode`(미리보기 인코딩)와 `total`을 더한다.
 - `/api/parse` 응답 JSON에 `timing_ms`와 `instance_id`를 넣는다. 화면은 쓰지 않고 프로브가 읽는다.
-- `problem_parser` 모듈 로드 시 `PIL.Image.MAX_IMAGE_PIXELS = 40_000_000`을 설정한다(2×A3 200 DPI ≈ 15.5M px가 상한 안). 스펙 §6에 있었으나 구현되지 않은 항목이다.
+- `problem_parser` 모듈 로드 시 `PIL.Image.MAX_IMAGE_PIXELS = 20_000_000`을 설정한다. Pillow는 이 값의 1배에서 경고, 2배에서 오류를 내므로 실제 차단선은 40M px이고 2×A3 200 DPI ≈ 15.5M px는 경고선 아래다(구현 중 정정, 2026-09-16). 스펙 §6에 있었으나 구현되지 않았던 항목이다.
 - 운영 문서 §4에 SQL 추가: 단계별 p50/p95, 인스턴스별 건수(콜드 스타트 빈도), `busy` 사유별 건수.
 - **배포 순서**: 마이그레이션 → 코드 푸시. 열이 없으면 PostgREST가 insert를 거부해 이벤트가 조용히 사라진다.
 
