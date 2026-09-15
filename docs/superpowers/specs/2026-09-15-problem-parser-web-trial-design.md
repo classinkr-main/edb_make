@@ -147,11 +147,11 @@ def parse_problems(source: Path, *, work_dir: Path, max_pages: int, subject: str
   2. Turnstile 토큰 확인 (실패 400)
   3. **파일 앞 바이트(매직 넘버)로 형식 판정**, 헤더 값은 믿지 않는다. PNG·JPEG면 415 `image_not_supported`, 그 밖은 415 `bad_type`
   4. `inspect_pdf(max_pages=3)`로 전체 쪽수(100쪽 초과 422)·앞 3쪽의 페이지 크기(422)·텍스트 층(422 `no_text_layer`) 검사
-  5. Supabase `trial_consume()`로 IP 하루 한도와 전체 하루 한도를 **원자적으로 차감** (429)
-  6. `/tmp` 요청 폴더에서 파싱
-  7. 미리보기 인코딩 (§5-4)
-  8. 서버 사정으로 실패(5xx)하면 `trial_refund()`로 되돌린다
-  9. `trial_events`에 결과 한 줄 기록 (실패해도 응답은 보낸다)
+  5. 인스턴스당 파싱 슬롯을 **차감 전에** 잡는다. 20초 안에 못 잡으면 503이며 차감하지 않는다
+  6. 요청 id(UUID)와 함께 Supabase `trial_consume()`로 IP 하루 한도와 전체 하루 한도를 **원자적으로 차감** (429)
+  7. `/tmp` 요청 폴더에서 파싱하고 미리보기를 인코딩한다 (§5-4)
+  8. 환불은 차감 결과를 모르는 경우(Supabase 응답 유실·시간 초과)에만 요청 id로 한 번 한다. **파싱이 시작된 뒤의 실패는 차감을 유지한다** — 파서를 죽이는 PDF를 반복해 올려 두 한도를 우회하지 못하게 하려는 것이다(2026-09-15 리뷰 결정)
+  9. `trial_events`에 결과 한 줄 기록 (실패해도 응답은 보낸다). 예상하지 못한 예외도 JSON `parse_failed` 500으로 답한다
 - 응답:
 
 ```json
@@ -215,16 +215,24 @@ create table trial_events (
   reject_code text,                     -- 'too_large' | 'bad_type' | 'too_many_pages' | 'daily_limit' | ...
   feature     text,                     -- popup: §5-3 feature
   action      text,                     -- popup: 'open' | 'inquiry'
-  pages       smallint, problems smallint, risk_problems smallint,
+  source_pages int, pages int, problems int, risk_problems int,
   bytes       int, elapsed_ms int,
   ip_hash     text                      -- sha256(salt || 날짜 || ip) 앞 16자
 );
 
--- 원자적 차감: IP 한도와 전체 한도를 한 트랜잭션에서 확인·증가한다
-create function trial_consume(p_day date, p_subject text, p_limit int, p_global_limit int)
-  returns table (allowed boolean, remaining int) ...;
-create function trial_refund(p_day date, p_subject text) returns void ...;
+create table trial_charges (             -- 차감 1건 = 1행, 환불을 정확히 한 번만 하게 한다
+  request_id uuid primary key, day date, subject text, refunded boolean, created_at timestamptz
+);
+
+-- 원자적 차감: '__global__' 행 → subject 행 순서로 잠그고 두 한도를 확인·증가, 같은 id는 'duplicate'
+create function trial_consume(p_request_id uuid, p_day date, p_subject text, p_limit int, p_global_limit int)
+  returns table (allowed boolean, remaining int, reason text) ... set lock_timeout = '3s';
+-- 그 요청의 차감만 한 번 되돌린다. 잠금 순서는 consume과 같다
+create function trial_refund(p_request_id uuid) returns boolean ... set lock_timeout = '3s';
 ```
+
+- `lock_timeout` 3초는 HTTP 클라이언트 시간 제한(5초)보다 짧다. 잠금을 오래 기다리면 커밋하지 않고 실패한다.
+- 실제 파일은 `supabase/migrations/20260915000000_web_trial.sql`이고 로컬 PostgreSQL 17 + pgbench로 동시성·교착을 테스트한다.
 
 - 두 테이블 모두 RLS를 켜고 정책을 두지 않는다. 서버만 service role 키로 접근한다.
 - 보존: `trial_quota`는 7일, `trial_events`는 180일이 지나면 Vercel Cron이 매일 지운다.
@@ -241,7 +249,7 @@ create function trial_refund(p_day date, p_subject text) returns void ...;
 | 거대 페이지 | PDF 페이지 면적이 A3의 2배를 넘으면 422. 렌더된 페이지 이미지 대비 `PIL.Image.MAX_IMAGE_PIXELS`를 4천만으로 둔다 |
 | 오래 걸리는 파일 | `maxDuration` 60초. 넘으면 Vercel이 504를 돌려준다(본문은 JSON이 아닐 수 있어 프론트가 일반 오류로 처리). 차감은 이미 됐으므로 되돌리지 못한다 — 드문 경우로 받아들인다 |
 | 메모리 초과 | 함수 인스턴스가 죽고 500. 위와 같이 처리 |
-| 반복 사용 | IP당 하루 3회, 서버 사정으로 실패(5xx, 504 제외)하면 되돌린다 |
+| 반복 사용 | IP당 하루 3회. 파싱이 시작되면 실패해도 차감 유지, 슬롯 대기 초과는 차감하지 않음, 차감 결과를 모르면 요청 id로 환불 |
 | 비용 폭주 | 전체 하루 500회 + Vercel 지출 한도 |
 | 봇 | Turnstile 토큰을 서버에서 확인 |
 | **Supabase 연결 실패·일시정지** | 파싱을 **거부한다(503, fail-closed).** 한도 없이 열어두면 비용이 무방비가 된다. `/api/health` 점검으로 알아챈다 |

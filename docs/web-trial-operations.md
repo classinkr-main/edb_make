@@ -21,11 +21,11 @@
 ### 2-1. Supabase
 
 1. 서울 리전(Northeast Asia, Seoul) 프로젝트를 쓴다. 일반 "APAC" 지역은 싱가포르로 잡힐 수 있으니 서울을 직접 고른다.
-2. SQL Editor에서 `supabase/migrations/20260915000000_web_trial.sql` 전체를 실행한다. 다시 실행해도 된다.
+2. SQL Editor에서 `supabase/migrations/20260915000000_web_trial.sql` 전체를 실행한다. 다시 실행해도 되며, 파일이 바뀌면(예: 2026-09-15 리뷰 수정으로 `trial_charges` 추가) 다시 실행한다.
 3. 확인:
    ```sql
-   select relname, relrowsecurity from pg_class where relname in ('trial_quota', 'trial_events');
-   -- 두 행 모두 true
+   select relname, relrowsecurity from pg_class where relname in ('trial_quota', 'trial_charges', 'trial_events');
+   -- 세 행 모두 true
    ```
 4. Project Settings > API Keys에서 **secret key**(`sb_secret_...`)를 만든다. 이 키는 Vercel 환경변수에만 넣고 채팅·저장소·`.env.local`에 넣지 않는다. publishable key는 이 체험판에서 쓰지 않는다.
 
@@ -165,7 +165,7 @@ p95가 20초를 넘으면 `TRIAL_MAX_PAGES`를 줄이거나 Function CPU를 Perf
 | 확인 상자가 안 보임 | CSP 차단 또는 challenges.cloudflare.com 접속 차단 | 브라우저 콘솔의 CSP 오류 확인, `vercel.json` `script-src`·`frame-src` 확인 |
 | 사이트 전체 503 `DEPLOYMENT_PAUSED` | Spend Management 한도 도달 | 사용량 확인 후 대시보드에서 재개 |
 | 크론 `{"ok":false}` | Supabase 연결 실패 | 위 Supabase 항목과 같음 |
-| 특정 PDF만 "처리하지 못했어요" | 파서 예외(`parse_failed`) | Vercel 함수 로그의 `trial parse failed` 스택 확인. 파일은 저장하지 않으므로 사용자에게 받아 로컬(§5)에서 재현 |
+| 특정 PDF만 "처리하지 못했어요" | 파서 예외(`parse_failed`). 이 경우 사용 횟수는 차감된 채 남는다(반복 업로드로 한도를 우회하지 못하게) | Vercel 함수 로그의 `trial parse failed` 스택 확인. 파일은 저장하지 않으므로 사용자에게 받아 로컬(§5)에서 재현 |
 
 ## 7. 안내 문구
 
