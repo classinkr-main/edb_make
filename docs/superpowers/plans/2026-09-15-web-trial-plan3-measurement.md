@@ -63,9 +63,8 @@
         out = self.psql(
             "select reject_detail, instance_id, timing->>'render', complexity->>'words' from public.trial_events;",
             role="service_role",
-        ).stdout
-        for expected in ("slot_wait", "abcd1234", "120", "674"):
-            self.assertIn(expected, out)
+        ).stdout.strip()
+        self.assertEqual("slot_wait|abcd1234|120|674", out)
 
     def test_migration_is_rerunnable_with_new_columns(self):
         self.psql(MIGRATION.read_text(encoding="utf-8"))
