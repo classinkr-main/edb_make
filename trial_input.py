@@ -29,9 +29,11 @@ class Rejection:
 
 
 class TrialRejected(Exception):
-    def __init__(self, rejection: Rejection) -> None:
+    def __init__(self, rejection: Rejection, detail: str | None = None) -> None:
         super().__init__(rejection.code)
         self.rejection = rejection
+        # Why a shared code was refused (busy: not_ready | turnstile | quota_store | global_limit | slot_wait).
+        self.detail = detail
 
 
 REJECTIONS: dict[str, Rejection] = {
@@ -60,8 +62,8 @@ class InputLimits:
     max_page_area_pt: float
 
 
-def reject(code: str) -> TrialRejected:
-    return TrialRejected(REJECTIONS[code])
+def reject(code: str, detail: str | None = None) -> TrialRejected:
+    return TrialRejected(REJECTIONS[code], detail)
 
 
 def sniff_kind(head: bytes) -> str:

@@ -328,6 +328,67 @@ class TestParseRejections(TrialApiCase):
         self.assertEqual([], self.verifier.calls)
         self.assertEqual([], self.parser.calls)
 
+    def test_not_ready_records_reason(self):
+        client = self.make_client(config=TrialConfig(production=True, ip_salt="salt", cron_secret="cron-secret"))
+        response = self.post_pdf(client)
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("not_ready", self.store.events[-1]["reject_detail"])
+
+    def test_turnstile_outage_records_reason_and_does_not_charge(self):
+        client = self.make_client(verifier=FakeVerifier(error=TurnstileUnavailable("down")))
+        response = self.post_pdf(client)
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("turnstile", self.store.events[-1]["reject_detail"])
+        self.assertEqual(0, self.used())
+
+    def test_quota_store_outage_records_reason(self):
+        client = self.make_client(store=CommitThenTimeoutStore())
+        response = self.post_pdf(client)
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("quota_store", self.store.events[-1]["reject_detail"])
+
+    def test_global_limit_records_reason(self):
+        client = self.make_client(config=TrialConfig(ip_salt="salt", cron_secret="cron-secret", global_daily_limit=1))
+        self.assertEqual(200, self.post_pdf(client, ip="203.0.113.1").status_code)
+        response = self.post_pdf(client, ip="203.0.113.2")
+        self.assertEqual(503, response.status_code)
+        self.assertEqual("global_limit", self.store.events[-1]["reject_detail"])
+
+    def test_slot_wait_timeout_records_reason_and_does_not_charge(self):
+        gate = threading.Event()
+        client = self.make_client(
+            config=TrialConfig(ip_salt="salt", cron_secret="cron-secret", parse_concurrency=1, parse_wait_seconds=0.3),
+            parser=FakeParser(gate=gate),
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(self.post_pdf, client, ip="203.0.113.1")
+            time.sleep(0.2)  # let the first request take the only slot
+            second = self.post_pdf(client, ip="203.0.113.2")
+            # Check right away: the still-blocked first request only finishes (and
+            # records its own event) after gate.set() below, which would otherwise
+            # shadow the busy event we're checking for here.
+            self.assertEqual(503, second.status_code)
+            self.assertEqual("slot_wait", self.store.events[-1]["reject_detail"])
+            self.assertEqual(0, self.used("203.0.113.2"))
+            gate.set()
+            self.assertEqual(200, first.result().status_code)
+
+    def test_parser_crash_stays_charged_and_has_no_detail(self):
+        client = self.make_client(parser=FakeParser(error=RuntimeError("boom")))
+        response = self.post_pdf(client)
+        self.assertEqual(500, response.status_code)
+        self.assertEqual("parse_failed", response.json()["error"]["code"])
+        self.assertEqual(1, self.used())  # parsing started, so the use stays charged (spec §6)
+        self.assertIsNone(self.store.events[-1]["reject_detail"])
+
+    def test_success_and_ordinary_rejections_have_no_detail(self):
+        client = self.make_client()
+        self.post_pdf(client)
+        self.assertIsNone(self.store.events[-1]["reject_detail"])
+        self.post_pdf(client, body=b"\x89PNG\r\n\x1a\n" + b"0" * 100)
+        self.assertEqual("image_not_supported", self.store.events[-1]["reject_code"])
+        self.assertIsNone(self.store.events[-1]["reject_detail"])
+
     def test_concurrency_limit_answers_busy_without_charging(self):
         gate = threading.Event()
         config = TrialConfig(ip_salt="salt", parse_concurrency=1, parse_wait_seconds=0.2)

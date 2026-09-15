@@ -8,6 +8,7 @@ from trial_input import (
     TrialRejected,
     check_pdf_info,
     check_upload_head,
+    reject,
     sniff_kind,
 )
 
@@ -103,6 +104,12 @@ class TestRejectionCatalog(unittest.TestCase):
             {"error": {"code": "daily_limit", "message": REJECTIONS["daily_limit"].message, "feature": "limit_daily"}, "remaining_today": 0},
             payload,
         )
+
+    def test_reject_carries_optional_detail(self):
+        rejected = reject("busy", "slot_wait")
+        self.assertEqual("busy", rejected.rejection.code)
+        self.assertEqual("slot_wait", rejected.detail)
+        self.assertIsNone(reject("busy").detail)
 
 
 if __name__ == "__main__":

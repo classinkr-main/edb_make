@@ -173,8 +173,8 @@ def create_app(
         except Exception:
             logger.warning("trial refund failed", exc_info=True)
 
-    def rejection_response(rejection: Any, event: dict[str, Any]) -> JSONResponse:
-        event.update(status=rejection.status, reject_code=rejection.code)
+    def rejection_response(rejection: Any, event: dict[str, Any], detail: str | None = None) -> JSONResponse:
+        event.update(status=rejection.status, reject_code=rejection.code, reject_detail=detail)
         extra = {"remaining_today": 0} if rejection.code == "daily_limit" else {}
         return JSONResponse(rejection.payload(**extra), status_code=rejection.status, headers=NO_STORE)
 
@@ -206,6 +206,7 @@ def create_app(
             "kind": "parse",
             "status": None,
             "reject_code": None,
+            "reject_detail": None,
             "source_pages": None,
             "pages": None,
             "problems": None,
@@ -216,7 +217,7 @@ def create_app(
         }
         try:
             if not ready():
-                raise reject("busy")
+                raise reject("busy", "not_ready")
             body = await _read_limited(request, config.limits.max_bytes)
             event["bytes"] = len(body)
             if verify is not None:
@@ -224,7 +225,7 @@ def create_app(
                     outcome = await run_in_threadpool(verify, request.headers.get("x-turnstile-token"), ip)
                 except TurnstileUnavailable as error:
                     logger.warning("turnstile unavailable: %s", error)
-                    raise reject("busy") from error
+                    raise reject("busy", "turnstile") from error
                 if not outcome.success:
                     raise reject("bot_check_failed")
             check_upload_head(body[:1024])
@@ -240,7 +241,7 @@ def create_app(
                 # Take a parse slot before charging, so a request that only waits and
                 # then times out never counts against anyone's daily limit.
                 if not await acquire_parse_slot():
-                    raise reject("busy")
+                    raise reject("busy", "slot_wait")
                 try:
                     try:
                         decision = await run_in_threadpool(
@@ -257,9 +258,11 @@ def create_app(
                         # are keyed by request id, so undoing an unknown outcome is safe.
                         logger.warning("quota unavailable: %s", error)
                         await run_in_threadpool(refund_quietly, request_id)
-                        raise reject("busy") from error
+                        raise reject("busy", "quota_store") from error
                     if not decision.allowed:
-                        raise reject("daily_limit" if decision.reason == "ip" else "busy")
+                        if decision.reason == "ip":
+                            raise reject("daily_limit")
+                        raise reject("busy", "global_limit")
                     # From here the use stays charged even if parsing fails: a crashing PDF
                     # still spent parse CPU, and refunds would let it bypass both caps.
                     body, counts = await run_in_threadpool(
@@ -270,7 +273,7 @@ def create_app(
             event.update(status=200, **counts)
             response = Response(body, media_type="application/json", headers=NO_STORE)
         except TrialRejected as rejected:
-            response = rejection_response(rejected.rejection, event)
+            response = rejection_response(rejected.rejection, event, rejected.detail)
         except Exception:
             logger.exception("trial parse crashed")
             response = rejection_response(REJECTIONS["parse_failed"], event)
