@@ -34,6 +34,7 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, url2pathname, urlopen
@@ -3809,6 +3810,25 @@ def _session_history_entry(session: dict[str, Any], *, updated_at: str | None = 
     }
 
 
+def _session_history_head_stores(history: list[dict[str, Any]], session: dict[str, Any]) -> bool:
+    """True when the newest history entry already holds exactly ``session``.
+
+    Re-merging in that case would rewrite the whole history file, timestamp
+    included, without changing anything a caller can observe.
+    """
+    if not history:
+        return False
+    head = history[0]
+    if not isinstance(head, dict):
+        return False
+    entry_id = hashlib.sha1(
+        _session_history_key(session).encode("utf-8", errors="ignore")
+    ).hexdigest()[:16]
+    if str(head.get("id") or "") != entry_id:
+        return False
+    return head.get("session") == session
+
+
 def _session_history_with_session(
     history: list[dict[str, Any]],
     session: dict[str, Any],
@@ -3958,15 +3978,30 @@ def persist_latest_session_with_history(
     return history, None
 
 
+@lru_cache(maxsize=8192)
+def _canonical_reference_path(value: str) -> str | None:
+    """Canonical on-disk path for a session file reference.
+
+    Decoding costs a URL parse plus a realpath walk, and one session-history
+    scan asks about the same few thousand references over and over, so the
+    mapping is memoized. Existence is still checked live by every caller, so a
+    deleted or newly written file is picked up immediately.
+    """
+    resolved = decode_file_reference(value)
+    if resolved is None:
+        return None
+    return str(resolved.resolve())
+
+
 def collect_session_file_paths(session: dict[str, Any]) -> set[str]:
     paths: set[str] = set()
 
     def add_path(value: Any) -> None:
         if not value:
             return
-        resolved = decode_file_reference(str(value))
-        if resolved and resolved.exists():
-            paths.add(str(resolved.resolve()))
+        canonical = _canonical_reference_path(str(value))
+        if canonical and os.path.exists(canonical):
+            paths.add(canonical)
 
     def add_edb_part_paths(summary: dict[str, Any]) -> None:
         raw_parts = summary.get("edbParts") if isinstance(summary.get("edbParts"), list) else summary.get("edb_parts")
@@ -4591,6 +4626,31 @@ def _find_problem(session: dict[str, Any], problem_id: str) -> tuple[int, dict[s
     raise ValueError(f"problem not found: {problem_id}")
 
 
+def _find_problems(
+    session: dict[str, Any],
+    problem_ids: Sequence[str],
+) -> list[tuple[int, dict[str, Any]]]:
+    """Locate several problems in one pass over the list.
+
+    Bulk actions used to rescan every problem once per requested id, which is
+    quadratic on the large sessions where those actions matter most.
+    """
+    wanted = {str(problem_id) for problem_id in problem_ids}
+    located: dict[str, tuple[int, dict[str, Any]]] = {}
+    for index, problem in enumerate(session.get("problems", [])):
+        if not isinstance(problem, dict):
+            continue
+        key = str(problem.get("id"))
+        if key in wanted and key not in located:
+            located[key] = (index, problem)
+            if len(located) == len(wanted):
+                break
+    for problem_id in problem_ids:
+        if str(problem_id) not in located:
+            raise ValueError(f"problem not found: {problem_id}")
+    return [located[str(problem_id)] for problem_id in problem_ids]
+
+
 def _find_page(session: dict[str, Any], page_id: str) -> dict[str, Any]:
     for page in session.get("pages", []):
         if isinstance(page, dict) and str(page.get("id")) == page_id:
@@ -4844,18 +4904,38 @@ def _hwp_quality_from_page(page: dict[str, Any]) -> dict[str, Any] | None:
     return quality if isinstance(quality, dict) else None
 
 
+@lru_cache(maxsize=8)
+def _load_pages_json_pages(path_value: str, modified_ns: int, file_size: int) -> tuple[dict[str, Any], ...]:
+    del modified_ns, file_size  # cache-key inputs; the path is read below
+    try:
+        payload = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(page for page in payload if isinstance(page, dict))
+
+
 def _session_pages_json_pages(session: dict[str, Any]) -> list[dict[str, Any]]:
+    """Structured pages for ``session``, parsed once per on-disk revision.
+
+    The page dicts are shared with other callers of the same revision, so
+    treat them as read-only.
+    """
     pages_json_value = session.get("pages_json_path") or session.get("pagesJsonPath")
     pages_json_path = decode_file_reference(str(pages_json_value)) if pages_json_value else None
-    if pages_json_path is None or not pages_json_path.exists():
+    if pages_json_path is None:
         return []
+    # `pages.json` is the largest artifact in a session and several summary
+    # helpers ask for it while building one response, so parse it once per
+    # on-disk revision instead of once per caller.
     try:
-        payload = json.loads(pages_json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        stat = pages_json_path.stat()
+    except OSError:
         return []
-    if not isinstance(payload, list):
-        return []
-    return [page for page in payload if isinstance(page, dict)]
+    return list(
+        _load_pages_json_pages(str(pages_json_path), stat.st_mtime_ns, stat.st_size)
+    )
 
 
 def _session_hwp_quality_pages(session: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5495,10 +5575,7 @@ def _mutate_split(session: dict[str, Any], problem_id: str, split_y_ratio: float
 def _mutate_merge(session: dict[str, Any], problem_ids: list[str]) -> dict[str, Any]:
     if len(problem_ids) < 2:
         raise ValueError("merge requires at least 2 problems")
-    targets: list[tuple[int, dict[str, Any]]] = []
-    for pid in problem_ids:
-        index, problem = _find_problem(session, pid)
-        targets.append((index, problem))
+    targets = _find_problems(session, problem_ids)
     page_ids = {str(p.get("sourcePageId")) for _, p in targets}
     if len(page_ids) != 1:
         raise ValueError("merge requires all problems on the same source page")
@@ -6718,8 +6795,7 @@ def _mutate_exclude_many(session: dict[str, Any], problem_ids: Any) -> dict[str,
     ids = _coerce_problem_ids(problem_ids)
     if not ids:
         raise ValueError("problemIds is required")
-    for problem_id in ids:
-        _find_problem(session, problem_id)  # raises if missing
+    _find_problems(session, ids)  # raises if any id is missing
     _remove_problems(session, set(ids))
     return session
 
@@ -8414,7 +8490,14 @@ class AppHTTPServer(ThreadingHTTPServer):
             with _session_storage_lock:
                 if not LATEST_SESSION_JSON.exists():
                     save_latest_session(snapshot)
-                history = _session_history_with_session(load_session_history(), snapshot)
+                stored_history = load_session_history()
+                if _session_history_head_stores(stored_history, snapshot):
+                    # `GET /api/session/latest` is a poll. Rewriting ten
+                    # embedded session snapshots and fsyncing twice to bump a
+                    # timestamp nobody reads would make every read a durable
+                    # write and block concurrent session requests behind it.
+                    return True
+                history = _session_history_with_session(stored_history, snapshot)
                 try:
                     save_session_history(history)
                 except OSError as exc:
