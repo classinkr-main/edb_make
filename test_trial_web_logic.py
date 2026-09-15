@@ -41,6 +41,24 @@ class TestTrialWebLogic(unittest.TestCase):
             """
         )
 
+    def test_popup_content_never_leaves_template_holes_without_context(self) -> None:
+        run_node(
+            """
+            const logic = require('./public/trial_logic.js');
+            for (const feature of logic.FEATURES) {
+              for (const context of [undefined, {}, { max: 3 }, { mb: 4 }, { rest: 5 }]) {
+                const content = logic.popupContent(feature, context);
+                assert.ok(!/[{}]/.test(content.title + content.body), feature + ' ' + JSON.stringify(context));
+              }
+            }
+            const serverRejection = logic.popupContent('limit_pages', { max: 3, mb: 4 });
+            assert.equal(serverRejection.title, '페이지가 너무 많은 파일이에요');
+            assert.match(serverRejection.body, /프리미엄에서는 시험지 한 권을 통째로/);
+            assert.equal(logic.popupContent('limit_pages', { max: 3, rest: 13 }).title, '무료 체험은 앞 3쪽까지예요');
+            assert.equal(logic.popupContent('limit_size', {}).feature, 'limit_size');
+            """
+        )
+
     def test_precheck_file(self) -> None:
         run_node(
             """

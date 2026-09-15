@@ -15,10 +15,19 @@
     limit_pages: {
       title: "무료 체험은 앞 {max}쪽까지예요",
       body: "나머지 {rest}쪽도 프리미엄에서 한 번에 나눠 보세요! 시험지 한 권을 통째로 처리할 수 있어요.",
+      // Used when the page counts are unknown, e.g. the server rejected a very long PDF.
+      fallback: {
+        title: "페이지가 너무 많은 파일이에요",
+        body: "프리미엄에서는 시험지 한 권을 통째로 나눌 수 있어요. 더 많이 사용하고 싶다면 문의해 주세요!",
+      },
     },
     limit_size: {
       title: "무료 체험은 {mb}MB까지 올릴 수 있어요",
       body: "스캔본·고화질 시험지도 프리미엄에서 그대로 처리해 보세요.",
+      fallback: {
+        title: "무료 체험 용량을 넘는 파일이에요",
+        body: "스캔본·고화질 시험지도 프리미엄에서 그대로 처리해 보세요.",
+      },
     },
     edb: {
       title: "클래스인 칠판으로 바로 보내보세요",
@@ -58,14 +67,22 @@
     );
   }
 
+  const TEMPLATE_HOLE = /\{\w+\}/;
+
   function popupContent(feature, context) {
     const known = FEATURES.includes(feature) ? feature : "ai";
     const copy = POPUPS[known];
+    let title = fill(copy.title, context);
+    let body = fill(copy.body, context);
+    if ((TEMPLATE_HOLE.test(title) || TEMPLATE_HOLE.test(body)) && copy.fallback) {
+      title = copy.fallback.title;
+      body = copy.fallback.body;
+    }
     return {
       feature: known,
       badge: "✦ 프리미엄",
-      title: fill(copy.title, context),
-      body: fill(copy.body, context),
+      title,
+      body,
       inquiryLabel: "프리미엄 도입 문의",
       closeLabel: "계속 체험하기",
     };

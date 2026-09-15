@@ -3,7 +3,8 @@
 
   const logic = window.TRIAL_LOGIC;
   const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-  const TOKEN_WAIT_MS = 10000;
+  // Long enough for a visitor to notice and finish an interactive challenge.
+  const TOKEN_WAIT_MS = 60000;
 
   const state = {
     config: { inquiry_url: "https://classin.co.kr/contact", turnstile_site_key: null, max_bytes: 4000000, max_pages: 3, daily_limit: 3 },
@@ -11,6 +12,7 @@
     token: null,
     tokenWaiters: [],
     busy: false,
+    configReady: null,
     lastPayload: null,
     popupContext: {},
   };
@@ -27,6 +29,15 @@
 
   function showUploadMessage(message) {
     const element = $("upload-message");
+    element.textContent = message || "";
+    element.hidden = !message;
+    if (message) {
+      showUploadHint("");
+    }
+  }
+
+  function showUploadHint(message) {
+    const element = $("upload-hint");
     element.textContent = message || "";
     element.hidden = !message;
   }
@@ -105,6 +116,8 @@
         },
         "error-callback": () => {
           state.token = null;
+          // Waiters would otherwise sit out the full timeout for a token that cannot come.
+          resolveTokenWaiters(null);
         },
       });
     };
@@ -140,31 +153,41 @@
   }
 
   async function handleFile(file) {
+    // Clear on every path so choosing the same file again fires "change" again.
+    $("file-input").value = "";
     if (state.busy || !file) {
       return;
     }
-    showUploadMessage("");
-    const precheck = logic.precheckFile(file, state.config);
-    if (precheck) {
-      if (precheck.feature) {
-        openPremium(precheck.feature);
-      } else {
-        showUploadMessage(precheck.message);
-      }
-      return;
-    }
-
     state.busy = true;
-    $("processing-file").textContent = file.name;
-    showView("processing");
-    const stopTimer = startElapsedTimer();
+    let stopTimer = () => {};
     try {
+      // Without the config we do not know whether a Turnstile token is required.
+      await state.configReady;
+      showUploadMessage("");
+      const precheck = logic.precheckFile(file, state.config);
+      if (precheck) {
+        if (precheck.feature) {
+          openPremium(precheck.feature);
+        } else {
+          showUploadMessage(precheck.message);
+        }
+        return;
+      }
+
+      // Wait on the upload view: the widget lives there and may need a click.
+      if (state.config.turnstile_site_key && !state.token) {
+        showUploadHint("아래 확인을 완료하면 바로 시작해요.");
+      }
       const token = await waitForToken();
+      showUploadHint("");
       if (state.config.turnstile_site_key && !token) {
-        showView("upload");
         showUploadMessage("사람 확인이 아직 끝나지 않았어요. 확인 상자를 완료한 뒤 다시 올려 주세요.");
         return;
       }
+
+      $("processing-file").textContent = file.name;
+      showView("processing");
+      stopTimer = startElapsedTimer();
       let status = 0;
       let text = "";
       try {
@@ -195,10 +218,10 @@
       }
       const problem = logic.interpretError(status, text);
       showView("upload");
+      // Say what happened even when a premium popup follows, e.g. a parse failure.
+      showUploadMessage(problem.message);
       if (problem.feature) {
         openPremium(problem.feature);
-      } else {
-        showUploadMessage(problem.message);
       }
     } finally {
       stopTimer();
@@ -312,6 +335,10 @@
       const activate = () => setActive(problem.problem_id, "card");
       item.addEventListener("click", activate);
       item.addEventListener("keydown", event => {
+        // Keys pressed on buttons inside the card belong to those buttons.
+        if (event.target !== item) {
+          return;
+        }
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
           activate();
@@ -361,8 +388,16 @@
     for (const type of ["dragleave", "drop"]) {
       dropzone.addEventListener(type, () => dropzone.classList.remove("is-dragging"));
     }
-    dropzone.addEventListener("drop", event => {
+    // A file dropped anywhere must not make the browser navigate away to the PDF.
+    document.addEventListener("dragover", event => {
       event.preventDefault();
+    });
+    document.addEventListener("drop", event => {
+      event.preventDefault();
+      dropzone.classList.remove("is-dragging");
+      if (views.upload.hidden || state.busy) {
+        return;
+      }
       const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
       handleFile(file);
     });
@@ -390,5 +425,5 @@
   }
 
   bindEvents();
-  loadConfig();
+  state.configReady = loadConfig();
 })();

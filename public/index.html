@@ -35,6 +35,7 @@
 
       <!-- Not id="turnstile": element ids become window globals and would shadow the Turnstile API. -->
       <div class="turnstile" id="turnstile-widget"></div>
+      <p class="hint" id="upload-hint" role="status" hidden></p>
       <p class="notice" id="upload-message" role="alert" hidden></p>
 
       <ul class="assurances">
@@ -43,11 +44,13 @@
       </ul>
     </section>
 
-    <section class="view view--processing" id="view-processing" aria-live="polite" hidden>
+    <section class="view view--processing" id="view-processing" hidden>
       <div class="spinner" aria-hidden="true"></div>
-      <h2>문항을 찾는 중이에요</h2>
-      <p class="muted" id="processing-file"></p>
-      <p class="muted">보통 5~10초 걸려요 · <span id="processing-elapsed">0초</span></p>
+      <div role="status" aria-live="polite">
+        <h2>문항을 찾는 중이에요</h2>
+        <p class="muted" id="processing-file"></p>
+      </div>
+      <p class="muted">보통 5~10초 걸려요<span aria-hidden="true"> · <span id="processing-elapsed">0초</span></span></p>
     </section>
 
     <section class="view view--result" id="view-result" aria-labelledby="result-title" hidden>
