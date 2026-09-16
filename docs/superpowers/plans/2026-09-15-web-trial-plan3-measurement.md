@@ -2309,20 +2309,15 @@ LINE = "이 문장은 복잡도 실험을 위한 채움 글입니다 하나 둘 
 
 def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, pages: int = 3) -> Path:
     doc = fitz.open()
-    number = 1
     for page_index in range(pages):
         page = doc.new_page(width=842, height=1191)  # A3-ish like CSAT papers at 72 pt/in
         y = 40.0
+        number = page_index * 20 + 1
         words = 0
-        line = 0
         while words < words_per_page and y < 1150:
-            if line % 5 == 0:
-                page.insert_text((40, y), f"{number}. {LINE}", fontsize=8)
-                number += 1
-            else:
-                page.insert_text((40, y), LINE, fontsize=8)
+            page.insert_text((40, y), f"{number}. {LINE}", fontsize=8)
             words += 15
-            line += 1
+            number += 1
             y += 11
         for index in range(drawings_per_page):
             x = 40 + (index % 70) * 11
@@ -2428,7 +2423,7 @@ Run: `GEMINI_API_KEY= .venv/bin/python -m pytest -q test_trial_bench.py`
 Expected: 모두 PASS
 
 Run: `GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 500 --drawings 0`
-Expected: 표 한 줄, `problems` 20 안팎 (숫자 마커가 5줄마다 한 번씩만 나오므로 페이지당 줄 수가 아니라 실제 문항 수에 가깝다; 21 정도가 정상), 오류 없음
+Expected: 표 한 줄, `problems` 20 안팎, 오류 없음
 
 Run: `GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/memory.py --synthetic-2xa3`
 Expected: 표 한 줄, `rss_after_mb`가 1200 이하

@@ -8,6 +8,7 @@ Vercel estimate = local × 4.3 (docs/web-trial-spike-results.md §2-3).
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -22,25 +23,41 @@ from scripts.trial_bench.common import markdown_table, parse_in_scratch  # noqa:
 
 VERCEL_FACTOR = 4.3
 LINE = "이 문장은 복잡도 실험을 위한 채움 글입니다 하나 둘 셋 넷 다섯 여섯 일곱 여덟 아홉 열"  # 14 words
+WORDS_PER_LINE = 15
+TOP_Y = 40.0
+BOTTOM_Y = 1150.0
+MAX_PITCH = 11.0
+MAX_FONTSIZE = 8.0
+
+
+def line_layout(words_per_page: int) -> tuple[float, float]:
+    """Line pitch and font size that fit ``words_per_page`` between TOP_Y and BOTTOM_Y.
+
+    A fixed 11 pt pitch stops at ~101 lines, so every target above ~1500 words
+    hit the page-bottom guard first and produced the same saturated page: the
+    documented `--words 500 1000 2000 4000 8000` sweep collapsed its top three
+    levels into one measurement. Deriving the pitch (and a font size that keeps
+    the same 8/11 text-to-pitch ratio) from the target keeps the dense end of
+    the sweep a real data point.
+    """
+    lines = max(1, math.ceil(words_per_page / WORDS_PER_LINE))
+    pitch = min(MAX_PITCH, (BOTTOM_Y - TOP_Y) / lines)
+    return pitch, min(MAX_FONTSIZE, pitch * MAX_FONTSIZE / MAX_PITCH)
 
 
 def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, pages: int = 3) -> Path:
     doc = fitz.open()
-    number = 1
+    pitch, fontsize = line_layout(words_per_page)
     for page_index in range(pages):
         page = doc.new_page(width=842, height=1191)  # A3-ish like CSAT papers at 72 pt/in
-        y = 40.0
+        y = TOP_Y
+        number = page_index * 20 + 1
         words = 0
-        line = 0
-        while words < words_per_page and y < 1150:
-            if line % 5 == 0:
-                page.insert_text((40, y), f"{number}. {LINE}", fontsize=8)
-                number += 1
-            else:
-                page.insert_text((40, y), LINE, fontsize=8)
-            words += 15
-            line += 1
-            y += 11
+        while words < words_per_page and y < BOTTOM_Y:
+            page.insert_text((40, y), f"{number}. {LINE}", fontsize=fontsize)
+            words += WORDS_PER_LINE
+            number += 1
+            y += pitch
         for index in range(drawings_per_page):
             x = 40 + (index % 70) * 11
             yy = 40 + (index // 70) * 11
