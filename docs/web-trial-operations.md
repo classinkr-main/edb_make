@@ -73,7 +73,8 @@
 | `TRIAL_DAILY_LIMIT` / `TRIAL_GLOBAL_DAILY_LIMIT` | 기본 3 / 500 | 아니오 |
 | `TRIAL_MAX_BYTES` / `TRIAL_MAX_PAGES` / `TRIAL_MAX_SOURCE_PAGES` | 기본 4000000 / 4 / 100 | 아니오 |
 | `TRIAL_PARSE_CONCURRENCY` / `TRIAL_PARSE_WAIT_SECONDS` | 기본 1 / 20 (인스턴스당). 4쪽 초기 운영은 1로 시작하고 클라우드 RSS·분산 실측 후 조정 | 아니오 |
-| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 4500 / 2500 (2026-09-16 복잡도 실측으로 결정, `docs/web-trial-load.md` §3). 앞 4쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
+| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 4500 / 2000 (2026-09-16 복잡도 실측으로 4500/2500, 2026-09-17 칠판용 컷아웃 도입으로 드로잉 2000, `docs/web-trial-load.md` §3·§7-2). 앞 4쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
+| `TRIAL_BOARD_PREVIEWS` | 기본 `1`(켬). 문항마다 칠판용(분필색·어두운 배경) 미리보기를 원본과 함께 보내고 화면에 [원본 / 칠판용] 토글을 연다. `0`이면 컷아웃을 만들지도 보내지도 않는다. 켜면 4쪽 한 건이 Vercel 기준 +4~6초, RSS +0.1~0.35 GB (`docs/web-trial-load.md` §7). `1/0`, `true/false`, `yes/no`, `on/off`만 받는다 | 아니오 |
 | `EDB_PREPROCESS_PAGE_WORKERS` | 렌더(`render`) 단계 중 디스큐·마진 크롭·리사이즈 풀만의 스레드 상한(`_normalize_pdf_rendered_pages`, `preprocess.py:2753`). 래스터라이즈·PNG 저장(`render_pdf_pages`, `preprocess.py:442-478`)은 `doc.page_count`를 직렬 for 루프로 도는 코드라 이 변수의 영향을 받지 않는다. 미설정 시 기본값 `min(4, 페이지 수, CPU 코어 수)`이고, 값을 설정해도 `max(1, min(기본 상한, 설정값))`이라 이 상한보다 올릴 수는 없고 낮출 수만 있다(4쪽에서 8이나 16을 넣어도 4). 정수가 아닌 값은 조용히 기본값으로 되돌아가지만, 0 이하의 값은 기본값이 아니라 1(완전 직렬)로 고정된다(`preprocess.py:2719-2722`). 0을 "자동/해제" 뜻으로 넣으면 안 되고, 기본값으로 되돌리려면 변수를 지운다. "CPU 코어 수"는 함수 컨테이너 안에서 본 `os.cpu_count()`이며 Vercel이 실제로 할당한 1 vCPU와 다를 수 있고, 코어가 1로 보이면 이 변수는 어떤 값을 넣어도 완전한 no-op이 된다 — 실제 적용된 값은 각 페이지 메타데이터의 `pdf_preprocess_page_worker_count`(`preprocess.py:2760`)로 확인한다. render 단계를 풀 부분과 직렬 래스터라이즈 부분으로 나눠 재는 스크립트는 커밋된 코드에 없다 — 이전 판이 인용한 "render 단계 총 0.93초 중 이 풀이 0.09초, 직렬 래스터라이즈가 0.73초"라는 단계-내부 분해는 어떤 커밋된 명령으로도 재생산할 수 없었다. 대신 `scripts/trial_bench/complexity.py`가 이미 재는 render 단계 전체(end-to-end) 시간으로, 이 변수를 켰을 때와 껐을 때를 비교한다: 이 상한 조합(단어 4500·드로잉 2500·4쪽, §4-6의 비용 최악치와 같은 입력)에서 미설정(기본값)은 render 5826 ms, `EDB_PREPROCESS_PAGE_WORKERS=1`은 render 6027 ms로 약 201 ms(3.4%) 차이가 난다(2026-09-17, `GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 4500 --drawings 2500 --pages 4`을 환경변수 미설정/`EDB_PREPROCESS_PAGE_WORKERS=1` 두 번 실행). Vercel 웜 파싱에서 실제로 파싱 시간을 가장 크게 좌우하는 단계는 이 변수와 무관한 인식(3.7~4.1초)·crop(2.7~3.1초)이다(품질·속도·과부하 설계 §2-2, 국어 3쪽 실측) | 아니오 |
 | `EDB_PROBLEM_ASSET_WORKERS` | crop·asset 렌더(`assets`) 단계의 스레드 풀 상한(`build_problem_board_edb.py`). 미설정 시 기본값 `min(8, 작업 수, CPU 코어 수)`이고, `EDB_PREPROCESS_PAGE_WORKERS`와 같은 방식으로 값을 올려도 이 기본 상한 위로는 못 올라가며(낮추기만 가능) 정수가 아닌 값은 조용히 기본값으로 되돌아가지만 0 이하의 값은 기본값이 아니라 1(완전 직렬)로 고정된다(`build_problem_board_edb.py:1966-1969`). 즉 0은 "자동/해제"가 아니라 2.7~3.1초짜리 crop 단계를 통째로 직렬화하는 값이며, 기본값으로 되돌리려면 변수를 지운다. 여기서도 "CPU 코어 수"는 함수 컨테이너 안 `os.cpu_count()`이지 Vercel이 할당한 1 vCPU가 아니며, 코어가 1로 보이면 이 변수도 no-op이 된다. 렌더 단계에는 영향을 주지 않는다. Task 15의 A/B 결과로 정한다 | 아니오 |
 
@@ -123,7 +124,7 @@ curl -s -H "Authorization: Bearer $CRON_SECRET" $DOMAIN/api/cron/daily
 ```
 
 브라우저에서:
-1. 텍스트 PDF(모의고사 원본)를 올려 결과·박스·카드가 보이는지, 4쪽 넘는 파일이면 "앞 4쪽까지" 배너가 뜨는지 본다.
+1. 텍스트 PDF(모의고사 원본)를 올려 결과·박스·카드가 보이는지, 4쪽 넘는 파일이면 "앞 4쪽까지" 배너가 뜨는지 본다. 문항 목록 위 [원본 / 칠판용]을 눌러 카드가 어두운 배경에 분필색 글자로 바뀌고 그림은 원본 그대로 남는지, 다시 원본으로 돌아오는지 본다.
 2. 사진(JPG)을 골라 "스캔본·사진은 프리미엄 AI 인식으로" 팝업이 뜨는지 본다.
 3. 팝업의 [프리미엄 도입 문의]가 `classin.co.kr/contact`로 열리는지 본다.
 4. Supabase에서 이벤트가 쌓였는지, 그리고 새 열이 실제로 채워지는지 본다 (배포 순서가 지켜졌다는 진짜 증거는 이것이다):
@@ -176,7 +177,7 @@ where kind = 'parse' and created_at > now() - interval '14 days'
 group by 1 order by 1 desc;
 ```
 
-p95가 20초를 넘으면 `TRIAL_MAX_PAGES`를 줄이거나 Function CPU를 Performance로 올린다.
+p95가 30초를 넘으면 먼저 `TRIAL_BOARD_PREVIEWS=0`으로 칠판용을 끄고(한 건 4~6초 절약), 그래도 넘으면 `TRIAL_MAX_PAGES`를 줄이거나 Function CPU를 Performance로 올린다.
 
 ### 4-4. 보존
 
@@ -213,6 +214,12 @@ where kind = 'parse' and complexity is not null
   and created_at > now() - interval '7 days';
 -- words나 drawings가 1,000,000,000이면 그 요청은 페이지가 그만큼 밀도 높았던 게 아니라
 -- 콘텐츠 스트림이 너무 복잡해 inspect_pdf가 세는 대신 거절했다는 뜻이다.
+
+-- 미리보기 예산 폴백: preview_step > 0 이면 축소 단계로 답했고, board = 0 이면 칠판용이 빠진 응답이다.
+select (timing->>'preview_step')::int as preview_step, (timing->>'board')::int as board, count(*)
+from public.trial_events
+where kind = 'parse' and status = 200 and created_at > now() - interval '7 days'
+group by 1, 2 order by 1, 2;
 
 -- 인스턴스별 건수: 1건짜리 인스턴스가 많으면 콜드 스타트가 잦다는 뜻
 select instance_id, count(*) as requests, min(created_at) as first_seen, max(created_at) as last_seen
