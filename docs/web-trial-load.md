@@ -48,6 +48,22 @@
 
 **규칙 적용 결과**: 모든 조합이 30초 아래는 아니므로 "유지" 조건은 성립하지 않는다. drawings/page = 8000은 words/page가 가장 낮은 585에서도 98.8초로 30초를 크게 넘고, drawings/page = 2000도 words/page = 9185(현재 기본값 8000 근방)에서 40.1초로 넘는다. drawings/page = 2000·words/page = 4593 조합은 22.6초로 여유가 있고, drawings/page = 0이면 words/page = 9185까지도 19.6초로 안전하다. 이 그리드에서 두 축이 동시에 30초 아래로 남는 가장 큰 조합은 words/page ≈ 4593, drawings/page ≈ 2000(22.6초)이다. 따라서 §3 규칙이 고르는 상한 기본값은 `TRIAL_MAX_WORDS_PER_PAGE` ≈ 4600, `TRIAL_MAX_DRAWINGS_PER_PAGE` ≈ 2000으로, 현재 기본값 8000 / 10000보다 훨씬 낮다. (지시에 따라 코드 기본값은 바꾸지 않고 권장값만 기록함 — 실제로 반영하려면 `trial_input.InputLimits`·`trial_config.from_env`·`test_trial_config.py`를 같이 고쳐야 한다.)
 
+### 3-1. 드로잉 상한 정밀 구간 (3쪽 기준, 2026-09-16, `complexity.py --words 500 --drawings 3000 4000 5000 6000`)
+
+| words/pg | drawings/pg | render_ms | segment_ms | assets_ms | total_ms | vercel_est_s | problems |
+|---|---|---|---|---|---|---|---|
+| 585 | 3000 | 3144 | 101 | 117 | 3397 | 14.6 | 21 |
+| 585 | 4000 | 5475 | 103 | 147 | 5766 | 24.8 | 21 |
+| 585 | 5000 | 7503 | 131 | 186 | 7867 | 33.8 | 21 |
+| 585 | 6000 | 11061 | 127 | 240 | 11485 | 49.4 | 21 |
+
+### 3-2. 결정 (2026-09-16)
+
+- 드로잉이 렌더 시간을 지배한다. 3쪽 기준 3000개/쪽이 Vercel 환산 14.6초, 4000개가 24.8초, 5000개부터 30초를 넘는다. 체험판이 4쪽을 처리하게 되면서(42bd62c) 같은 밀도의 비용은 약 4/3배가 된다.
+- 기본값을 `TRIAL_MAX_WORDS_PER_PAGE=4500`, `TRIAL_MAX_DRAWINGS_PER_PAGE=2500`으로 낮췄다(코드 `trial_input.DEFAULT_MAX_*`). 두 상한을 동시에 채운 4쪽 입력의 환산 추정은 약 28초로, 2건이 겹쳐도 60초 안이다. 실제 시험지 최대(단어 674, 드로잉 613/쪽)에 대해 6배·4배 여유가 있다.
+- 압축 콘텐츠 스트림 상한(`problem_parser.MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE`)도 1 MB에서 500 KB로 낮춰 한 요청의 일시적 팽창을 약 500 MB로 묶었다. 인식은 이제 파싱 슬롯 안에서 돌고(42bd62c) 인스턴스당 동시 파싱이 1이라 팽창은 인스턴스당 1건으로 제한된다.
+- §3 본표는 다른 세션의 4쪽 변경이 커밋되기 전 4쪽 상태의 작업 트리에서 측정된 값이며, 42bd62c 이후의 HEAD와 같은 쪽수다.
+
 ## 4. 메모리 (로컬, `scripts/trial_bench/memory.py`)
 
 | file | rss_before_mb | rss_after_mb | total_ms_a | total_ms_b |

@@ -66,7 +66,7 @@
 | `TRIAL_DAILY_LIMIT` / `TRIAL_GLOBAL_DAILY_LIMIT` | 기본 3 / 500 | 아니오 |
 | `TRIAL_MAX_BYTES` / `TRIAL_MAX_PAGES` / `TRIAL_MAX_SOURCE_PAGES` | 기본 4000000 / 4 / 100 | 아니오 |
 | `TRIAL_PARSE_CONCURRENCY` / `TRIAL_PARSE_WAIT_SECONDS` | 기본 1 / 20 (인스턴스당). 4쪽 초기 운영은 1로 시작하고 클라우드 RSS·분산 실측 후 조정 | 아니오 |
-| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 8000 / 10000. 앞 4쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
+| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 4500 / 2500 (2026-09-16 복잡도 실측으로 결정, `docs/web-trial-load.md` §3). 앞 4쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
 | `EDB_PROBLEM_ASSET_WORKERS` | 1 vCPU에서 crop 렌더 스레드 수. Task 15의 A/B 결과로 정한다 | 아니오 |
 
 **필수 6개 중 하나라도 비어 있으면 운영의 `/api/parse`는 503만 돌려준다.** 설정이 덜 된 채 배포돼도 파싱은 열리지 않는다. 환경변수를 바꾸면 재배포해야 반영된다. 4쪽 전환 시 기존 `TRIAL_MAX_PAGES=3`이 있으면 `4`로 수정하거나 삭제한다. 배포 뒤 `/api/config`의 `max_pages: 4`와 4쪽 시험지의 전체 결과를 확인한다. 20문항은 대표 사용 예시이며 문항 수 상한이나 인식 보장이 아니다. 기존 `TRIAL_PARSE_CONCURRENCY=2`도 초기 운영에서는 `1`로 수정하거나 삭제한다. 이는 인스턴스당 제한이며 서비스 전체 동시 사용자 수가 아니다.

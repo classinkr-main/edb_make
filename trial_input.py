@@ -16,8 +16,8 @@ MAGIC_SCAN_BYTES = 1024
 
 # Named here so InputLimits and trial_config.from_env cannot drift apart.
 DEFAULT_MAX_PAGES = 4
-DEFAULT_MAX_WORDS_PER_PAGE = 8000
-DEFAULT_MAX_DRAWINGS_PER_PAGE = 10000
+DEFAULT_MAX_WORDS_PER_PAGE = 4500
+DEFAULT_MAX_DRAWINGS_PER_PAGE = 2500
 
 
 @dataclass(frozen=True)

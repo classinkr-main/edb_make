@@ -44,11 +44,11 @@ Image.MAX_IMAGE_PIXELS = 20_000_000
 #
 # The raw gate is free but cannot see a flate bomb, so it cannot replace the decompressed
 # gate; its job is to bound how much the decompressed gate is ever willing to inflate. Deflate
-# tops out near 1030:1 (measured), so capping the compressed stream at 1 MB caps one page's
-# transient inflation at roughly 1 GB. A page sitting at the configured 8000-word /
-# 10000-drawing limits measures about 313 KB compressed and 285 KB decompressed, so these
-# thresholds leave 3x and 7x headroom respectively over anything the trial would accept.
-MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE = 1_000_000
+# tops out near 1030:1 (measured), so capping the compressed stream at 500 KB caps one page's
+# transient inflation at roughly 500 MB. A synthetic page at the configured 4500-word /
+# 2500-drawing limits measures about 131 KB compressed and 152 KB decompressed (2026-09-16),
+# so these thresholds leave about 4x and 13x headroom over anything the trial accepts.
+MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE = 500_000
 MAX_CONTENT_STREAM_BYTES_PER_PAGE = 2_000_000
 PATHOLOGICAL_COUNT_SENTINEL = 1_000_000_000
 
