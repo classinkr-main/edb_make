@@ -1,7 +1,7 @@
 """Parser-only entry point for the web trial.
 
 Runs the same recognition path as the desktop problem export but stops
-after problem crops: no board cutouts, placement, EDB, or UI session.
+after problem crops: no placement, EDB, or UI session, and board cutouts only on request.
 Nothing here imports a web framework.
 """
 
@@ -149,6 +149,8 @@ class ParsedProblem:
     regions: list[ParsedRegion]
     risk_flags: list[str]
     image: Image.Image
+    # Chalk-on-transparent cutout (RGBA) when parse_problems(render_board_assets=True); else None.
+    board_image: Image.Image | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,11 @@ def _elapsed_ms(started_at: float) -> int:
 def _load_detached_rgb(path: Path) -> Image.Image:
     with Image.open(path) as image:
         return image.convert("RGB")
+
+
+def _load_detached_rgba(path: Path) -> Image.Image:
+    with Image.open(path) as image:
+        return image.convert("RGBA")
 
 
 def _problem_regions(entry) -> list[ParsedRegion]:
@@ -231,6 +238,7 @@ def parse_problems(
     subject: str = "unknown",
     ocr_mode: str = "none",
     ai_fallback_config: dict[str, Any] | None = None,
+    render_board_assets: bool = False,
 ) -> ParseResult:
     """Recognize problems in a text-layer PDF.
 
@@ -242,6 +250,11 @@ def parse_problems(
 
     With ``max_pages`` only the leading pages are parsed. Returned images are
     fully loaded copies, so ``work_dir`` may be deleted as soon as this returns.
+
+    With ``render_board_assets`` the desktop's chalk cutouts are rendered too and
+    returned as ``ParsedProblem.board_image`` (RGBA); the trial's board preview
+    is composited from them. Off by default: it costs about +60% of the asset
+    stage and +0.1-0.35 GB RSS.
     """
     # Deferred so requests rejected by inspect_pdf never load OpenCV and the pipeline.
     from build_problem_board_edb import build_pages, build_problem_entries, resolve_subject
@@ -274,7 +287,7 @@ def parse_problems(
         page_models,
         work_dir,
         LayoutTemplate(name="academy-default"),
-        render_board_assets=False,
+        render_board_assets=render_board_assets,
         timings=timing_ms,
     )
     load_started_at = time.perf_counter()
@@ -286,6 +299,7 @@ def parse_problems(
             regions=_problem_regions(entry),
             risk_flags=list(entry.risk_flags),
             image=_load_detached_rgb(entry.crop_path),
+            board_image=_load_detached_rgba(entry.board_render_path) if render_board_assets else None,
         )
         for entry in entries
     ]

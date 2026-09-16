@@ -410,6 +410,31 @@ class TestParseProblems(unittest.TestCase):
             self.assertEqual(result.problems[0].image.size, result.problems[0].image.copy().size)
             self.assertIsNotNone(result.pages[0].image.getpixel((0, 0)))
 
+    def test_render_board_assets_adds_detached_rgba_cutouts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2], [3]])
+            result = parse_problems(path, work_dir=root / "work", render_board_assets=True)
+            self.assertTrue((root / "work" / "problem_cutouts").is_dir())
+
+        # The work dir is gone now; the cutouts must have been loaded into memory.
+        self.assertEqual([1, 2, 3], [problem.number for problem in result.problems])
+        for problem in result.problems:
+            self.assertEqual("RGBA", problem.board_image.mode)
+            self.assertGreater(problem.board_image.width, 0)
+            alpha_min, alpha_max = problem.board_image.getchannel("A").getextrema()
+            self.assertLess(alpha_min, 255)  # paper background became transparent
+            self.assertGreater(alpha_max, 0)  # ink survived as chalk
+            problem.board_image.load()
+
+    def test_board_image_is_none_unless_requested(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2]])
+            result = parse_problems(path, work_dir=root / "work")
+            self.assertFalse((root / "work" / "problem_cutouts").exists())
+        self.assertEqual([None, None], [problem.board_image for problem in result.problems])
+
     def test_max_pages_parses_only_leading_pages_from_a_compacted_copy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
