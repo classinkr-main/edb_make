@@ -11,6 +11,7 @@ from PIL import Image
 
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
+from scripts.trial_bench.adjudicate import compose, disagreements, labels_skeleton
 from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench.oracle import force_config
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
@@ -549,6 +550,27 @@ class TestScoreAll(unittest.TestCase):
             self.assertEqual(1.0, rows[0]["question_recall"])
             self.assertEqual(1, len(warnings))
             self.assertIn("no longer present", warnings[0])
+
+
+class TestAdjudicate(unittest.TestCase):
+    def test_disagreements_cover_missing_extra_and_low_iou(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 20, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 25, 10, 10)]), ("q3", 3, "3번", [(1, 0, 0, 10, 10)])])
+        items = disagreements(trial, oracle)
+        self.assertEqual(["q2", "q3", "q9"], [item["key"] for item in items])
+        self.assertEqual(["iou 0.33", "oracle only", "trial only"], [item["reason"] for item in items])
+
+    def test_labels_skeleton_is_pending_with_empty_truth(self):
+        skeleton = labels_skeleton("c", [{"key": "q3", "reason": "oracle only", "trial": None, "oracle": {}}])
+        self.assertEqual({"case": "c", "status": "pending", "items": [{"key": "q3", "reason": "oracle only", "truth": None, "note": ""}]}, skeleton)
+
+    def test_compose_writes_a_png_even_without_crops(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out = Path(temp_dir) / "c" / "q3.png"
+            compose({"key": "q3", "reason": "oracle only", "trial": None, "oracle": {"crop": None}}, out)
+            with Image.open(out) as image:
+                self.assertEqual("RGB", image.mode)
+                self.assertGreater(image.width, 400)
 
 
 if __name__ == "__main__":
