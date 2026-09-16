@@ -176,8 +176,22 @@ def percentile(values: Iterable[float], pct: float) -> float:
     return ordered[rank - 1]
 
 
+def _cell(value: Any) -> str:
+    """One table cell that cannot break out of its column.
+
+    A raw "|" would open a new column and a newline would end the row, so
+    every later cell in the row would render in the wrong place -- including
+    in the result tables these helpers write into committed docs. Cells can
+    carry parser-supplied text (titles, keys), so this is escaped here rather
+    than trusted at every call site.
+    """
+    if value is None:
+        return ""
+    return str(value).replace("|", "\\|").replace("\r\n", " ").replace("\r", " ").replace("\n", " ")
+
+
 def markdown_table(headers: list[str], rows: list[list[Any]]) -> str:
-    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    lines = ["| " + " | ".join(_cell(header) for header in headers) + " |", "|" + "---|" * len(headers)]
     for row in rows:
-        lines.append("| " + " | ".join("" if cell is None else str(cell) for cell in row) + " |")
+        lines.append("| " + " | ".join(_cell(cell) for cell in row) + " |")
     return "\n".join(lines)

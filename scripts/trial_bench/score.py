@@ -40,32 +40,72 @@ def bbox_iou(a: dict[str, float], b: dict[str, float]) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _envelope(boxes: list[dict[str, float]]) -> dict[str, float]:
+    """Smallest box covering every input box."""
+    left = min(box["left"] for box in boxes)
+    top = min(box["top"] for box in boxes)
+    right = max(box["left"] + max(0.0, box["width"]) for box in boxes)
+    bottom = max(box["top"] + max(0.0, box["height"]) for box in boxes)
+    return {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
+
+def _envelopes_by_page(regions: list[dict[str, Any]]) -> dict[int, dict[str, float]]:
+    """One box per page: spec 5-1's "페이지별 합집합 박스".
+
+    A problem can hold several regions on one page (two columns, a stem split
+    around a figure), so they are reduced to their envelope before comparing.
+    Keying straight off page_index would keep only the last region of each
+    page and silently drop the rest.
+    """
+    by_page: dict[int, list[dict[str, float]]] = {}
+    for region in regions:
+        by_page.setdefault(region["page_index"], []).append(region["bbox"])
+    return {page: _envelope(boxes) for page, boxes in by_page.items()}
+
+
 def regions_iou(a_regions: list[dict[str, Any]], b_regions: list[dict[str, Any]]) -> float:
     """Sum of per-page intersections over per-page unions. A page present on one side only adds union."""
-    by_a = {region["page_index"]: region["bbox"] for region in a_regions}
-    by_b = {region["page_index"]: region["bbox"] for region in b_regions}
+    by_a = _envelopes_by_page(a_regions)
+    by_b = _envelopes_by_page(b_regions)
     inter = union = 0.0
     for page in set(by_a) | set(by_b):
         a, b = by_a.get(page), by_b.get(page)
-        if a and b:
+        if a is not None and b is not None:
             overlap = _intersection(a, b)
             inter += overlap
             union += _area(a) + _area(b) - overlap
         else:
-            union += _area(a or b)
+            union += _area(a if a is not None else b)
     return inter / union if union > 0 else 0.0
 
 
-def expected_from(oracle: dict[str, Any], trial: dict[str, Any], labels: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], str]:
+def _warn(message: str, sink: list[str] | None) -> None:
+    """Report a recoverable problem: stderr for the operator, the sink for the caller."""
+    print(message, file=sys.stderr)
+    if sink is not None:
+        sink.append(message)
+
+
+def expected_from(
+    oracle: dict[str, Any],
+    trial: dict[str, Any],
+    labels: dict[str, Any] | None,
+    *,
+    warnings: list[str] | None = None,
+) -> tuple[dict[str, dict[str, Any]], str]:
     """Ground truth per key: the oracle, corrected by approved labels (truth: trial | oracle | both | neither).
 
     "oracle" is an explicit no-op (the oracle's own entry already stands).
     "both" scores the key against the trial's own regions, crediting the
     trial's detection instead of leaving it as a false positive, for a
-    disagreement judged acceptable either way. Raises ValueError for a
-    truth value outside the four above, or for a label key that names
-    neither an oracle nor a trial problem -- both are broken label files,
-    never silently ignored.
+    disagreement judged acceptable either way. Raises ValueError only for a
+    truth value outside the four above -- a broken label file.
+
+    A key that neither side reports any more is a *stale* label, not a broken
+    one: that is what an approved "trial only" verdict becomes as soon as a
+    parser fix removes the detection, which is the before/after workflow this
+    script exists for. Raising there would leave the whole run unscored, so
+    the key is skipped with a warning instead.
     """
     expected = {problem["key"]: problem for problem in oracle["problems"]}
     if not labels or labels.get("status") != "approved":
@@ -78,7 +118,8 @@ def expected_from(oracle: dict[str, Any], trial: dict[str, Any], labels: dict[st
         if truth not in ACCEPTED_TRUTHS:
             raise ValueError(f"label case {case!r}: key {key!r} has unknown truth {truth!r}; expected one of {sorted(ACCEPTED_TRUTHS)}")
         if key not in oracle_by_key and key not in trial_by_key:
-            raise ValueError(f"label case {case!r}: key {key!r} is in neither the oracle nor the trial")
+            _warn(f"score.py: case {case!r}: label key {key!r} is no longer present in the oracle or the trial; ignoring", warnings)
+            continue
         if truth == "neither":
             expected.pop(key, None)
         elif truth in {"trial", "both"} and key in trial_by_key:
@@ -125,13 +166,33 @@ def _fmt(value: float | None) -> str:
     return f"{value:.2f}" if value is not None else ""
 
 
+def _keys_cell(keys: list[str]) -> str:
+    """Key list for a rendered table cell, with unnumbered keys made opaque.
+
+    An unnumbered unit's key is common.problem_key's "t:<display_title>"
+    fallback, and display_title is up to 120 characters of raw exam text
+    (segment.py). That must not reach the committed doc table, so each such
+    key becomes "t:#<n>" -- the count and order survive, the exam text does
+    not. The full keys stay in the out-of-repo observation JSON.
+    """
+    rendered = []
+    unnumbered = 0
+    for key in keys:
+        if key.startswith("t:"):
+            unnumbered += 1
+            rendered.append(f"t:#{unnumbered}")
+        else:
+            rendered.append(key)
+    return " ".join(rendered)
+
+
 def render_report(rows: list[dict[str, Any]]) -> str:
     headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms"]
     table_rows = [
         [
             row["case"], row["status"], _fmt(row["question_recall"]), _fmt(row["question_precision"]),
             _fmt(row["passage_recall"]), _fmt(row["passage_precision"]), _fmt(row["mean_iou"]), row["low_iou"],
-            _fmt(row["review_rate"]), " ".join(row["missing"]), " ".join(row["extra"]), row["trial_ms"], row["oracle_ms"],
+            _fmt(row["review_rate"]), _keys_cell(row["missing"]), _keys_cell(row["extra"]), row["trial_ms"], row["oracle_ms"],
         ]
         for row in rows
     ]
@@ -153,7 +214,7 @@ def render_report(rows: list[dict[str, Any]]) -> str:
     return markdown_table(headers, table_rows)
 
 
-def score_all(cases: list[str], root: Path = BENCH_ROOT) -> list[dict[str, Any]]:
+def score_all(cases: list[str], root: Path = BENCH_ROOT, warnings: list[str] | None = None) -> list[dict[str, Any]]:
     rows = []
     for trial_path in sorted(bench_dir("trial", root).glob("*.json")):
         case = trial_path.stem
@@ -165,7 +226,7 @@ def score_all(cases: list[str], root: Path = BENCH_ROOT) -> list[dict[str, Any]]
         labels_path = bench_dir("labels", root) / f"{case}.json"
         trial, oracle = load_json(trial_path), load_json(oracle_path)
         labels = load_json(labels_path) if labels_path.is_file() else None
-        expected, status = expected_from(oracle, trial, labels)
+        expected, status = expected_from(oracle, trial, labels, warnings=warnings)
         row = score_case(trial, expected)
         row.update(status=status, oracle_ms=oracle["timing_ms"].get("total"))
         rows.append(row)

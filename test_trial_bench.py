@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import math
 import tempfile
@@ -261,6 +263,15 @@ class TestCommon(unittest.TestCase):
         table = common.markdown_table(["a", "b"], [[1, None]])
         self.assertEqual("| a | b |\n|---|---|\n| 1 |  |", table)
 
+    def test_markdown_table_escapes_pipes_and_collapses_newlines(self):
+        # A raw "|" or newline inside a cell would end the column (or the row)
+        # early and shift every later cell, which corrupts the committed
+        # result tables these helpers render.
+        table = common.markdown_table(["a", "b"], [["x|y", "one\r\ntwo"]])
+        self.assertEqual("| a | b |\n|---|---|\n| x\\|y | one two |", table)
+        body = table.splitlines()[2]
+        self.assertEqual(table.splitlines()[0].count("|"), body.replace("\\|", "").count("|"))
+
 
 class TestParseInScratch(unittest.TestCase):
     def test_copies_into_a_fresh_temp_dir_and_forwards_kwargs(self):
@@ -360,6 +371,24 @@ class TestScore(unittest.TestCase):
         self.assertAlmostEqual(0.5, regions_iou(a, b))
         self.assertEqual(1.0, regions_iou(b, b))
 
+    def test_regions_iou_unions_several_regions_on_one_page(self):
+        """Spec 5-1 compares the per-page union box, so region order and count must not matter."""
+        top_half = {"page_index": 0, "bbox": {"left": 0.0, "top": 0.0, "width": 10.0, "height": 10.0}}
+        bottom_half = {"page_index": 0, "bbox": {"left": 0.0, "top": 10.0, "width": 10.0, "height": 10.0}}
+        self.assertEqual(1.0, regions_iou([top_half, bottom_half], [bottom_half, top_half]))
+        # Same envelope height in the right-hand column: disjoint, so nowhere near 1.0.
+        right_column = [
+            {"page_index": 0, "bbox": {"left": 20.0, "top": 0.0, "width": 10.0, "height": 10.0}},
+            {"page_index": 0, "bbox": {"left": 20.0, "top": 10.0, "width": 10.0, "height": 10.0}},
+        ]
+        self.assertEqual(0.0, regions_iou([top_half, bottom_half], right_column))
+        # Half-overlapping envelopes (columns 0-10 vs 5-15) over the same rows.
+        straddling = [
+            {"page_index": 0, "bbox": {"left": 5.0, "top": 0.0, "width": 10.0, "height": 10.0}},
+            {"page_index": 0, "bbox": {"left": 5.0, "top": 10.0, "width": 10.0, "height": 10.0}},
+        ]
+        self.assertAlmostEqual(1 / 3, regions_iou([top_half, bottom_half], straddling))
+
     def test_score_case_recall_precision_and_low_iou(self):
         trial = _obs(
             "c",
@@ -424,15 +453,27 @@ class TestScore(unittest.TestCase):
         both_expected, status = expected_from(oracle, trial, both)
         self.assertEqual({"q1", "q2", "q9"}, set(both_expected))
 
-    def test_expected_from_rejects_unknown_truth_or_unmatched_key(self):
+    def test_expected_from_rejects_unknown_truth_but_ignores_a_stale_key(self):
         trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
         oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
         typo_truth = {"case": "c", "status": "approved", "items": [{"key": "q1", "truth": "orcale"}]}
         with self.assertRaises(ValueError):
             expected_from(oracle, trial, typo_truth)
-        unmatched_key = {"case": "c", "status": "approved", "items": [{"key": "q7", "truth": "trial"}]}
-        with self.assertRaises(ValueError):
-            expected_from(oracle, trial, unmatched_key)
+
+        # A key neither side reports any more is a stale label, not a broken
+        # one: an approved "trial only" verdict stops matching as soon as a
+        # parser fix removes that detection, which is exactly the before/after
+        # workflow. Raising there would abort scoring for every case, so it is
+        # skipped with a collected warning instead.
+        stale = {"case": "c", "status": "approved", "items": [{"key": "t:보기 중 옳은 것은?", "truth": "neither"}]}
+        warnings: list[str] = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            expected, status = expected_from(oracle, trial, stale, warnings=warnings)
+        self.assertEqual("approved", status)
+        self.assertEqual({"q1"}, set(expected))
+        self.assertEqual(1, len(warnings))
+        self.assertIn("no longer present", warnings[0])
+        self.assertIn("t:보기 중 옳은 것은?", warnings[0])
 
     def test_render_report_has_one_row_per_case_and_an_aggregate(self):
         rows = [
@@ -452,6 +493,19 @@ class TestScore(unittest.TestCase):
         rows = [{"case": "a", "status": "pending", "question_recall": None, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": None, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}]
         report = render_report(rows)
         self.assertIn("| a | pending |  | 1.00 |  |  |  | 0 |", report)
+
+    def test_render_report_keeps_unnumbered_keys_out_of_the_table(self):
+        # An unnumbered unit's key carries up to 120 characters of raw exam
+        # text, pipes and newlines included; rendered verbatim it both leaks
+        # exam content into the committed doc and shifts trial_ms/oracle_ms
+        # out of their columns.
+        rows = [{"case": "c", "status": "pending", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": ["q5", "t:다음 표는 | 원소 A~C의\n성질이다.", "t:그림"], "trial_ms": 100, "oracle_ms": 200}]
+        report = render_report(rows)
+        header, _, body = report.splitlines()[:3]
+        self.assertNotIn("원소", body)
+        self.assertIn("q5 t:#1 t:#2", body)
+        self.assertTrue(body.endswith("| 100 | 200 |"), body)
+        self.assertEqual(header.count("|"), body.count("|"))
 
 
 class TestScoreAll(unittest.TestCase):
@@ -476,6 +530,25 @@ class TestScoreAll(unittest.TestCase):
 
             filtered = score_all(["a"], root=root)
             self.assertEqual(["a"], [row["case"] for row in filtered])
+
+    def test_score_all_still_scores_a_case_whose_label_key_went_stale(self):
+        """The before/after workflow: the fixed parser no longer emits an approved "trial only" key."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("oracle", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            common.save_json(
+                common.bench_dir("labels", root) / "c.json",
+                {"case": "c", "status": "approved", "items": [{"key": "t:보기 중 옳은 것은?", "truth": "neither"}]},
+            )
+            warnings: list[str] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                rows = score_all([], root=root, warnings=warnings)
+            self.assertEqual(["c"], [row["case"] for row in rows])
+            self.assertEqual("approved", rows[0]["status"])
+            self.assertEqual(1.0, rows[0]["question_recall"])
+            self.assertEqual(1, len(warnings))
+            self.assertIn("no longer present", warnings[0])
 
 
 if __name__ == "__main__":
