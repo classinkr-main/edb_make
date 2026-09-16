@@ -81,3 +81,33 @@
   | english_go2_hakpyeong_20260324 | 4 | 4/4 | 0/4 (NO AI EVIDENCE) | 4/4 | gemini-3.1-pro-preview |
 
   두 케이스 모두 기본(primary) 모델(`gemini-3.1-pro-preview`)에서 바로 성공했고 `gemini-3.6-flash`로 폴백하지 않았으며, 오류는 0건이다. `repair_changed=0/4`는 위 11개 케이스와 같은 기존 이슈(오라클의 강제 AI 보정이 로컬 기준선과 실제로 다른 답을 낸 쪽이 없음)이지 이번 수정이 만든 새 문제가 아니다 -- 이번 수정의 범위는 "오라클이 영어 페이지를 끝까지 처리하는가"였지 "AI가 실제로 무언가를 고치는가"가 아니다. `score.py`/`adjudicate.py`로 영어 케이스를 위 표에 반영하는 작업은 아직 하지 않았다.
+
+## 2026-09-17 추가: 수리-변경 감지기의 라이브 포지티브 컨트롤
+
+위 두 절 모두 오라클이 돈 케이스 전부(11개, 이후 영어 2개 포함 13개) `repair_changed = 0`이었다고 기록한다. `page_repair.py`의 `_repair_change_counters`(`blocks_changed`/`problems_regrouped`/`titles_changed`/`boxes_overridden`/`problem_metadata_changed`와 그 합집합 `changed`)는 유닛 테스트로는 합성 입력에서 발동하는 것이 증명돼 있지만, **실제 Gemini 응답에서 발동하는 모습은 이 코퍼스만으로는 한 번도 관측된 적이 없었다** -- "AI가 동의했다"와 "diff가 실제 AI 답변을 못 알아본다"를 이 데이터만으로는 구분할 수 없었다는 뜻이다.
+
+- **컨트롤 설계**: `scripts/trial_bench/control.py`(신규)가 코퍼스에 이미 있는 시험지 한 쪽을 골라 **이미지 전용 PDF로 재발행**한다(`build_control_pdf`: PyMuPDF로 그 쪽을 ~200dpi PNG로 렌더링한 뒤 텍스트 레이어·벡터 드로잉이 전혀 없는 새 1쪽짜리 PDF로 감싼다 -- `page.get_text()`가 빈 문자열을 반환하는 것으로 확인). 텍스트 레이어가 없으니 체험판의 텍스트-마커 세그멘터는 읽을 게 없고, 로컬 기준선은 `ocr_mode="auto"`가 복구하는 것이 전부다 -- 반면 강제 Gemini 수리는 항상 페이지 원본 이미지를 직접 보고 답한다(`page_repair.py`의 `_request_gemini_repair`가 `prepared_page.image`를 그대로 전송). 컨트롤 입력·오라클 관측값은 전부 `~/edb-trial-bench/control/`(코퍼스의 `inputs/`·`cases.json`·`oracle/`와 별도 루트) 아래에만 쓰고, 저장소에는 `scripts/trial_bench/control.py`와 `test_trial_bench_control.py`만 커밋한다.
+- **재현 명령**:
+  ```
+  .venv/bin/python scripts/trial_bench/control.py build --source ~/edb-trial-bench/inputs/math_go3_hakpyeong_20240328.pdf --page 0
+  .venv/bin/python scripts/trial_bench/control.py run --runtime-dir /Users/clmagi/Desktop/Projects/edb_mak/.app_runtime --source ~/edb-trial-bench/inputs/math_go3_hakpyeong_20240328.pdf --page 0 --subject math
+  ```
+  (`run`이 내부에서 `build`를 다시 수행하므로 `build`는 입력을 눈으로 확인하고 싶을 때만 따로 실행하면 된다.)
+- **측정일 2026-09-17, 세 번의 시도**:
+
+  | 컨트롤 입력 | ocr_mode | status | repair_changed | 실패/성공 사유 |
+  |---|---|---|---|---|
+  | social_saengwoon_2020suneung_20191015 1쪽 | auto | invalid_response | 0/1 | `problem start and choice block ids overlap` |
+  | 전자기_교재문제 1쪽 (auto, 이어서 none으로 재시도) | auto / none | invalid_response | 0/1 (둘 다) | `problem_start_block_ids must be in reading order` |
+  | **math_go3_hakpyeong_20240328 1쪽** | auto | **applied** | **1/1** | (검증 통과, 아래 상세) |
+
+  앞의 두 시도는 `page_repair._validate_repair_payload`의 스키마 검증에서 걸렸다 -- Gemini는 확실히 응답했고(`repair_attempted=1/1`, 요청·파싱 자체는 성공) 로컬 기준선에도 실제로 동의하지 않았지만(사회 케이스는 원본 우측 칼럼 전체가 기준선에서 문항 하나로 뭉쳐 있었고, 전자기 케이스는 로컬 블록의 bbox 자체가 서로 겹쳐 있었다 -- `~/edb-trial-bench/control/oracle/*.json`의 `problems[].regions[].bbox` 참고), 반환한 `problem_start_block_ids`/`choice_block_ids`가 로컬이 준 블록 파티션 안에서 스키마 제약(겹치지 않음/읽기 순서)을 만족시키지 못해 `_apply_repair_payload`가 아예 호출되지 않았다 -- 즉 `changed`는 "AI가 동의해서"가 아니라 "diff 자체가 실행되지 못해서" False로 남았다. 이 두 실패는 그 자체로 유효한 관측이다: 강제 오라클 파이프라인이 실제 Gemini 응답을 놓고 실제로 검증을 수행한다는 것, 그리고 `summarize_page_repair`의 `statuses`/`errors`가 "AI가 답했지만 거부됐다"를 "AI가 동의했다"와 구분해 기록한다는 것을 살아있는 트래픽으로 확인해 준다.
+- **세 번째 시도(양성 결과) 상세**: `math_go3_hakpyeong_20240328` 1쪽에서 AI 없는 로컬 기준선(`ocr_mode="auto"`, `ai_fallback_config=None`)은 페이지 우측 상단의 시험지 머리말 블록을 "문항 3"으로 잘못 인식했다(그 블록의 텍스트가 그대로 `"국(전국)연합학력평가 문제지\n...\n영역"`이고, 문항 번호로는 `3`이 배정돼 있었다) -- 그러면서 실제 세 번째 문항(우측 칼럼의 $\cos\theta$/$\tan\theta$ 문제)은 내부 번호 `5`로 밀려나고 제목이 비어 있었다. `page_repair.baseline_block_count=6`, `baseline_problem_count=4`로 기록돼 있다(문항 4에 해당하는 블록은 아예 없다). 강제 오라클을 돌리면 `repair_attempted=1/1`, `status=applied`, 모델은 `gemini-3.1-pro-preview`(폴백 없음), 그리고 페이지별 원시 카운터는:
+
+  | blocks_changed | problems_regrouped | titles_changed | boxes_overridden | problem_metadata_changed | changed |
+  |---|---|---|---|---|---|
+  | 0 | False | **6** | 0 | 0 | **True** |
+
+  즉 `_repair_change_counters`가 `titles_changed=6`을 통해 `changed=True`를 반환했다 -- 오라클 관측값(`~/edb-trial-bench/control/oracle/math_go3_hakpyeong_20240328-p1-image-only.json`)을 보면 머리말 블록의 문항 제목은 사라지고(`"title": null`) 우측 칼럼의 실제 세 번째 문항이 `"title": "3."`을 받았다 -- 로컬 기준선의 오류를 실제로 정정하는 방향의, 실제 Gemini 응답에 대한 실제 diff다.
+- **이 결과가 증명하는 것**: `_repair_change_counters`/`changed`는 살아있는 Gemini 응답이 스키마를 통과하고 로컬 기준선과 실제로 다르면 `True`를 반환한다 -- 감지기 자체가 실제 모델 출력을 못 알아보는 것은 아니다. 따라서 위 두 절과 상단 코퍼스 표의 `repair_changed = 0/N` (`NO AI EVIDENCE`)이 13개 케이스 전부에서 나온 것은 "합의 여부를 셀 수 없어서"가 아니라(그 가능성은 이 컨트롤로 배제된다), "이 13개 케이스(전부 공식 아카이브의 텍스트 레이어 PDF, 앞 3~4쪽만)에서는 강제 Gemini 답변이 매번 로컬 기준선과 실제로 일치했다"는 2026-09-16 절의 설명이 유지된다는 뜻이다. 코퍼스 표의 1.00 점수들이 "체험판이 AI급 인식과 같다"는 근거가 아니라는 결론 자체는 바뀌지 않는다 -- 다만 그 근거가 "감지기가 무언가를 놓치고 있어서"가 아니라 "이 코퍼스에 AI가 반박할 기회 자체가 아직 없었어서"라는 것이 이번 컨트롤로 확인된다.
+- **재현성에 대한 참고**: 기본 모델 호출은 `temperature=0.0`으로 고정돼 있어(`page_repair.py`의 `_request_gemini_repair`) 위 명령을 다시 돌리면 같은 결과가 나올 것으로 기대하지만, 실시간 모델 API 응답은 완전히 결정적이라고 보장할 수 없다 -- 다른 결과가 나온다면 그 자체를 새로 기록해야지, 이 절이 틀렸다는 뜻은 아니다. 컨트롤 입력·오라클 산출물은 `~/edb-trial-bench/control/`에만 있고 저장소에는 없으므로, 위 표의 숫자를 다시 확인하려면 위 재현 명령을 실제 `GEMINI_API_KEY`가 등록된 `--runtime-dir`로 다시 실행해야 한다.
