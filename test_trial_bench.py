@@ -11,6 +11,7 @@ from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
 from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench.oracle import force_config
+from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_case
 from structured_schema import Box
 
 
@@ -325,6 +326,66 @@ class TestOracleConfig(unittest.TestCase):
         self.assertEqual("gemini", config["provider"])
         self.assertTrue(config["fail_on_error"])
         self.assertEqual("gemini-x", force_config("gemini-x")["model"])
+
+
+def _obs(case: str, problems: list[tuple[str, int | None, str, list[tuple[int, float, float, float, float]]]], total_ms: int = 100) -> dict:
+    entries = []
+    ranges = []
+    for key, number, title, regions in problems:
+        span = common.passage_range_from_title(title) if number is None else None
+        if span:
+            ranges.append(span)
+        entries.append(
+            {
+                "key": key, "number": number, "title": title, "passage_range": span,
+                "regions": [{"page_index": p, "bbox": {"left": l, "top": t, "width": w, "height": h}} for p, l, t, w, h in regions],
+                "risk_flags": [], "crop": None,
+            }
+        )
+    return {"case": case, "pages": 3, "source_page_count": 16, "page_sizes": [[600, 800]] * 3, "problems": entries, "passage_ranges": ranges, "timing_ms": {"total": total_ms}}
+
+
+class TestScore(unittest.TestCase):
+    def test_bbox_iou(self):
+        box = {"left": 0.0, "top": 0.0, "width": 10.0, "height": 10.0}
+        self.assertEqual(1.0, bbox_iou(box, box))
+        self.assertEqual(0.0, bbox_iou(box, {"left": 20.0, "top": 0.0, "width": 10.0, "height": 10.0}))
+        self.assertAlmostEqual(0.25, bbox_iou(box, {"left": 0.0, "top": 0.0, "width": 5.0, "height": 5.0}))
+
+    def test_regions_iou_counts_pages_present_on_one_side_as_union(self):
+        a = [{"page_index": 0, "bbox": {"left": 0.0, "top": 0.0, "width": 10.0, "height": 10.0}}]
+        b = a + [{"page_index": 1, "bbox": {"left": 0.0, "top": 0.0, "width": 10.0, "height": 10.0}}]
+        self.assertAlmostEqual(0.5, regions_iou(a, b))
+        self.assertEqual(1.0, regions_iou(b, b))
+
+    def test_score_case_recall_precision_and_low_iou(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 20, 10, 10)]), ("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)])])
+        expected = {p["key"]: p for p in _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 25, 10, 10)]), ("q3", 3, "3번", [(1, 0, 0, 10, 10)]), ("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)])])["problems"]}
+        score = score_case(trial, expected)
+        self.assertAlmostEqual(2 / 3, score["question_recall"])
+        self.assertEqual(1.0, score["question_precision"])
+        self.assertEqual(1.0, score["passage_recall"])
+        self.assertEqual(["q3"], score["missing"])
+        self.assertEqual([], score["extra"])
+        self.assertEqual(1, score["low_iou"])  # q2 overlaps by half
+        self.assertEqual(100, score["trial_ms"])
+
+    def test_expected_from_applies_approved_labels(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 0, 10, 10)])])
+        pending, status = expected_from(oracle, trial, None)
+        self.assertEqual("pending", status)
+        self.assertEqual({"q1", "q2"}, set(pending))
+        labels = {"case": "c", "status": "approved", "items": [{"key": "q2", "truth": "neither"}, {"key": "q9", "truth": "trial"}]}
+        approved, status = expected_from(oracle, trial, labels)
+        self.assertEqual("approved", status)
+        self.assertEqual({"q1", "q9"}, set(approved))
+
+    def test_render_report_has_one_row_per_case_and_an_aggregate(self):
+        rows = [{"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": 1.0, "passage_precision": 1.0, "mean_iou": 0.95, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 1500, "oracle_ms": 9000}]
+        report = render_report(rows)
+        self.assertIn("| a | approved | 1.00 |", report)
+        self.assertIn("| 합계 |", report)
 
 
 if __name__ == "__main__":
