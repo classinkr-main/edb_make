@@ -2,6 +2,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -42,6 +43,15 @@ def _result(problem_count: int = 2) -> ParseResult:
     return ParseResult(pages=[page], problems=problems, source_page_count=16, parser_version="abc1234", timing_ms={"total": 5})
 
 
+def _result_with_boards(problem_count: int = 2) -> ParseResult:
+    result = _result(problem_count)
+    result.problems[:] = [
+        replace(problem, board_image=Image.new("RGBA", problem.image.size, (248, 249, 246, 128)))
+        for problem in result.problems
+    ]
+    return result
+
+
 class FakeParser:
     def __init__(self, result=None, error=None, gate=None, delay=0.0):
         self.result = result or _result()
@@ -50,8 +60,16 @@ class FakeParser:
         self.delay = delay
         self.calls = []
 
-    def __call__(self, source: Path, *, work_dir: Path, max_pages: int):
-        self.calls.append({"source": source, "work_dir": work_dir, "max_pages": max_pages, "bytes": source.read_bytes()})
+    def __call__(self, source: Path, *, work_dir: Path, max_pages: int, render_board_assets: bool = False):
+        self.calls.append(
+            {
+                "source": source,
+                "work_dir": work_dir,
+                "max_pages": max_pages,
+                "render_board_assets": render_board_assets,
+                "bytes": source.read_bytes(),
+            }
+        )
         if self.delay:
             time.sleep(self.delay)
         if self.gate is not None:
@@ -158,6 +176,7 @@ class TestConfigAndHealth(TrialApiCase):
                 "max_bytes": 4_000_000,
                 "max_pages": 4,
                 "daily_limit": 3,
+                "board_previews": True,
             },
             response.json(),
         )
@@ -187,6 +206,9 @@ class TestParseSuccess(TrialApiCase):
         self.assertTrue(body["problems"][0]["needs_review"])
         self.assertEqual(1, self.used())
         self.assertEqual(4, self.parser.calls[0]["max_pages"])
+        self.assertTrue(self.parser.calls[0]["render_board_assets"])
+        self.assertFalse(body["board_previews"])
+        self.assertEqual([None, None], [problem["board"] for problem in body["problems"]])
         self.assertEqual(PDF_BODY, self.parser.calls[0]["bytes"])
         self.assertEqual([4], self.inspector.calls)
         self.assertEqual([("tok", "203.0.113.7")], self.verifier.calls)
@@ -198,6 +220,25 @@ class TestParseSuccess(TrialApiCase):
         self.assertEqual(hash_ip("203.0.113.7", salt="salt", day=TODAY), event["ip_hash"])
         self.assertIsNone(event["reject_code"])
         self.assertEqual(len(PDF_BODY), event["bytes"])
+        self.assertEqual((0, 0), (event["timing"]["preview_step"], event["timing"]["board"]))
+
+    def test_board_previews_are_returned_and_counted_in_the_event(self):
+        client = self.make_client(parser=FakeParser(result=_result_with_boards()))
+        body = self.post_pdf(client).json()
+        self.assertTrue(body["board_previews"])
+        for problem in body["problems"]:
+            self.assertTrue(problem["board"].startswith("data:image/"))
+        self.assertEqual(1, self.store.events[-1]["timing"]["board"])
+        self.assertEqual(0, self.store.events[-1]["timing"]["preview_step"])
+
+    def test_board_previews_can_be_switched_off(self):
+        config = TrialConfig(ip_salt="salt", cron_secret="cron-secret", board_previews=False)
+        client = self.make_client(config=config, parser=FakeParser(result=_result_with_boards()))
+        self.assertFalse(client.get("/api/config").json()["board_previews"])
+        body = self.post_pdf(client).json()
+        self.assertFalse(self.parser.calls[0]["render_board_assets"])
+        # A parser that still returned cutouts would be a bug elsewhere; the response follows the parser.
+        self.assertTrue(body["board_previews"])
 
     def test_work_directory_is_removed_after_request(self):
         client = self.make_client()

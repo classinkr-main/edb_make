@@ -46,6 +46,22 @@ def _positive_float(env: Mapping[str, str], name: str, default: float) -> float:
     return value
 
 
+_FLAG_TRUE = frozenset({"1", "true", "yes", "on"})
+_FLAG_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _flag(env: Mapping[str, str], name: str, default: bool) -> bool:
+    raw = _text(env, name)
+    if raw is None:
+        return default
+    lowered = raw.lower()
+    if lowered in _FLAG_TRUE:
+        return True
+    if lowered in _FLAG_FALSE:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, on/off")
+
+
 @dataclass(frozen=True)
 class TrialConfig:
     production: bool = False
@@ -72,6 +88,10 @@ class TrialConfig:
     # Start with one parse per 2 GiB instance; cloud instances can still scale out.
     parse_concurrency: int = 1
     parse_wait_seconds: float = 20.0
+    # Chalk-cutout previews next to the raw crops: +4-6 s and +0.1-0.35 GB per parse on
+    # Vercel (spec 2026-09-16 §2-2). Off turns the cutouts, the response field and the
+    # page toggle off together.
+    board_previews: bool = True
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "TrialConfig":
@@ -106,6 +126,7 @@ class TrialConfig:
             global_daily_limit=_positive_int(env, "TRIAL_GLOBAL_DAILY_LIMIT", 500),
             parse_concurrency=_positive_int(env, "TRIAL_PARSE_CONCURRENCY", 1),
             parse_wait_seconds=_positive_float(env, "TRIAL_PARSE_WAIT_SECONDS", 20.0),
+            board_previews=_flag(env, "TRIAL_BOARD_PREVIEWS", True),
         )
 
     def missing_production_settings(self) -> list[str]:

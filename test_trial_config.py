@@ -29,6 +29,7 @@ class TestTrialConfig(unittest.TestCase):
         self.assertEqual(500, config.global_daily_limit)
         self.assertEqual(1, config.parse_concurrency)
         self.assertEqual(20.0, config.parse_wait_seconds)
+        self.assertTrue(config.board_previews)
         self.assertEqual(frozenset(), config.expected_hostnames)
         self.assertIsNone(config.turnstile_secret)
         self.assertEqual([], config.missing_production_settings())
@@ -92,6 +93,14 @@ class TestTrialConfig(unittest.TestCase):
         self.assertEqual(2500, defaults.limits.max_drawings_per_page)
         # The dataclass defaults and the from_env defaults are the same numbers, named once.
         self.assertEqual(TrialConfig().limits, TrialConfig.from_env({}).limits)
+
+    def test_board_previews_flag(self):
+        for value in ("0", "false", "No", "OFF"):
+            self.assertFalse(TrialConfig.from_env({"TRIAL_BOARD_PREVIEWS": value}).board_previews, value)
+        for value in ("1", "true", "Yes", "ON"):
+            self.assertTrue(TrialConfig.from_env({"TRIAL_BOARD_PREVIEWS": value}).board_previews, value)
+        with self.assertRaises(ValueError):
+            TrialConfig.from_env({"TRIAL_BOARD_PREVIEWS": "maybe"})
 
 
 if __name__ == "__main__":

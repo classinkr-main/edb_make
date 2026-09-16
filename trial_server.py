@@ -166,7 +166,12 @@ def create_app(
     ) -> tuple[bytes, dict[str, int], dict[str, int]]:
         parse_started_at = time.perf_counter()
         try:
-            result = parser(source, work_dir=work_dir, max_pages=config.limits.max_pages)
+            result = parser(
+                source,
+                work_dir=work_dir,
+                max_pages=config.limits.max_pages,
+                render_board_assets=config.board_previews,
+            )
             timing: dict[str, int] = dict(result.timing_ms)
             encode_started_at = time.perf_counter()
             payload, body = build_parse_body(
@@ -181,6 +186,10 @@ def create_app(
                     **({"mode": "demo"} if demo_mode else {}),
                 },
             )
+            # Budget fallbacks are invisible in elapsed_ms; record which step answered and
+            # whether the board previews survived it (ops doc §4-5).
+            timing["preview_step"] = payload["preview_step"]
+            timing["board"] = 1 if payload["board_previews"] else 0
             # encode is measured after the body exists, so the response cannot include it; the event does.
             timing["encode"] = _ms(encode_started_at)
             timing["parse_total"] = _ms(parse_started_at)
@@ -216,6 +225,7 @@ def create_app(
                 "max_bytes": config.limits.max_bytes,
                 "max_pages": config.limits.max_pages,
                 "daily_limit": config.daily_limit,
+                "board_previews": config.board_previews,
             },
             headers=NO_STORE,
         )
@@ -253,6 +263,7 @@ def create_app(
                 "max_bytes": config.limits.max_bytes,
                 "max_pages": config.limits.max_pages,
                 "daily_limit": None,
+                "board_previews": config.board_previews,
                 "mode": "demo",
                 "active": config.demo.is_active(now()),
                 "authenticated": demo_authenticated(request),
