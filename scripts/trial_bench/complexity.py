@@ -4,6 +4,7 @@ pages = the trial's own page cap).
 Usage:
   GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 500 1000 2000 4000 8000 --drawings 0 2000 8000
   GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 500 --drawings 3000 4000 5000 6000 --pages 3
+  GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 4500 --drawings 1500 2000 2500 --pages 4 --board
 Vercel estimate = local × 4.3 (docs/web-trial-spike-results.md §2-3). ``--pages`` controls
 both how many pages the synthetic PDF gets and the max_pages cap the parse runs with, so a
 sweep can be reproduced at a page count other than the trial's current cap.
@@ -90,6 +91,11 @@ def main(argv: list[str] | None = None) -> int:
             "--pages 3 to reproduce a sweep run before the cap moved to 4."
         ),
     )
+    parser.add_argument(
+        "--board",
+        action="store_true",
+        help="also render the chalk cutouts, as the trial does with TRIAL_BOARD_PREVIEWS on",
+    )
     args = parser.parse_args(argv)
     rows = []
     with tempfile.TemporaryDirectory(prefix="trial-complexity-") as temp_dir:
@@ -97,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             for drawings in args.drawings:
                 pdf = write_synthetic(Path(temp_dir) / f"w{words}_d{drawings}.pdf", words_per_page=words, drawings_per_page=drawings, pages=args.pages)
                 info = inspect_pdf(pdf, max_pages=args.pages)
-                result = parse_in_scratch(pdf, parse_problems, max_pages=args.pages)
+                result = parse_in_scratch(pdf, parse_problems, max_pages=args.pages, render_board_assets=args.board)
                 total = result.timing_ms["total"]
                 rows.append([info.max_words_per_page, info.max_drawings_per_page, result.timing_ms.get("render"), result.timing_ms.get("segment"), result.timing_ms.get("assets"), total, round(total * VERCEL_FACTOR / 1000, 1), len(result.problems)])
     print(markdown_table(["words/pg", "drawings/pg", "render_ms", "segment_ms", "assets_ms", "total_ms", "vercel_est_s", "problems"], rows))

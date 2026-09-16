@@ -68,7 +68,7 @@ def write_2xa3(path: Path, *, pages: int = DEFAULT_MAX_PAGES) -> Path:
     return path
 
 
-def run_two_overlapping_parses(pdf: Path) -> dict:
+def run_two_overlapping_parses(pdf: Path, *, board: bool = False) -> dict:
     """Parse ``pdf`` twice, overlapped, and read this process's own peak RSS.
 
     Models ``TRIAL_PARSE_CONCURRENCY=2``. ``parse_in_scratch`` pins
@@ -77,7 +77,7 @@ def run_two_overlapping_parses(pdf: Path) -> dict:
     Meant to run inside a process that does nothing else: see measure_case.
     """
     with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(lambda _: parse_in_scratch(pdf, parse_problems), range(2)))
+        results = list(pool.map(lambda _: parse_in_scratch(pdf, parse_problems, render_board_assets=board), range(2)))
     return {
         "pages": len(results[0].pages),
         "rss_peak_mb": max_rss_mb(),
@@ -86,7 +86,7 @@ def run_two_overlapping_parses(pdf: Path) -> dict:
     }
 
 
-def run_single_parse(pdf: Path) -> dict:
+def run_single_parse(pdf: Path, *, board: bool = False) -> dict:
     """Peak RSS of one isolated parse, in this process.
 
     Models the shipped default ``TRIAL_PARSE_CONCURRENCY=1`` (one parse per
@@ -94,7 +94,7 @@ def run_single_parse(pdf: Path) -> dict:
     two-at-once model of ``TRIAL_PARSE_CONCURRENCY=2``. Meant to run inside a
     process that does nothing else: see measure_case's ``concurrency`` handling.
     """
-    result = parse_in_scratch(pdf, parse_problems)
+    result = parse_in_scratch(pdf, parse_problems, render_board_assets=board)
     return {
         "pages": len(result.pages),
         "rss_peak_mb": max_rss_mb(),
@@ -102,7 +102,7 @@ def run_single_parse(pdf: Path) -> dict:
     }
 
 
-def measure_case(pdf: Path, *, concurrency: int = 2) -> dict:
+def measure_case(pdf: Path, *, concurrency: int = 2, board: bool = False) -> dict:
     """Run run_two_overlapping_parses(pdf) or run_single_parse(pdf) in a fresh child process.
 
     Re-invoking this same script with --worker is the isolation boundary: the
@@ -116,6 +116,8 @@ def measure_case(pdf: Path, *, concurrency: int = 2) -> dict:
     A failed case must cost only its own row.
     """
     command = [sys.executable, str(SCRIPT_PATH), "--concurrency", str(concurrency), "--worker", str(pdf)]
+    if board:
+        command.append("--board")
     try:
         proc = subprocess.run(command, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
@@ -167,6 +169,12 @@ def summarize_repeats(peaks: list[float], threshold_mb: float | None) -> str:
     return text
 
 
+def _case_kwargs(args: argparse.Namespace) -> dict:
+    # Only mention ``board`` when asked, so callers that stub measure_case with the
+    # older (pdf, *, concurrency) signature keep working for runs without --board.
+    return {"board": True} if args.board else {}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("pdfs", nargs="*", type=Path)
@@ -207,11 +215,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="with --repeat > 1, also report how many runs' rss_peak_mb exceeded this value",
     )
+    parser.add_argument("--board", action="store_true", help="render chalk cutouts too (TRIAL_BOARD_PREVIEWS on)")
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)  # internal: this script re-invokes itself
     args = parser.parse_args(argv)
 
     if args.worker is not None:
-        payload = run_single_parse(args.worker) if args.concurrency == 1 else run_two_overlapping_parses(args.worker)
+        run = run_single_parse if args.concurrency == 1 else run_two_overlapping_parses
+        payload = run(args.worker, **_case_kwargs(args))
         print(json.dumps(payload))
         return 0
 
@@ -226,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.repeat <= 1:
             for pdf in pdfs:
-                result = measure_case(pdf, concurrency=args.concurrency)
+                result = measure_case(pdf, concurrency=args.concurrency, **_case_kwargs(args))
                 if "error" in result:
                     # A failed case reports as its own row -- not a silently
                     # dropped one, and not an exception that would discard every
@@ -247,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             for pdf in pdfs:
                 peaks: list[float] = []
                 for run_index in range(1, args.repeat + 1):
-                    result = measure_case(pdf, concurrency=args.concurrency)
+                    result = measure_case(pdf, concurrency=args.concurrency, **_case_kwargs(args))
                     if "error" in result:
                         print(f"memory.py: {pdf.name} run {run_index}/{args.repeat}: {result['error']}", file=sys.stderr)
                         rows.append([pdf.name, run_index, "ERROR", "-"] + ["-"] * len(ms_headers))
