@@ -65,9 +65,23 @@ class GeminiRepairTruncatedError(GeminiRepairResponseError):
     """The response's ``finishReason`` was MAX_TOKENS/LENGTH: Gemini stopped
     generating before the JSON closed because it ran out of output-token
     budget (``effective_max_output_tokens`` in ``diagnostics``), not because
-    the model produced a malformed answer. Retrying the identical request is
-    pointless -- ``temperature`` is 0.0, so the same budget reproduces the
-    same truncation -- the fix is a bigger budget or a smaller unit of work.
+    the model produced a malformed answer. The fix is a bigger budget or a
+    smaller unit of work, not a same-model retry -- and that is not merely a
+    ``temperature=0.0`` theory (FALLBACK_GEMINI_REPAIR_MODEL is a gemini-3
+    flash model, and ``_request_gemini_repair`` pops ``temperature`` for
+    exactly that family, so an identical retry against it is not
+    deterministic). It is observed: the pre-fix
+    ``oracle_failures/english_go2_hakpyeong_20260324.json`` failure record
+    reads "AI repair failed after retries: ... Unterminated string", i.e.
+    the retry that ``_request_ai_repair_with_retry`` already ran reproduced
+    the identical truncation. That retry-skip only fires when the caller
+    fixed the output-token budget via ``AIFallbackConfig.max_output_token_cap``
+    (``scripts/trial_bench/oracle.py``'s ``force_config`` -- see
+    ``_request_ai_repair_with_retry``); every desktop caller leaves that cap
+    unset, so a truncation there still gets the normal retry, because the
+    undercounting per-block estimate that causes it (see
+    ``_repair_output_token_budget``) is still in place for desktop and the
+    retry is the only recovery available.
     """
 
     def __init__(self, message: str, *, diagnostics: dict[str, Any]) -> None:
@@ -747,7 +761,19 @@ def _request_ai_repair_with_retry(
     trigger_reasons: list[str],
     api_key: str,
 ) -> tuple[dict[str, Any], str | None, dict[str, int]]:
-    """Call Gemini for the repair. Retry once on transient failure."""
+    """Call Gemini for the repair. Retry once on transient failure.
+
+    A truncated response (``GeminiRepairResponseError.truncated``) skips
+    that retry only when ``config.max_output_token_cap`` is set -- i.e. only
+    for scripts/trial_bench/oracle.py's ``force_config``, whose fixed budget
+    is what proved the retry pointless there (see
+    ``GeminiRepairTruncatedError``'s docstring for the observed evidence).
+    Every desktop caller leaves ``max_output_token_cap`` unset, so a
+    truncated response there still goes through the normal
+    ``_is_retryable_ai_repair_error`` check below and gets retried, because
+    the undercounting per-block estimate that causes the truncation is still
+    in place for desktop and the retry is the only recovery it has.
+    """
     last_exc: Exception | None = None
     for attempt in range(2):
         if attempt > 0:
@@ -762,6 +788,12 @@ def _request_ai_repair_with_retry(
             )
         except Exception as exc:
             last_exc = exc
+            if (
+                config.max_output_token_cap is not None
+                and isinstance(exc, GeminiRepairResponseError)
+                and exc.truncated
+            ):
+                raise
             if not _is_retryable_ai_repair_error(exc):
                 raise
     wrapped = RuntimeError(f"AI repair failed after retries: {last_exc}")
@@ -784,13 +816,11 @@ def _copy_gemini_diagnostics(*, source: Exception | None, target: Exception) -> 
 
 
 def _is_retryable_ai_repair_error(exc: Exception) -> bool:
-    if isinstance(exc, GeminiRepairResponseError) and exc.truncated:
-        # temperature=0.0 makes the same request reproduce the same
-        # truncation -- retrying it burns a call and a 2s sleep for a
-        # deterministic loss. A different model/config might still help, so
-        # this is not fatal to the caller's model-fallback loop, just to the
-        # same-model retry.
-        return False
+    # A truncated response's own same-model retry skip is decided by the
+    # caller (_request_ai_repair_with_retry), gated on
+    # config.max_output_token_cap, not here -- this function has no access
+    # to that config and must stay correct for every desktop caller, which
+    # still wants the retry below when a truncation occurs.
     if _is_fatal_ai_repair_error(exc):
         return False
     message = str(exc)

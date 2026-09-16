@@ -14,6 +14,9 @@ from unittest.mock import patch
 import fitz
 from PIL import Image
 
+import page_repair
+from page_repair import build_ai_fallback_config, repair_page_model
+from preprocess import PreparedPage
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common, memory
 from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
@@ -24,7 +27,7 @@ from scripts.trial_bench import oracle
 from scripts.trial_bench.oracle import force_config, oracle_case, summarize_page_repair
 from scripts.trial_bench.probe import summarize_file
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
-from structured_schema import Box
+from structured_schema import BlockType, Box, ContentBlock, PageModel, Subject
 from trial_input import DEFAULT_MAX_PAGES
 
 
@@ -452,6 +455,131 @@ class TestFailedPageRepairSummaryDiagnostics(unittest.TestCase):
 
         self.assertFalse(summary["gemini_truncated"])
         self.assertNotIn("gemini_diagnostics", summary["errors"][0])
+
+
+class _EmptyCache:
+    """PipelineCache stand-in that never serves a cached repair -- copied
+    from test_page_repair.py's helper of the same name so this test
+    exercises page_repair.repair_page_model's fresh-call branch without a
+    cross-module import."""
+
+    def load_ai_repair(self, **_kwargs):
+        return None
+
+    def save_ai_repair(self, **_kwargs):
+        return None
+
+
+class TestGeminiTruncationDiagnosticsReachTheOracleThroughRepairPageModel(unittest.TestCase):
+    """The exact hop the task asked to be instrumented: a
+    page_repair.GeminiRepairTruncatedError raised inside
+    page_repair.repair_page_model (fail_on_error=True) must arrive at
+    oracle._failed_page_repair_summary with its .diagnostics intact.
+    TestFailedPageRepairSummaryDiagnostics above only ever hands
+    _failed_page_repair_summary a hand-built RuntimeError with .diagnostics
+    already attached by the test itself -- it never exercises
+    repair_page_model's `if resolved_config.fail_on_error: raise` (a bare
+    raise, which is load-bearing: replacing it with
+    `raise RuntimeError(str(exc)) from exc` would drop .diagnostics/.truncated
+    silently and this test would catch that where the hand-built-exception
+    tests cannot).
+    """
+
+    @staticmethod
+    def _prepared_page_and_page() -> tuple[PreparedPage, PageModel]:
+        prepared_page = PreparedPage(
+            page_id="page-1",
+            source_path="sample.png",
+            page_number=1,
+            image=Image.new("RGB", (100, 120), "white"),
+            original_size=(100, 120),
+        )
+        page = PageModel(
+            page_id="page-1",
+            width_px=100,
+            height_px=120,
+            subject=Subject.ENGLISH,
+            blocks=[
+                ContentBlock(
+                    block_id="block-1",
+                    block_type=BlockType.STEM,
+                    bbox=Box(left=0, top=0, width=80, height=40),
+                    reading_order=0,
+                    text="1. problem",
+                )
+            ],
+        )
+        return prepared_page, page
+
+    def test_max_tokens_truncation_reaches_the_oracle_summary_with_diagnostics(self):
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": '{"problem_start_block_ids": ["blo'}]},
+                    }
+                ]
+            }
+
+        prepared_page, page = self._prepared_page_and_page()
+        # max_output_token_cap mirrors the oracle's own force_config, so the
+        # same-model retry is skipped and this stays a single fake call per
+        # candidate model -- see page_repair.GeminiRepairTruncatedError's
+        # docstring for why that skip is oracle-only.
+        config = build_ai_fallback_config(mode="force", fail_on_error=True, max_output_token_cap=8192)
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}):
+            with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+                with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                    with patch.object(page_repair.time, "sleep", side_effect=lambda seconds: None):
+                        with self.assertRaises(RuntimeError) as ctx:
+                            repair_page_model(
+                                prepared_page,
+                                page,
+                                ocr_mode="gemini",
+                                config=config,
+                                cache=_EmptyCache(),
+                            )
+
+        summary = oracle._failed_page_repair_summary(ctx.exception)
+
+        self.assertTrue(summary["gemini_truncated"])
+        error_entry = summary["errors"][0]
+        self.assertEqual("MAX_TOKENS", error_entry["gemini_diagnostics"]["finish_reason"])
+        self.assertEqual("oracle_failed", summary["status"])
+
+    def test_length_truncation_also_reaches_the_oracle_summary_with_diagnostics(self):
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {
+                        "finishReason": "LENGTH",
+                        "content": {"parts": [{"text": '{"problem_start_block_ids": ["blo'}]},
+                    }
+                ]
+            }
+
+        prepared_page, page = self._prepared_page_and_page()
+        config = build_ai_fallback_config(mode="force", fail_on_error=True, max_output_token_cap=8192)
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}):
+            with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+                with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                    with patch.object(page_repair.time, "sleep", side_effect=lambda seconds: None):
+                        with self.assertRaises(RuntimeError) as ctx:
+                            repair_page_model(
+                                prepared_page,
+                                page,
+                                ocr_mode="gemini",
+                                config=config,
+                                cache=_EmptyCache(),
+                            )
+
+        summary = oracle._failed_page_repair_summary(ctx.exception)
+
+        self.assertTrue(summary["gemini_truncated"])
+        self.assertEqual("LENGTH", summary["errors"][0]["gemini_diagnostics"]["finish_reason"])
 
 
 class TestSummarizePageRepair(unittest.TestCase):

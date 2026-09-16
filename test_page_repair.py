@@ -806,6 +806,91 @@ class TestRepairOutputTokenBudgetOverride(unittest.TestCase):
         self.assertEqual(8192, config.max_output_token_cap)
 
 
+class TestRequestGeminiRepairSendsTheOverrideBudget(unittest.TestCase):
+    """Joins AIFallbackConfig.max_output_token_cap to the actual request
+    payload -- TestRepairOutputTokenBudgetOverride above only exercises
+    _repair_output_token_budget in isolation. Deleting the
+    `max_output_token_cap=config.max_output_token_cap` line that forwards it
+    into _repair_output_token_budget inside _request_gemini_repair leaves
+    every other test green while the whole fix goes inert: both English
+    bench cases would silently start failing again.
+    """
+
+    @staticmethod
+    def _page_with_real_shaped_block_ids(count: int, *, case: str) -> PageModel:
+        # The real per-page block id shape that made the flat 24-token/block
+        # estimate wrong (english_2020suneung_go3_20191107-page-001-block-011,
+        # 50+ characters), not the short synthetic "block-1" ids used
+        # elsewhere in this file.
+        return PageModel(
+            page_id="page-1",
+            width_px=1000,
+            height_px=1400,
+            subject=Subject.ENGLISH,
+            blocks=[
+                ContentBlock(
+                    block_id=f"{case}-page-001-block-{index:03d}",
+                    block_type=BlockType.STEM,
+                    bbox=Box(left=0, top=index * 10, width=80, height=8),
+                    reading_order=index,
+                    text=f"{index + 1}.",
+                )
+                for index in range(count)
+            ],
+        )
+
+    def _sent_max_output_tokens(self, config) -> int:
+        prepared_page = PreparedPage(
+            page_id="page-1",
+            source_path="sample.png",
+            page_number=1,
+            image=Image.new("RGB", (100, 120), "white"),
+            original_size=(100, 120),
+        )
+        page = self._page_with_real_shaped_block_ids(11, case="english_2020suneung_go3_20191107")
+        captured: dict = {}
+
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            captured["payload"] = payload
+            valid_json = json.dumps(
+                {
+                    "problem_start_block_ids": [],
+                    "choice_block_ids": [],
+                    "figure_block_ids": [],
+                    "display_titles": [],
+                    "notes": [],
+                }
+            )
+            return {"candidates": [{"finishReason": "STOP", "content": {"parts": [{"text": valid_json}]}}]}
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                page_repair._request_gemini_repair(
+                    prepared_page=prepared_page,
+                    page=page,
+                    config=config,
+                    trigger_reasons=["forced"],
+                    api_key="test-key",
+                )
+        return captured["payload"]["generationConfig"]["maxOutputTokens"]
+
+    def test_the_cap_reaches_generation_config_max_output_tokens(self):
+        import build_problem_board_edb as board
+
+        config = board._to_page_ai_config({"mode": "force", "max_tokens": 8192, "max_output_token_cap": 8192})
+        self.assertEqual(8192, self._sent_max_output_tokens(config))
+
+    def test_without_the_cap_the_undercounting_estimate_is_sent_instead(self):
+        import build_problem_board_edb as board
+
+        config = board._to_page_ai_config({"mode": "force", "max_tokens": 8192})
+        self.assertIsNone(config.max_output_token_cap)
+        # 512 + 24*11 blocks = 776 -- the exact budget captured in the
+        # pre-fix failure record, well under the 2048 hard cap and far
+        # under configured_max_tokens=8192.
+        self.assertEqual(776, self._sent_max_output_tokens(config))
+
+
 class TestGeminiRepairTruncatedError(unittest.TestCase):
     """A response cut off by the output-token budget (finishReason MAX_TOKENS
     or LENGTH) must raise page_repair.GeminiRepairTruncatedError with
@@ -886,6 +971,71 @@ class TestGeminiRepairTruncatedError(unittest.TestCase):
         self.assertEqual(response_text, diagnostics["response_head"])
         self.assertEqual(response_text, diagnostics["response_tail"])
 
+    def test_length_finish_reason_also_raises_the_typed_truncation_error(self):
+        # _GEMINI_TRUNCATION_FINISH_REASONS has two members (MAX_TOKENS,
+        # LENGTH) but only MAX_TOKENS was ever exercised above.
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {
+                        "finishReason": "LENGTH",
+                        "content": {"parts": [{"text": '{"problem_start_block_ids": ["blo'}]},
+                    }
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with self.assertRaises(page_repair.GeminiRepairTruncatedError) as ctx:
+                    page_repair._request_gemini_repair(
+                        prepared_page=prepared_page,
+                        page=page,
+                        config=config,
+                        trigger_reasons=["forced"],
+                        api_key="test-key",
+                    )
+
+        exc = ctx.exception
+        self.assertTrue(exc.truncated)
+        self.assertEqual("LENGTH", exc.diagnostics["finish_reason"])
+
+    def test_long_response_head_and_tail_are_the_first_and_last_200_characters(self):
+        # Every truncation test above uses a response under 200 chars, so
+        # head == tail == the whole text and _gemini_response_diagnostics's
+        # 200-char slicing is never actually exercised.
+        body = '{"problem_start_block_ids": [' + ", ".join(f'"block-{i:03d}"' for i in range(60))
+        self.assertGreater(len(body), 400)
+
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": body}]}}
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with self.assertRaises(page_repair.GeminiRepairTruncatedError) as ctx:
+                    page_repair._request_gemini_repair(
+                        prepared_page=prepared_page,
+                        page=page,
+                        config=config,
+                        trigger_reasons=["forced"],
+                        api_key="test-key",
+                    )
+
+        diagnostics = ctx.exception.diagnostics
+        self.assertEqual(len(body), diagnostics["response_char_count"])
+        self.assertEqual(body[:200], diagnostics["response_head"])
+        self.assertEqual(body[-200:], diagnostics["response_tail"])
+        self.assertNotEqual(diagnostics["response_head"], diagnostics["response_tail"])
+
     def test_a_normal_finish_reason_is_not_misclassified_as_truncated(self):
         def fake_post_json(url, payload, *, headers, timeout_ms):
             return {
@@ -913,10 +1063,78 @@ class TestGeminiRepairTruncatedError(unittest.TestCase):
         self.assertFalse(exc.truncated)
         self.assertEqual("STOP", exc.diagnostics["finish_reason"])
 
-    def test_retry_loop_does_not_retry_a_truncated_response(self):
-        # temperature=0.0 means an identical retry reproduces the identical
-        # truncation -- retrying wastes a call and a 2s sleep on a
-        # deterministic loss, so this must fail on the first attempt.
+    def test_max_tokens_with_no_text_part_raises_truncated_error_with_zero_length_diagnostics(self):
+        # The `if not json_text:` branch (no text part at all, as opposed to
+        # a text part cut off mid-string above) is the typical symptom when
+        # a gemini-3 model's thinkingConfig.thinkingLevel consumes the whole
+        # output budget on thinking tokens before ever writing JSON (see
+        # _repair_thinking_level) -- the exact hypothesis the failure raised,
+        # and untested until now.
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {"candidates": [{"finishReason": "MAX_TOKENS", "content": {"parts": []}}]}
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force", max_tokens=6789)
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with self.assertRaises(page_repair.GeminiRepairTruncatedError) as ctx:
+                    page_repair._request_gemini_repair(
+                        prepared_page=prepared_page,
+                        page=page,
+                        config=config,
+                        trigger_reasons=["forced"],
+                        api_key="test-key",
+                    )
+
+        exc = ctx.exception
+        self.assertTrue(exc.truncated)
+        diagnostics = exc.diagnostics
+        self.assertEqual("MAX_TOKENS", diagnostics["finish_reason"])
+        self.assertEqual(0, diagnostics["response_char_count"])
+        expected_budget = page_repair._repair_output_token_budget(
+            page, configured_max_tokens=6789, include_problem_units=False
+        )
+        self.assertEqual(expected_budget, diagnostics["effective_max_output_tokens"])
+
+    def test_stop_with_no_text_part_raises_the_non_truncated_subclass(self):
+        # The STOP counterpart of the no-text branch above: no text part,
+        # but not because of a token-budget truncation, so it must raise the
+        # base (non-truncated) error, not GeminiRepairTruncatedError.
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {"candidates": [{"finishReason": "STOP", "content": {"parts": []}}]}
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with self.assertRaises(page_repair.GeminiRepairResponseError) as ctx:
+                    page_repair._request_gemini_repair(
+                        prepared_page=prepared_page,
+                        page=page,
+                        config=config,
+                        trigger_reasons=["forced"],
+                        api_key="test-key",
+                    )
+
+        exc = ctx.exception
+        self.assertNotIsInstance(exc, page_repair.GeminiRepairTruncatedError)
+        self.assertFalse(exc.truncated)
+        self.assertEqual("STOP", exc.diagnostics["finish_reason"])
+        self.assertEqual(0, exc.diagnostics["response_char_count"])
+
+    def test_retry_loop_skips_the_retry_when_the_caller_fixed_the_budget(self):
+        # The skip applies only when config.max_output_token_cap is set --
+        # i.e. only for scripts/trial_bench/oracle.py's force_config -- not
+        # because temperature=0.0 makes every retry deterministic (it does
+        # not: FALLBACK_GEMINI_REPAIR_MODEL is a gemini-3 flash model, and
+        # _request_gemini_repair pops temperature for that family). The real
+        # evidence is observed: the pre-fix
+        # oracle_failures/english_go2_hakpyeong_20260324.json record reads
+        # "AI repair failed after retries: ... Unterminated string", i.e. an
+        # identical retry against a fixed budget reproduced the identical
+        # truncation. See GeminiRepairTruncatedError's docstring.
         calls = []
 
         def fake_post_json(url, payload, *, headers, timeout_ms):
@@ -928,7 +1146,7 @@ class TestGeminiRepairTruncatedError(unittest.TestCase):
             }
 
         prepared_page, page = self._page_and_prepared_page()
-        config = build_ai_fallback_config(mode="force")
+        config = build_ai_fallback_config(mode="force", max_output_token_cap=8192)
         sleep_calls = []
 
         with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
@@ -947,6 +1165,55 @@ class TestGeminiRepairTruncatedError(unittest.TestCase):
 
         self.assertEqual(1, len(calls))
         self.assertEqual([], sleep_calls)
+
+    def test_retry_loop_still_retries_a_truncated_response_for_desktop_callers(self):
+        # Every desktop caller leaves max_output_token_cap unset. The
+        # undercounting per-block estimate that causes a truncation there
+        # (_repair_output_token_budget) is still in place for desktop, and
+        # the retry is the only recovery it has -- this must NOT regress to
+        # the oracle-only skip above (that would silently drop desktop's one
+        # recovery path for this failure, per the review finding this test
+        # pins).
+        calls = []
+
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            calls.append(url)
+            return {
+                "candidates": [
+                    {"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": '{"a": "b'}]}}
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")
+        self.assertIsNone(config.max_output_token_cap)
+        sleep_calls = []
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with patch.object(
+                    page_repair.time, "sleep", side_effect=lambda seconds: sleep_calls.append(seconds)
+                ):
+                    # Both attempts truncate, so the retry loop exhausts and
+                    # wraps into a plain RuntimeError (not the typed
+                    # GeminiRepairTruncatedError) -- _copy_gemini_diagnostics
+                    # still carries the diagnostics onto it, which is what
+                    # oracle._failed_page_repair_summary relies on.
+                    with self.assertRaises(RuntimeError) as ctx:
+                        page_repair._request_ai_repair_with_retry(
+                            prepared_page=prepared_page,
+                            page=page,
+                            config=config,
+                            trigger_reasons=["forced"],
+                            api_key="test-key",
+                        )
+
+        self.assertEqual(2, len(calls))
+        self.assertEqual([2.0], sleep_calls)
+        exc = ctx.exception
+        self.assertNotIsInstance(exc, page_repair.GeminiRepairTruncatedError)
+        self.assertTrue(getattr(exc, "truncated", False))
+        self.assertEqual("MAX_TOKENS", exc.diagnostics["finish_reason"])
 
     def test_model_fallback_still_tries_the_fallback_model_and_keeps_diagnostics(self):
         # Truncation is not classified fatal to the model-fallback loop (a
