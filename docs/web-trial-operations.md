@@ -45,7 +45,7 @@
 |---|---|
 | Git 저장소 | `classinkr-main/edb_make` |
 | Production Branch | `web-trial` |
-| Ignored Build Step (Custom) | `if [ "$VERCEL_GIT_COMMIT_REF" = "web-trial" ]; then exit 1; else exit 0; fi` |
+| Ignored Build Step (Custom) | 처음에는 `if [ "$VERCEL_GIT_COMMIT_REF" = "web-trial" ]; then exit 1; else exit 0; fi`. 2026-09-16부터 `web-trial-bench` 프리뷰 측정을 위해 §2-5의 값으로 바뀌었다(같은 프로젝트 설정 하나를 공유한다) |
 | Functions > Function CPU | Standard (2 GB / 1 vCPU). `vercel.json`으로는 바꿀 수 없다 |
 | Spend Management | 월 한도를 걸고 **Pause production deployment**를 켠다. 켜지 않으면 알림만 온다. 멈춘 프로젝트는 대시보드에서 직접 재개해야 한다 |
 | Deployment Protection | Standard. 운영 도메인만 공개, 미리보기 배포는 로그인 필요 |
