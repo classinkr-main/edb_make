@@ -6,9 +6,12 @@ migration column, or the sentinel value used to flag pathological PDF pages
 fails a test instead of silently going stale in the doc.
 """
 
+import importlib
+import os
 import re
 import unittest
 from pathlib import Path
+from unittest import mock
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DOC = (PROJECT_ROOT / "docs" / "web-trial-operations.md").read_text(encoding="utf-8")
@@ -35,6 +38,91 @@ class TestWorkerEnvVarsDocumented(unittest.TestCase):
         window = DOC[min(preprocess_idx, asset_idx):max(preprocess_idx, asset_idx) + 400]
         self.assertIn("render", window)
         self.assertTrue("assets" in window or "crop" in window)
+
+
+class TestWorkerEnvVarOutOfRangeBehaviourMatchesDoc(unittest.TestCase):
+    """A <=0 value pins the pool to ONE worker; only a non-integer restores the default.
+
+    The doc used to fold both halves into one claim -- "0 이하이거나 정수가 아닌
+    값은 조용히 기본값으로 되돌아간다" -- which is wrong for the <=0 half. Both
+    resolvers short-circuit with `if requested_workers <= 0: return 1`, so an
+    operator who sets either var to 0 as an "auto/off" idiom fully serialises the
+    stage instead of getting the default back. These assertions run the real
+    resolvers so the doc cannot drift back to the wrong claim.
+
+    os.cpu_count() is patched because the default is `min(cap, work, cores)` --
+    unpatched, the expected defaults below would depend on the host's core count.
+    """
+
+    # (env var, module, resolver, work count passed in, default when 10 cores are visible)
+    CASES = (
+        ("EDB_PREPROCESS_PAGE_WORKERS", "preprocess", "_resolve_preprocess_page_worker_count", 4, 4),
+        ("EDB_PROBLEM_ASSET_WORKERS", "build_problem_board_edb", "_resolve_problem_asset_worker_count", 6, 6),
+    )
+
+    def _resolve(self, module_name, resolver_name, work_count, env_name, env_value):
+        module = importlib.import_module(module_name)
+        resolver = getattr(module, resolver_name)
+        with mock.patch.object(os, "cpu_count", return_value=10):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                if env_value is None:
+                    os.environ.pop(env_name, None)
+                else:
+                    os.environ[env_name] = env_value
+                return resolver(work_count)
+
+    def test_unset_gives_the_documented_default(self):
+        # Pins the baseline the other two tests are measured against; without it
+        # a resolver that returned 1 for everything would satisfy them trivially.
+        for env_name, module_name, resolver_name, work_count, default in self.CASES:
+            with self.subTest(env_name=env_name):
+                self.assertEqual(
+                    default, self._resolve(module_name, resolver_name, work_count, env_name, None)
+                )
+
+    def test_zero_or_negative_forces_one_worker_not_the_default(self):
+        for env_name, module_name, resolver_name, work_count, default in self.CASES:
+            for env_value in ("0", "-1", "-3"):
+                with self.subTest(env_name=env_name, env_value=env_value):
+                    resolved = self._resolve(
+                        module_name, resolver_name, work_count, env_name, env_value
+                    )
+                    self.assertEqual(
+                        1,
+                        resolved,
+                        f"{env_name}={env_value} must pin the pool to 1 (fully serial)",
+                    )
+                    # The distinction the doc got wrong: this is NOT the default.
+                    self.assertNotEqual(default, resolved)
+
+    def test_non_integer_falls_back_to_the_default(self):
+        for env_name, module_name, resolver_name, work_count, default in self.CASES:
+            for env_value in ("abc", "4.5", "  "):
+                with self.subTest(env_name=env_name, env_value=env_value):
+                    self.assertEqual(
+                        default,
+                        self._resolve(module_name, resolver_name, work_count, env_name, env_value),
+                    )
+
+    def test_doc_rows_state_the_split_and_never_merge_it_again(self):
+        for env_name, _module_name, _resolver_name, _work_count, _default in self.CASES:
+            with self.subTest(env_name=env_name):
+                row_start = DOC.index(f"| `{env_name}`")
+                row = DOC[row_start : DOC.index("\n", row_start)]
+
+                self.assertIn("0 이하", row)
+                # The <=0 outcome must be stated as 1 / fully serial, and must
+                # explicitly deny that it is the default.
+                self.assertIn("1(완전 직렬)", row)
+                self.assertIn("기본값이 아니라", row)
+                # Regression guard: the old wording tied "0 이하" directly to
+                # "기본값으로 되돌아간다" in one clause. Reject that shape.
+                self.assertIsNone(
+                    re.search(r"0 이하[^.]{0,40}기본값으로 되돌아간다", row),
+                    f"{env_name} row must not claim a <=0 value restores the default",
+                )
+                # The non-integer half keeps its (correct) default-fallback claim.
+                self.assertIn("정수가 아닌 값은 조용히 기본값으로 되돌아가", row)
 
 
 class TestDeploymentOrderingDocumented(unittest.TestCase):
