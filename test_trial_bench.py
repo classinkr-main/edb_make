@@ -12,8 +12,10 @@ from PIL import Image
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
 from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
+from scripts.trial_bench.load import summarize_wave
 from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench.oracle import force_config
+from scripts.trial_bench.probe import summarize_file
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
 from structured_schema import Box
 
@@ -640,6 +642,34 @@ class TestAdjudicateCase(unittest.TestCase):
                 adjudicate_case("c", root)
             self.assertIn("q2", captured.getvalue())
             self.assertEqual(stale, common.load_json(labels_path))
+
+
+class TestProbeSummaries(unittest.TestCase):
+    def test_summarize_file_treats_second_call_onward_as_warm(self):
+        rows = [
+            {"status": 200, "wall_ms": 9000, "bytes": 10, "timing_ms": {"total": 8000, "render": 1000, "segment": 3000, "assets": 2000}, "instance_id": "a", "instance_age_s": 5.0},
+            {"status": 200, "wall_ms": 7000, "bytes": 12, "timing_ms": {"total": 6500, "render": 900, "segment": 2900, "assets": 1900}, "instance_id": "a", "instance_age_s": 20.0},
+            {"status": 200, "wall_ms": 7200, "bytes": 12, "timing_ms": {"total": 6600, "render": 950, "segment": 2950, "assets": 1950}, "instance_id": "a", "instance_age_s": 30.0},
+        ]
+        summary = summarize_file(rows)
+        self.assertEqual(9000, summary["first_wall_ms"])
+        self.assertEqual(7000, summary["warm_p50_ms"])  # nearest-rank p50 of [7000, 7200]
+        self.assertEqual(7200, summary["warm_max_ms"])
+        self.assertEqual(6500, summary["parse_p50_ms"])
+        self.assertEqual(900, summary["render_p50_ms"])
+        self.assertEqual(["a"], summary["instances"])
+        self.assertEqual(12, summary["bytes_max"])
+
+    def test_summarize_wave_counts_distribution(self):
+        rows = [
+            {"status": 200, "wall_ms": 7000, "instance_id": "a", "instance_age_s": 100.0},
+            {"status": 200, "wall_ms": 12000, "instance_id": "a", "instance_age_s": 100.0},
+            {"status": 200, "wall_ms": 13000, "instance_id": "b", "instance_age_s": 4.0},
+            {"status": 503, "wall_ms": 20000, "instance_id": None, "instance_age_s": None},
+            {"status": 504, "wall_ms": 60000, "instance_id": None, "instance_age_s": None},
+        ]
+        summary = summarize_wave(rows)
+        self.assertEqual({"requests": 5, "ok": 3, "busy": 1, "failed_other": 1, "p50_ms": 12000, "p95_ms": 13000, "max_ms": 13000, "instances": 2, "max_per_instance": 2, "cold": 1}, summary)
 
 
 if __name__ == "__main__":
