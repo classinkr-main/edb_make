@@ -193,7 +193,145 @@ class TestRunControl(unittest.TestCase):
 
         self.assertEqual("social", captured.get("subject"))
         self.assertEqual("auto", captured.get("ocr_mode"))
-        self.assertEqual(oracle.force_config("gemini-3.6-flash"), captured.get("ai_fallback_config"))
+        self.assertEqual(control.control_force_config("gemini-3.6-flash"), captured.get("ai_fallback_config"))
+
+    def _invalid_page(self) -> dict:
+        return {
+            "attempted": True,
+            "applied": False,
+            "changed": False,
+            "status": "invalid_response",
+            "error": "problem start and choice block ids overlap",
+            "blocks_changed": 0,
+            "problems_regrouped": False,
+            "titles_changed": 0,
+            "boxes_overridden": 0,
+            "problem_metadata_changed": 0,
+            "baseline_block_count": 6,
+            "baseline_problem_count": 4,
+        }
+
+    def _applied_page(self) -> dict:
+        return {
+            "attempted": True,
+            "applied": True,
+            "changed": True,
+            "status": "applied",
+            "model_used": "gemini-3.1-pro-preview",
+            "blocks_changed": 0,
+            "problems_regrouped": False,
+            "titles_changed": 5,
+            "boxes_overridden": 0,
+            "problem_metadata_changed": 0,
+            "baseline_block_count": 6,
+            "baseline_problem_count": 4,
+        }
+
+    def test_retries_until_a_response_validates_and_saves_that_attempt(self):
+        # The reason --attempts exists: the same command on the same input
+        # produced `applied` on some runs and `invalid_response` on others,
+        # so a single run is not a repeatable experiment. Without the loop,
+        # a reader following the documented command sees a failure and has
+        # no way to reach the positive.
+        invalid, applied = self._invalid_page(), self._applied_page()
+        results = [self._fake_result([invalid]), self._fake_result([invalid]), self._fake_result([applied])]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "control-case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            buffer = io.StringIO()
+            with patch.object(control, "parse_problems", side_effect=results) as parse_mock, \
+                    contextlib.redirect_stdout(buffer):
+                result = control.run_control(pdf_path, "math", root=root, attempts=5)
+            saved = json.loads((root / "oracle" / "control-case.json").read_text(encoding="utf-8"))
+
+        # Stops at the first validated response rather than spending the
+        # whole budget, and the observation saved is that attempt's -- not
+        # the last invalid one.
+        self.assertEqual(3, parse_mock.call_count)
+        self.assertEqual([applied], result["pages"])
+        self.assertEqual([applied], saved["oracle"]["page_repair_pages"])
+        self.assertEqual(1, saved["oracle"]["page_repair"]["pages_applied"])
+        # How many tries that positive took is part of the evidence.
+        self.assertEqual([1, 2, 3], [entry["attempt"] for entry in saved["oracle"]["attempts"]])
+        self.assertEqual(
+            [{"invalid_response": 1}, {"invalid_response": 1}, {"applied": 1}],
+            [entry["statuses"] for entry in saved["oracle"]["attempts"]],
+        )
+        self.assertIn("problem start and choice block ids overlap", saved["oracle"]["attempts"][0]["errors"])
+        self.assertIn("attempt 1/5", buffer.getvalue())
+        self.assertIn("attempt 3/5", buffer.getvalue())
+
+    def test_spends_the_whole_budget_then_saves_the_last_attempt(self):
+        invalid = self._invalid_page()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "control-case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(control, "parse_problems", return_value=self._fake_result([invalid])) as parse_mock, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                control.run_control(pdf_path, "math", root=root, attempts=3)
+            saved = json.loads((root / "oracle" / "control-case.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(3, parse_mock.call_count)
+        # A run that never validated still records a full observation --
+        # "the model answered and was rejected three times" is itself a
+        # result, and must not be silently dropped.
+        self.assertEqual([invalid], saved["oracle"]["page_repair_pages"])
+        self.assertEqual(3, len(saved["oracle"]["attempts"]))
+        self.assertEqual({}, saved["oracle"]["repair_payloads"])
+
+    def test_default_is_a_single_attempt(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "control-case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(control, "parse_problems", return_value=self._fake_result([self._invalid_page()])) as parse_mock, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                control.run_control(pdf_path, "math", root=root)
+        self.assertEqual(1, parse_mock.call_count)
+
+    def test_saves_the_raw_validated_payload_before_the_scratch_dir_is_deleted(self):
+        # page_repair.py writes the raw answer into the parse scratch
+        # directory; common.parse_in_scratch would delete that directory on
+        # the way out, taking the only on-disk copy with it. This asserts
+        # the harvest happens inside that directory's lifetime.
+        payload = {
+            "problem_start_block_ids": ["control-page-001-block-001"],
+            "choice_block_ids": ["control-page-001-block-002"],
+            "figure_block_ids": [],
+            "display_titles": [{"block_id": "control-page-001-block-001", "title": "1."}],
+            "notes": [],
+        }
+        applied = self._applied_page()
+
+        def parser(source, *, work_dir, **kwargs):
+            ai_debug = Path(work_dir) / ".pipeline_cache" / "ai_debug"
+            ai_debug.mkdir(parents=True, exist_ok=True)
+            (ai_debug / "control-page-001_repair.json").write_text(
+                json.dumps({"summary": {"status": "applied"}, "repair_payload": payload}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            return self._fake_result([applied])
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "control-case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(control, "parse_problems", side_effect=parser), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                result = control.run_control(pdf_path, "math", root=root)
+            saved = json.loads((root / "oracle" / "control-case.json").read_text(encoding="utf-8"))
+
+        self.assertEqual({"control-page-001": payload}, result["payloads"])
+        self.assertEqual({"control-page-001": payload}, saved["oracle"]["repair_payloads"])
+        # The specific question the counters alone cannot answer: which
+        # titles the model sent, so they can be compared with what the
+        # baseline was using.
+        self.assertEqual(
+            [{"block_id": "control-page-001-block-001", "title": "1."}],
+            saved["oracle"]["repair_payloads"]["control-page-001"]["display_titles"],
+        )
 
     def test_saves_a_failure_record_and_reraises_when_parsing_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -213,6 +351,62 @@ class TestRunControl(unittest.TestCase):
         # same guarantee oracle.oracle_case gives (see
         # test_a_failed_case_does_not_clobber_its_previous_successful_observation).
         self.assertFalse((root / "oracle" / "control-case.json").is_file())
+
+
+class TestControlForceConfig(unittest.TestCase):
+    def test_adds_save_debug_on_top_of_the_corpus_oracle_config(self):
+        # save_debug is the only thing that ever writes the raw model answer
+        # (problem_start_block_ids / display_titles / ...) to disk; without
+        # it the control's counters can only be re-checked by paying for
+        # another non-deterministic Gemini call.
+        self.assertEqual({**oracle.force_config("m"), "save_debug": True}, control.control_force_config("m"))
+        self.assertTrue(control.control_force_config()["save_debug"])
+
+    def test_leaves_the_corpus_oracle_config_untouched(self):
+        # The corpus oracle runs over real exam pages and its debug artifact
+        # would contain their raw text; this knob is control-only.
+        self.assertFalse(oracle.force_config().get("save_debug", False))
+
+
+class TestCollectRepairPayloads(unittest.TestCase):
+    def _write_debug(self, ai_debug: Path, page_id: str, payload) -> None:
+        ai_debug.mkdir(parents=True, exist_ok=True)
+        (ai_debug / f"{page_id}_repair.json").write_text(
+            json.dumps({"summary": {"status": "applied"}, "repair_payload": payload}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def test_returns_the_raw_payload_keyed_by_page_id(self):
+        payload = {
+            "problem_start_block_ids": ["page-001-block-001"],
+            "choice_block_ids": [],
+            "figure_block_ids": [],
+            "display_titles": [{"block_id": "page-001-block-001", "title": "1."}],
+            "notes": [],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scratch = Path(temp_dir)
+            self._write_debug(scratch / "work" / ".pipeline_cache" / "ai_debug", "case-page-001", payload)
+            self.assertEqual({"case-page-001": payload}, control.collect_repair_payloads(scratch))
+
+    def test_ignores_files_outside_ai_debug_and_unreadable_records(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scratch = Path(temp_dir)
+            # A same-named file somewhere else in the scratch tree must not
+            # be mistaken for a repair artifact.
+            decoy = scratch / "work" / "elsewhere"
+            decoy.mkdir(parents=True)
+            (decoy / "case-page-002_repair.json").write_text('{"repair_payload": {"x": 1}}', encoding="utf-8")
+            ai_debug = scratch / "work" / ".pipeline_cache" / "ai_debug"
+            ai_debug.mkdir(parents=True)
+            (ai_debug / "broken-page-001_repair.json").write_text("not json at all", encoding="utf-8")
+            self._write_debug(ai_debug, "good-page-001", {"display_titles": []})
+
+            self.assertEqual({"good-page-001": {"display_titles": []}}, control.collect_repair_payloads(scratch))
+
+    def test_no_artifacts_is_an_empty_mapping_not_an_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.assertEqual({}, control.collect_repair_payloads(Path(temp_dir)))
 
 
 class TestMain(unittest.TestCase):
@@ -281,6 +475,39 @@ class TestMain(unittest.TestCase):
         # shown blocks_changed=0/titles_changed=6, not a blank or mislabeled
         # row, had this table existed when that run happened.
         self.assertIn("| 0 | applied | 6 | 4 | True | 0 | False | 6 | 0 | 0 |", output)
+
+    def test_attempts_is_forwarded_to_run_control(self):
+        fake_result = {
+            "observation": {"oracle": {"page_repair": oracle.summarize_page_repair([])}},
+            "pages": [],
+            "payloads": {},
+            "attempts": [{"attempt": 1, "statuses": {"invalid_response": 1}, "pages_applied": 0, "pages_changed": 0, "errors": []}],
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            source = _write_pdf(Path(temp_dir) / "source.pdf", page_count=1)
+            runtime_dir = Path(temp_dir) / "runtime"
+            runtime_dir.mkdir()
+            buffer = io.StringIO()
+            with patch.object(control, "BENCH_ROOT", root), \
+                    patch.object(control, "run_control", return_value=fake_result) as run_mock, \
+                    patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}), \
+                    contextlib.redirect_stdout(buffer):
+                exit_code = control.main(
+                    [
+                        "run",
+                        "--runtime-dir", str(runtime_dir),
+                        "--source", str(source),
+                        "--page", "0",
+                        "--subject", "math",
+                        "--attempts", "6",
+                    ]
+                )
+        self.assertEqual(0, exit_code)
+        self.assertEqual(6, run_mock.call_args.kwargs["attempts"])
+        # A run that produced no validated payload must say so rather than
+        # leaving the reader to assume one was recorded.
+        self.assertIn("no validated repair payload this run", buffer.getvalue())
 
     def test_build_writes_under_control_inputs_never_corpus_inputs(self):
         with tempfile.TemporaryDirectory() as temp_dir:

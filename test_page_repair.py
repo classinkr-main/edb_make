@@ -664,6 +664,93 @@ class TestPageRepairConfig(unittest.TestCase):
         self.assertGreater(summary["problem_metadata_changed"], 0)
         self.assertTrue(summary["changed"])
 
+    def _repaired_with(self, page, prepared_page, payload):
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}):
+            with patch.object(
+                page_repair,
+                "_request_ai_repair_with_model_fallback",
+                return_value=(payload, "response-1", "gemini-3.1-pro-preview", [], {}),
+            ):
+                return repair_page_model(
+                    prepared_page,
+                    page,
+                    ocr_mode="gemini",
+                    config=build_ai_fallback_config(mode="force"),
+                    cache=_EmptyCache(),
+                )
+
+    def test_titles_changed_counts_a_display_title_that_only_echoes_the_block_text(self):
+        # The limit of what titles_changed can prove on a page whose baseline
+        # carries no display_title -- i.e. any page the local text-marker
+        # segmenter could not read, which is exactly what the bench's
+        # image-only control (scripts/trial_bench/control.py) is.
+        # _classification_state reads block.metadata["display_title"], which
+        # on such a page is never set (segment.py writes it only in its
+        # pdf-text-layer segmenters: _segment_pdf_example_markers,
+        # _build_pdf_passage_range_blocks, _segment_pdf_problem_markers).
+        # So the baseline slot is None for every block, and _count_changed_blocks
+        # counts any non-empty title the model supplies -- even one that
+        # echoes, verbatim, the text assemble_page._problem_title_source was
+        # already using for that block. Here the resulting ProblemUnit titles
+        # come out byte-identical to the baseline's and titles_changed is
+        # still 2: "a counter moved" is not "the model disagreed".
+        prepared_page, page = self._two_numbered_blocks_page()
+        _, baseline_page = self._two_numbered_blocks_page()
+        baseline_titles = [problem.title for problem in page_repair.group_problem_units(baseline_page).problems]
+        payload = {
+            "problem_start_block_ids": ["block-0", "block-1"],
+            "choice_block_ids": [],
+            "figure_block_ids": [],
+            # Each block's own text, verbatim.
+            "display_titles": [
+                {"block_id": "block-0", "title": "1. 문제"},
+                {"block_id": "block-1", "title": "2. 문제"},
+            ],
+            "notes": [],
+        }
+
+        repaired = self._repaired_with(page, prepared_page, payload)
+
+        summary = repaired.metadata["ai_fallback"]
+        self.assertEqual("applied", summary["status"])
+        self.assertEqual(["문제", "문제"], baseline_titles)
+        self.assertEqual(baseline_titles, [problem.title for problem in repaired.problems])
+        self.assertEqual(0, summary["blocks_changed"])
+        self.assertFalse(summary["problems_regrouped"])
+        self.assertEqual(0, summary["boxes_overridden"])
+        self.assertEqual(0, summary["problem_metadata_changed"])
+        # Two block-level slots moved from None; the two problem titles did not.
+        self.assertEqual(2, summary["titles_changed"])
+        self.assertTrue(summary["changed"])
+
+    def test_titles_changed_stays_zero_when_the_baseline_already_carries_that_title(self):
+        # The contrast case, and why the corpus's repair_changed=0 cannot be
+        # read as "the model sent no titles". Every corpus page has a text
+        # layer, so segment.py's _segment_pdf_problem_markers gives each
+        # marker block a display_title ("1.", "2.", ...) before repair runs.
+        # An answer echoing those back is scored as no change at all -- the
+        # same answer that counts as 5 changes on the image-only control.
+        prepared_page, page = self._two_numbered_blocks_page()
+        for index, block in enumerate(page.blocks):
+            block.metadata["display_title"] = f"{index + 1}."
+        payload = {
+            "problem_start_block_ids": ["block-0", "block-1"],
+            "choice_block_ids": [],
+            "figure_block_ids": [],
+            "display_titles": [
+                {"block_id": "block-0", "title": "1."},
+                {"block_id": "block-1", "title": "2."},
+            ],
+            "notes": [],
+        }
+
+        repaired = self._repaired_with(page, prepared_page, payload)
+
+        summary = repaired.metadata["ai_fallback"]
+        self.assertEqual("applied", summary["status"])
+        self.assertEqual(0, summary["titles_changed"])
+        self.assertFalse(summary["changed"])
+
     def test_a_page_repair_that_never_ran_defaults_every_change_counter_to_zero(self):
         # The false positive this instrumentation exists to prevent: a run
         # with no GEMINI_API_KEY at all must not report AI evidence. Nothing

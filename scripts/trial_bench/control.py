@@ -22,7 +22,16 @@ Usage:
   .venv/bin/python scripts/trial_bench/control.py run \\
       --runtime-dir /Users/clmagi/Desktop/Projects/edb_mak/.app_runtime \\
       --source ~/edb-trial-bench/inputs/social_saengwoon_2020suneung_20191015.pdf \\
-      --page 0 --subject social
+      --page 0 --subject social --attempts 6
+
+A single ``run`` is not a repeatable experiment: a live response has to pass
+``page_repair._validate_repair_payload`` before the diff runs at all, and on
+the math control page it often does not (``problem start and choice block ids
+overlap``), so the same command produces a positive on some runs and
+``invalid_response`` on others. ``--attempts N`` keeps trying until one
+response validates and records every attempt's status, and the raw validated
+payload is saved next to the counters (``oracle.repair_payloads``) so the
+recorded positive stays checkable without paying for another call.
 
 The control input is never a corpus case: ``main()`` always computes
 ``control_root = bench_dir(CONTROL_DIR, BENCH_ROOT)`` (``~/edb-trial-bench/control/``
@@ -48,7 +57,9 @@ contrast.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -61,7 +72,7 @@ import fitz  # noqa: E402
 
 from problem_parser import parse_problems  # noqa: E402
 from scripts.trial_bench import oracle  # noqa: E402
-from scripts.trial_bench.common import BENCH_ROOT, bench_dir, case_id, markdown_table, observation_from_result, parse_in_scratch, save_json  # noqa: E402
+from scripts.trial_bench.common import BENCH_ROOT, MAX_PAGES, bench_dir, case_id, markdown_table, observation_from_result, save_json  # noqa: E402
 from user_settings import apply_to_env, load_user_settings  # noqa: E402
 
 CONTROL_DIR = "control"
@@ -123,6 +134,93 @@ def build_control_pdf(
     return target
 
 
+def control_force_config(model: str = "") -> dict[str, Any]:
+    """``oracle.force_config`` plus one control-only key: ``save_debug=True``.
+
+    ``save_debug`` makes page_repair.py's ``_maybe_write_debug_artifacts``
+    write ``{"summary": ..., "repair_payload": ...}`` for every page whose
+    response passed ``_validate_repair_payload``, which is the only place the
+    *raw* model answer (``problem_start_block_ids`` / ``choice_block_ids`` /
+    ``figure_block_ids`` / ``display_titles`` / ``notes``) is ever written
+    down -- the per-page ``ai_fallback`` summary keeps only the counters
+    derived from it. Without it, "which titles did the model actually send,
+    and did they differ from the baseline?" can only be answered by paying
+    for another non-deterministic Gemini call, which is exactly what made the
+    first recorded positive un-recheckable.
+
+    Deliberately NOT added to ``oracle.force_config`` itself: that config is
+    the corpus oracle's, it runs over real exam pages, and the debug artifact
+    contains raw exam text. ``_parse_control`` harvests these into the
+    control observation under ``<control-root>/`` -- outside the repository,
+    never committed, same as every other bench artifact.
+    """
+    return {**oracle.force_config(model), "save_debug": True}
+
+
+REPAIR_DEBUG_SUFFIX = "_repair.json"
+
+
+def collect_repair_payloads(scratch_dir: Path) -> dict[str, Any]:
+    """Harvest the raw validated repair payloads under ``scratch_dir``.
+
+    page_repair.py's ``_maybe_write_debug_artifacts`` writes one
+    ``<page_id>_repair.json`` per applied page into
+    ``<source>/.pipeline_cache/ai_debug/``, which for a bench run lives inside
+    the throwaway parse directory. Returns ``{page_id: repair_payload}``; the
+    surrounding ``summary`` is dropped because the observation already
+    carries it as ``oracle.page_repair_pages``.
+
+    Only *validated* responses have a file at all: ``repair_page_model``
+    returns at its ``invalid_response`` branch long before
+    ``_maybe_write_debug_artifacts`` runs, so a rejected answer leaves
+    nothing here and is visible only as that page's ``status``/``error``.
+    """
+    payloads: dict[str, Any] = {}
+    for path in sorted(scratch_dir.rglob("*" + REPAIR_DEBUG_SUFFIX)):
+        if path.parent.name != "ai_debug":
+            continue
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        payload = record.get("repair_payload") if isinstance(record, dict) else None
+        if isinstance(payload, dict):
+            payloads[path.name[: -len(REPAIR_DEBUG_SUFFIX)]] = payload
+    return payloads
+
+
+def _parse_control(
+    control_pdf: Path,
+    subject: str,
+    *,
+    ocr_mode: str,
+    config: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    """``common.parse_in_scratch`` with the scratch directory kept open long
+    enough to harvest the debug payloads out of it.
+
+    Same reason for the copy as parse_in_scratch's: a ``.pipeline_cache``
+    next to the real input would make second runs unrealistically fast. The
+    difference is that ``parse_in_scratch`` deletes its temp dir on the way
+    out of the ``with`` block, taking the one on-disk copy of the raw model
+    answer with it -- so this reimplements the same two lines rather than
+    wrapping it.
+    """
+    with tempfile.TemporaryDirectory(prefix="trial-bench-control-run-") as temp_dir:
+        scratch = Path(temp_dir)
+        copied = scratch / control_pdf.name
+        shutil.copyfile(control_pdf, copied)
+        result = parse_problems(
+            copied,
+            work_dir=scratch / "work",
+            max_pages=MAX_PAGES,
+            subject=subject,
+            ocr_mode=ocr_mode,
+            ai_fallback_config=config,
+        )
+        return result, collect_repair_payloads(scratch)
+
+
 def run_control(
     control_pdf: Path,
     subject: str,
@@ -130,6 +228,7 @@ def run_control(
     ocr_mode: str = "auto",
     model: str = "",
     root: Path,
+    attempts: int = 1,
 ) -> dict[str, Any]:
     """Run the same forced-Gemini oracle path as oracle.oracle_case over one
     control input, and return both the saved observation and the raw
@@ -138,9 +237,28 @@ def run_control(
     ``baseline_problem_count``, merged into each page's summary) so the
     caller can print which counter fired, not just the case-level aggregate.
     The same per-page list is also saved into the observation (as
-    ``oracle.page_repair_pages``), so this is the one artifact on disk that
-    still carries those counters after the process exits -- re-deriving them
-    otherwise would need a fresh, paid, non-deterministic Gemini call.
+    ``oracle.page_repair_pages``), together with the raw validated payload
+    (``oracle.repair_payloads``) and one record per attempt
+    (``oracle.attempts``), so this is the one artifact on disk that still
+    carries them after the process exits -- re-deriving them otherwise would
+    need a fresh, paid, non-deterministic Gemini call.
+
+    ``attempts`` is why this loop exists at all. The same command on the same
+    input is *not* reliably reproducible: the model's answer has to survive
+    ``_validate_repair_payload`` (non-overlapping id sets, reading order),
+    and on the math control page it does so only some of the time -- the
+    rest come back ``invalid_response``, which is a real observation but not
+    a positive control. Each attempt is one full parse (one Gemini OCR pass
+    plus one repair call); the loop stops at the first attempt with an
+    applied page, and if none applies, the last attempt's observation is the
+    one saved. Every attempt's statuses are recorded either way, so the
+    saved artifact shows how many tries that positive took.
+
+    A raised exception is not retried: ``force_config``'s
+    ``fail_on_error=True`` turns transport/parse failures into exceptions,
+    and those are recorded in ``oracle_failures/`` exactly as oracle_case
+    records them. Only a *validation* rejection (which never raises) is an
+    attempt worth spending again.
 
     Deliberately not a call to ``oracle.oracle_case`` followed by a second
     call to get at ``result.page_repair``: that would run the (paid,
@@ -153,28 +271,49 @@ def run_control(
     corpus's own ground truth.
     """
     case = control_pdf.stem
-    try:
-        result = parse_in_scratch(
-            control_pdf,
-            parse_problems,
-            subject=subject,
-            ocr_mode=ocr_mode,
-            ai_fallback_config=oracle.force_config(model),
+    config = control_force_config(model)
+    budget = max(1, int(attempts))
+    attempt_records: list[dict[str, Any]] = []
+    last: tuple[Any, list[dict[str, Any]], dict[str, Any]] | None = None
+    for attempt_index in range(1, budget + 1):
+        try:
+            result, payloads = _parse_control(control_pdf, subject, ocr_mode=ocr_mode, config=config)
+        except Exception as exc:
+            failure = {
+                "case": case,
+                "attempt": attempt_index,
+                "error": str(exc),
+                "oracle": {
+                    "ocr_mode": ocr_mode,
+                    "model": model or "default",
+                    "ai_mode": "force",
+                    "page_repair": oracle._failed_page_repair_summary(exc),
+                },
+            }
+            save_json(bench_dir(oracle.FAILURE_DIR, root) / f"{case}.json", failure)
+            raise
+        pages = [dict(entry) for entry in result.page_repair]
+        summary = oracle.summarize_page_repair(result.page_repair)
+        attempt_records.append(
+            {
+                "attempt": attempt_index,
+                "statuses": dict(summary["statuses"]),
+                "pages_applied": summary["pages_applied"],
+                "pages_changed": summary["pages_changed"],
+                "errors": [str(entry.get("error") or "") for entry in summary["errors"]],
+            }
         )
-    except Exception as exc:
-        failure = {
-            "case": case,
-            "error": str(exc),
-            "oracle": {
-                "ocr_mode": ocr_mode,
-                "model": model or "default",
-                "ai_mode": "force",
-                "page_repair": oracle._failed_page_repair_summary(exc),
-            },
-        }
-        save_json(bench_dir(oracle.FAILURE_DIR, root) / f"{case}.json", failure)
-        raise
-    pages = [dict(entry) for entry in result.page_repair]
+        print(
+            f"attempt {attempt_index}/{budget}: "
+            f"statuses={summary['statuses']} applied={summary['pages_applied']}/{summary['pages_total']} "
+            f"changed={summary['pages_changed']}/{summary['pages_total']}"
+        )
+        last = (result, pages, payloads)
+        if summary["pages_applied"]:
+            break
+
+    assert last is not None  # the loop body always runs at least once
+    result, pages, payloads = last
     observation = observation_from_result(case, result, crops_dir=bench_dir("oracle_crops", root) / case)
     observation["oracle"] = {
         "ocr_mode": ocr_mode,
@@ -182,9 +321,18 @@ def run_control(
         "ai_mode": "force",
         "page_repair": oracle.summarize_page_repair(result.page_repair),
         "page_repair_pages": pages,
+        "attempts": attempt_records,
+        # Raw model output, i.e. raw exam text: control root only, never the
+        # repository -- see control_force_config.
+        "repair_payloads": payloads,
     }
     save_json(bench_dir("oracle", root) / f"{case}.json", observation)
-    return {"observation": observation, "pages": pages}
+    return {
+        "observation": observation,
+        "pages": pages,
+        "payloads": payloads,
+        "attempts": attempt_records,
+    }
 
 
 def _page_rows(pages: list[dict[str, Any]]) -> list[list[Any]]:
@@ -234,6 +382,16 @@ def main(argv: list[str] | None = None) -> int:
     run_parser.add_argument("--model", default="", help="empty = pipeline default repair model")
     run_parser.add_argument("--ocr-mode", default="auto")
     run_parser.add_argument("--name", default=None)
+    run_parser.add_argument(
+        "--attempts",
+        type=int,
+        default=1,
+        help=(
+            "how many times to run the page before giving up on getting a validated response; "
+            "stops at the first attempt with an applied page. Each attempt is a fresh, paid Gemini "
+            "call, and every attempt's statuses are saved into the observation."
+        ),
+    )
 
     args = parser.parse_args(argv)
     control_root = bench_dir(CONTROL_DIR, BENCH_ROOT)
@@ -251,7 +409,14 @@ def main(argv: list[str] | None = None) -> int:
     control_pdf = build_control_pdf(args.source, args.page, dpi=args.dpi, root=control_root, name=args.name)
     print(f"control input: {control_pdf}")
     try:
-        result = run_control(control_pdf, args.subject, ocr_mode=args.ocr_mode, model=args.model, root=control_root)
+        result = run_control(
+            control_pdf,
+            args.subject,
+            ocr_mode=args.ocr_mode,
+            model=args.model,
+            root=control_root,
+            attempts=args.attempts,
+        )
     except Exception as exc:
         print(f"control.py: oracle run failed -- {exc}", file=sys.stderr)
         return 1
@@ -284,6 +449,19 @@ def main(argv: list[str] | None = None) -> int:
             _page_rows(result["pages"]),
         )
     )
+    print()
+    saved = bench_dir("oracle", control_root) / f"{control_pdf.stem}.json"
+    payloads = result.get("payloads") or {}
+    attempts = result.get("attempts") or []
+    print(f"attempts: {len(attempts)} (statuses per attempt are saved as oracle.attempts)")
+    if payloads:
+        # The raw validated answer, the only copy of it that outlives this
+        # process: without this the counter table above can never be
+        # re-checked against what the model actually sent.
+        print(f"raw validated repair payload saved for page(s): {', '.join(sorted(payloads))}")
+    else:
+        print("no validated repair payload this run (nothing passed _validate_repair_payload)")
+    print(f"observation: {saved}")
     return 0
 
 
