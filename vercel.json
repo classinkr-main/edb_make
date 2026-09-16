@@ -1,6 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "regions": ["icn1"],
+  "rewrites": [
+    { "source": "/demo", "destination": "/demo/index.html" },
+    { "source": "/demo/", "destination": "/demo/index.html" }
+  ],
   "functions": {
     "trial_server.py": {
       "maxDuration": 60,

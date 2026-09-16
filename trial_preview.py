@@ -16,6 +16,10 @@ from problem_parser import ParseResult
 # Vercel caps function response bodies at 4.5 MB; leave room for headers and slack.
 RESPONSE_BUDGET_BYTES = 3_500_000
 
+
+class PreviewBudgetExceeded(ValueError):
+    """Even the smallest preview would exceed the function response budget."""
+
 # Flags that mean the problem boundary itself is uncertain. Desktop review
 # hints such as passage_cross_page_merge_check tag half of a normal Korean
 # exam, so the trial does not badge them.
@@ -71,7 +75,7 @@ def _payload_for_step(
     result: ParseResult,
     step_index: int,
     *,
-    remaining_today: int,
+    remaining_today: int | None,
     elapsed_ms: int,
     processed_page_limit: int,
     extra: dict[str, Any] | None = None,
@@ -120,13 +124,13 @@ def _payload_for_step(
 def build_parse_body(
     result: ParseResult,
     *,
-    remaining_today: int,
+    remaining_today: int | None,
     elapsed_ms: int,
     processed_page_limit: int,
     budget_bytes: int = RESPONSE_BUDGET_BYTES,
     extra: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], bytes]:
-    """Return the first preview step whose compact JSON fits the budget (else the smallest) and that JSON."""
+    """Return the first preview and JSON within budget, or reject an oversized result."""
     payload: dict[str, Any] = {}
     body = b""
     for step_index in range(len(PREVIEW_STEPS)):
@@ -141,13 +145,13 @@ def build_parse_body(
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         if len(body) <= budget_bytes:
             return payload, body
-    return payload, body
+    raise PreviewBudgetExceeded("Smallest preview exceeds the response budget")
 
 
 def build_parse_payload(
     result: ParseResult,
     *,
-    remaining_today: int,
+    remaining_today: int | None,
     elapsed_ms: int,
     processed_page_limit: int,
     budget_bytes: int = RESPONSE_BUDGET_BYTES,

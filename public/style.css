@@ -383,9 +383,6 @@ h2 { margin: 0; font-size: var(--text-2xl); letter-spacing: -0.01em; }
 .problem-card img {
   width: 100%;
   height: auto;
-  max-height: 320px;
-  object-fit: cover;
-  object-position: top;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: #fff;
@@ -445,3 +442,15 @@ h2 { margin: 0; font-size: var(--text-2xl); letter-spacing: -0.01em; }
   .problems { position: static; max-height: none; overflow: visible; }
   .result-foot .text-button--accent { margin-left: 0; }
 }
+
+/* Event demo shares the parser UI; this gate is shown before any upload controls. */
+.demo-gate { max-width: 560px; margin: 64px auto; display: grid; gap: 18px; }
+.demo-gate h1, .demo-gate p { margin: 0; }
+.demo-login { display: grid; gap: 12px; }
+.demo-login label { font-weight: 600; }
+.demo-login input { width: 100%; min-height: 46px; padding: 10px 12px; background: var(--surface); color: var(--ink); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); }
+.demo-login .primary-button { min-height: 46px; }
+.demo-session { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding-block: 18px; border-bottom: 1px solid var(--line); }
+.demo-session p { margin: 0; }
+button:disabled { cursor: wait; opacity: .65; }
+@media (max-width: 480px) { .demo-gate { margin-block: 36px; } }

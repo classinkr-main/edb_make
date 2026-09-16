@@ -20,6 +20,7 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -27,8 +28,9 @@ from starlette.concurrency import run_in_threadpool
 
 from problem_parser import PdfUnreadableError, inspect_pdf, parse_problems, parser_version
 from trial_config import TrialConfig
+from trial_demo import COOKIE_NAME
 from trial_input import REJECTIONS, TrialRejected, check_pdf_info, check_upload_head, reject
-from trial_preview import build_parse_body
+from trial_preview import PreviewBudgetExceeded, build_parse_body
 from trial_quota import MemoryQuotaStore, QuotaUnavailable, SupabaseQuotaStore, SupabaseRest, hash_ip, kst_day
 from trial_turnstile import TurnstileUnavailable, verify_turnstile
 
@@ -132,6 +134,9 @@ def create_app(
     verify = verifier if verifier is not None else _default_verifier(config)
     parse_slots = threading.BoundedSemaphore(config.parse_concurrency)
     event_limiter = _EventRateLimiter(EVENT_RATE_PER_MINUTE)
+    login_limiter = _EventRateLimiter(5)
+    login_total_limiter = _EventRateLimiter(30)
+    login_slots = threading.BoundedSemaphore(2)
     salt = config.ip_salt or DEV_IP_SALT
 
     def ready() -> bool:
@@ -157,7 +162,7 @@ def create_app(
         return True
 
     def parse_and_encode(
-        source: Path, work_dir: Path, remaining_today: int, started_at: float
+        source: Path, work_dir: Path, remaining_today: int | None, started_at: float, demo_mode: bool = False
     ) -> tuple[bytes, dict[str, int], dict[str, int]]:
         parse_started_at = time.perf_counter()
         try:
@@ -173,11 +178,14 @@ def create_app(
                     "timing_ms": dict(timing),
                     "instance_id": INSTANCE_ID,
                     "instance_age_s": round(time.time() - INSTANCE_STARTED_AT, 1),
+                    **({"mode": "demo"} if demo_mode else {}),
                 },
             )
             # encode is measured after the body exists, so the response cannot include it; the event does.
             timing["encode"] = _ms(encode_started_at)
             timing["parse_total"] = _ms(parse_started_at)
+        except PreviewBudgetExceeded as error:
+            raise reject("page_too_complex", "response_budget") from error
         except Exception as error:
             logger.exception("trial parse failed")
             raise reject("parse_failed") from error
@@ -212,6 +220,98 @@ def create_app(
             headers=NO_STORE,
         )
 
+    def demo_error(code: str, *, status: int | None = None) -> JSONResponse:
+        rejection = REJECTIONS[code]
+        return JSONResponse(rejection.payload(), status_code=status or rejection.status, headers=NO_STORE)
+
+    def demo_request_is_same_origin(request: Request) -> bool:
+        # The custom header prevents cross-origin form submissions, including
+        # requests without Origin. No cross-origin preflight is permitted.
+        if request.headers.get("x-demo-request") != "1":
+            return False
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return False
+        origin = request.headers.get("origin")
+        if origin:
+            try:
+                parsed = urlsplit(origin)
+            except ValueError:
+                return False
+            scheme = "https" if config.production else request.url.scheme
+            return parsed.scheme == scheme and parsed.netloc == request.url.netloc and parsed.path in ("", "/")
+        return True
+
+    def demo_authenticated(request: Request) -> bool:
+        return config.demo.session_valid(request.cookies.get(COOKIE_NAME), now())
+
+    @app.get("/api/demo/config")
+    async def demo_config(request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "inquiry_url": config.inquiry_url,
+                "turnstile_site_key": None,
+                "max_bytes": config.limits.max_bytes,
+                "max_pages": config.limits.max_pages,
+                "daily_limit": None,
+                "mode": "demo",
+                "active": config.demo.is_active(now()),
+                "authenticated": demo_authenticated(request),
+                "ends_at": config.demo.ends_at.isoformat() if config.demo.ends_at else None,
+            },
+            headers=NO_STORE,
+        )
+
+    @app.post("/api/demo/login")
+    async def demo_login(request: Request) -> Response:
+        if not demo_request_is_same_origin(request):
+            return demo_error("demo_unavailable")
+        if not config.demo.is_active(now()):
+            return demo_error("demo_unavailable")
+        ip = client_ip(request)
+        instant = time.monotonic()
+        if not login_limiter.allow(ip, instant) or not login_total_limiter.allow("login", instant):
+            return JSONResponse(
+                {"error": {"code": "demo_login_limited", "message": "잠시 후 비밀번호를 다시 입력해 주세요."}},
+                status_code=429, headers={**NO_STORE, "Retry-After": "60"},
+            )
+        try:
+            data = json.loads(await _read_limited(request, 4096))
+        except (TrialRejected, ValueError):
+            return demo_error("demo_auth_required")
+        password = data.get("password") if isinstance(data, dict) else None
+        if not isinstance(password, str) or len(password) > 1024:
+            return demo_error("demo_auth_required")
+        if not login_slots.acquire(blocking=False):
+            return demo_error("busy")
+        try:
+            valid = await run_in_threadpool(config.demo.verify_password, password)
+        finally:
+            login_slots.release()
+        if not valid:
+            return demo_error("demo_auth_required")
+        instant_now = now()
+        # Recheck after password verification so no session is minted at expiry.
+        if not config.demo.is_active(instant_now):
+            return demo_error("demo_unavailable")
+        response = JSONResponse(
+            {"authenticated": True, "ends_at": config.demo.ends_at.isoformat()}, headers=NO_STORE,
+        )
+        response.set_cookie(
+            COOKIE_NAME, config.demo.issue_session(instant_now),
+            max_age=max(0, int((config.demo.ends_at - instant_now).total_seconds())),
+            expires=config.demo.ends_at.astimezone(timezone.utc),
+            path="/", secure=config.production or request.url.scheme == "https", httponly=True, samesite="strict",
+        )
+        return response
+
+    @app.post("/api/demo/logout")
+    async def demo_logout(request: Request) -> Response:
+        if not demo_request_is_same_origin(request):
+            return demo_error("demo_unavailable")
+        response = Response(status_code=204, headers=NO_STORE)
+        response.delete_cookie(COOKIE_NAME, path="/", secure=config.production or request.url.scheme == "https", httponly=True, samesite="strict")
+        return response
+
     @app.get("/api/health")
     async def health() -> JSONResponse:
         return JSONResponse(
@@ -225,8 +325,7 @@ def create_app(
             headers=NO_STORE,
         )
 
-    @app.post("/api/parse")
-    async def parse(request: Request) -> Response:
+    async def parse_request(request: Request, *, demo_mode: bool = False) -> Response:
         started_at = time.perf_counter()
         request_id = str(uuid.uuid4())
         ip = client_ip(request)
@@ -249,11 +348,16 @@ def create_app(
             "complexity": None,
         }
         try:
-            if not ready():
+            if demo_mode:
+                if not demo_request_is_same_origin(request):
+                    raise reject("demo_unavailable")
+                if not demo_authenticated(request):
+                    raise reject("demo_auth_required")
+            elif not ready():
                 raise reject("busy", "not_ready")
             body = await _read_limited(request, config.limits.max_bytes)
             event["bytes"] = len(body)
-            if verify is not None:
+            if verify is not None and not demo_mode:
                 try:
                     outcome = await run_in_threadpool(verify, request.headers.get("x-turnstile-token"), ip)
                 except TurnstileUnavailable as error:
@@ -265,43 +369,30 @@ def create_app(
             with tempfile.TemporaryDirectory(prefix="trial-") as temp_dir:
                 source = Path(temp_dir) / "upload.pdf"
                 source.write_bytes(body)
-                try:
-                    info = await run_in_threadpool(inspector, source, max_pages=config.limits.max_pages)
-                except PdfUnreadableError as error:
-                    raise reject("unreadable_pdf") from error
-                event["source_pages"] = info.page_count
-                event["complexity"] = {"words": info.max_words_per_page, "drawings": info.max_drawings_per_page}
-                check_pdf_info(info, config.limits)
-                # Take a parse slot before charging, so a request that only waits and
-                # then times out never counts against anyone's daily limit.
+                # Inspection also interprets PDF content and can inflate streams, so
+                # bound it with the same slot as parsing. Waiting and invalid input
+                # still never count against anyone's daily limit.
                 if not await acquire_parse_slot():
                     raise reject("busy", "slot_wait")
                 try:
                     try:
-                        decision = await run_in_threadpool(
-                            lambda: store.consume(
-                                request_id=request_id,
-                                day=today,
-                                subject=subject,
-                                limit=config.daily_limit,
-                                global_limit=config.global_daily_limit,
-                            )
+                        info = await run_in_threadpool(inspector, source, max_pages=config.limits.max_pages)
+                    except PdfUnreadableError as error:
+                        raise reject("unreadable_pdf") from error
+                    event["source_pages"] = info.page_count
+                    event["complexity"] = {"words": info.max_words_per_page, "drawings": info.max_drawings_per_page}
+                    check_pdf_info(info, config.limits)
+                    if demo_mode:
+                        # Queued uploads must not start after the event expires.
+                        if not demo_authenticated(request):
+                            raise reject("demo_auth_required")
+                        body, counts, timing = await run_in_threadpool(
+                            parse_and_encode, source, Path(temp_dir) / "work", None, started_at, True
                         )
-                    except QuotaUnavailable as error:
-                        # The charge may have committed before the reply was lost. Refunds
-                        # are keyed by request id, so undoing an unknown outcome is safe.
-                        logger.warning("quota unavailable: %s", error)
-                        await run_in_threadpool(refund_quietly, request_id)
-                        raise reject("busy", "quota_store") from error
-                    if not decision.allowed:
-                        if decision.reason == "ip":
-                            raise reject("daily_limit")
-                        raise reject("busy", "global_limit")
-                    # From here the use stays charged even if parsing fails: a crashing PDF
-                    # still spent parse CPU, and refunds would let it bypass both caps.
-                    body, counts, timing = await run_in_threadpool(
-                        parse_and_encode, source, Path(temp_dir) / "work", decision.remaining, started_at
-                    )
+                    else:
+                        body, counts, timing = await charge_and_parse(
+                            request_id, today, subject, source, Path(temp_dir) / "work", started_at
+                        )
                 finally:
                     parse_slots.release()
             event.update(status=200, timing=timing, **counts)
@@ -311,10 +402,42 @@ def create_app(
         except Exception:
             logger.exception("trial parse crashed")
             response = rejection_response(REJECTIONS["parse_failed"], event)
+        if demo_mode:
+            event["timing"] = {**(event["timing"] or {}), "demo": True}
         event["elapsed_ms"] = int(round((time.perf_counter() - started_at) * 1000))
         await run_in_threadpool(record_event, event)
         logger.info(json.dumps({"event": "trial_parse", **{k: v for k, v in event.items() if k != "ip_hash"}}))
         return response
+
+    async def charge_and_parse(request_id, today, subject, source, work_dir, started_at):
+        try:
+            decision = await run_in_threadpool(
+                lambda: store.consume(
+                    request_id=request_id, day=today, subject=subject,
+                    limit=config.daily_limit, global_limit=config.global_daily_limit,
+                )
+            )
+        except QuotaUnavailable as error:
+            # Consumption may have committed before its reply was lost.
+            logger.warning("quota unavailable: %s", error)
+            await run_in_threadpool(refund_quietly, request_id)
+            raise reject("busy", "quota_store") from error
+        if not decision.allowed:
+            if decision.reason == "ip":
+                raise reject("daily_limit")
+            raise reject("busy", "global_limit")
+        # CPU was spent even if parsing fails, so keep the charge.
+        return await run_in_threadpool(
+            parse_and_encode, source, work_dir, decision.remaining, started_at
+        )
+
+    @app.post("/api/parse")
+    async def parse(request: Request) -> Response:
+        return await parse_request(request)
+
+    @app.post("/api/demo/parse")
+    async def demo_parse(request: Request) -> Response:
+        return await parse_request(request, demo_mode=True)
 
     @app.post("/api/event")
     async def popup_event(request: Request) -> Response:

@@ -15,6 +15,7 @@ A3_AREA_PT = 841.89 * 1190.55
 MAGIC_SCAN_BYTES = 1024
 
 # Named here so InputLimits and trial_config.from_env cannot drift apart.
+DEFAULT_MAX_PAGES = 4
 DEFAULT_MAX_WORDS_PER_PAGE = 8000
 DEFAULT_MAX_DRAWINGS_PER_PAGE = 10000
 
@@ -55,6 +56,8 @@ REJECTIONS: dict[str, Rejection] = {
         Rejection(429, "daily_limit", "오늘의 무료 체험을 모두 사용했어요.", "limit_daily"),
         Rejection(500, "parse_failed", "이 파일은 처리하지 못했어요.", "ai"),
         Rejection(503, "busy", "지금은 체험이 어려워요. 잠시 후 다시 시도해 주세요."),
+        Rejection(401, "demo_auth_required", "시연 비밀번호를 확인해 주세요."),
+        Rejection(403, "demo_unavailable", "지금은 박람회 시연을 이용할 수 없어요."),
     )
 }
 

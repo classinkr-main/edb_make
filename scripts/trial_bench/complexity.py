@@ -1,4 +1,4 @@
-"""How parse time grows with words and drawings per page (synthetic 3-page PDFs).
+"""How parse time grows with words and drawings per page (synthetic 4-page PDFs).
 
 Usage:
   GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 500 1000 2000 4000 8000 --drawings 0 2000 8000
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from problem_parser import inspect_pdf, parse_problems  # noqa: E402
-from scripts.trial_bench.common import markdown_table, parse_in_scratch  # noqa: E402
+from scripts.trial_bench.common import MAX_PAGES, markdown_table, parse_in_scratch  # noqa: E402
 
 VERCEL_FACTOR = 4.3
 LINE = "이 문장은 복잡도 실험을 위한 채움 글입니다 하나 둘 셋 넷 다섯 여섯 일곱 여덟 아홉 열"  # 14 words
@@ -45,7 +45,7 @@ def line_layout(words_per_page: int) -> tuple[float, float]:
     return pitch, min(MAX_FONTSIZE, pitch * MAX_FONTSIZE / MAX_PITCH)
 
 
-def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, pages: int = 3) -> Path:
+def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, pages: int = MAX_PAGES) -> Path:
     doc = fitz.open()
     pitch, fontsize = line_layout(words_per_page)
     number = 1
@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         for words in args.words:
             for drawings in args.drawings:
                 pdf = write_synthetic(Path(temp_dir) / f"w{words}_d{drawings}.pdf", words_per_page=words, drawings_per_page=drawings)
-                info = inspect_pdf(pdf, max_pages=3)
+                info = inspect_pdf(pdf, max_pages=MAX_PAGES)
                 result = parse_in_scratch(pdf, parse_problems)
                 total = result.timing_ms["total"]
                 rows.append([info.max_words_per_page, info.max_drawings_per_page, result.timing_ms.get("render"), result.timing_ms.get("segment"), result.timing_ms.get("assets"), total, round(total * VERCEL_FACTOR / 1000, 1), len(result.problems)])

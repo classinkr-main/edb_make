@@ -8,9 +8,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping
 
+from trial_demo import DemoConfig
+
 from trial_input import (
     A3_AREA_PT,
     DEFAULT_MAX_DRAWINGS_PER_PAGE,
+    DEFAULT_MAX_PAGES,
     DEFAULT_MAX_WORDS_PER_PAGE,
     InputLimits,
 )
@@ -46,6 +49,7 @@ def _positive_float(env: Mapping[str, str], name: str, default: float) -> float:
 @dataclass(frozen=True)
 class TrialConfig:
     production: bool = False
+    demo: DemoConfig = field(default_factory=DemoConfig)
     inquiry_url: str = DEFAULT_INQUIRY_URL
     turnstile_site_key: str | None = None
     turnstile_secret: str | None = None
@@ -57,14 +61,16 @@ class TrialConfig:
     limits: InputLimits = field(
         default_factory=lambda: InputLimits(
             max_bytes=4_000_000,
-            max_pages=3,
+            max_pages=DEFAULT_MAX_PAGES,
             max_source_pages=100,
             max_page_area_pt=2 * A3_AREA_PT,
         )
     )
     daily_limit: int = 3
     global_daily_limit: int = 500
-    parse_concurrency: int = 2
+    # Four-page science PDFs can peak above 1.3 GiB when two overlap.
+    # Start with one parse per 2 GiB instance; cloud instances can still scale out.
+    parse_concurrency: int = 1
     parse_wait_seconds: float = 20.0
 
     @classmethod
@@ -77,6 +83,7 @@ class TrialConfig:
         )
         return cls(
             production=(env.get("VERCEL_ENV") or "").strip() == "production",
+            demo=DemoConfig.from_env(env),
             inquiry_url=inquiry_url,
             turnstile_site_key=_text(env, "TRIAL_TURNSTILE_SITE_KEY"),
             turnstile_secret=_text(env, "TRIAL_TURNSTILE_SECRET"),
@@ -87,7 +94,7 @@ class TrialConfig:
             expected_hostnames=hostnames,
             limits=InputLimits(
                 max_bytes=_positive_int(env, "TRIAL_MAX_BYTES", 4_000_000),
-                max_pages=_positive_int(env, "TRIAL_MAX_PAGES", 3),
+                max_pages=_positive_int(env, "TRIAL_MAX_PAGES", DEFAULT_MAX_PAGES),
                 max_source_pages=_positive_int(env, "TRIAL_MAX_SOURCE_PAGES", 100),
                 max_page_area_pt=2 * A3_AREA_PT,
                 max_words_per_page=_positive_int(env, "TRIAL_MAX_WORDS_PER_PAGE", DEFAULT_MAX_WORDS_PER_PAGE),
@@ -97,7 +104,7 @@ class TrialConfig:
             ),
             daily_limit=_positive_int(env, "TRIAL_DAILY_LIMIT", 3),
             global_daily_limit=_positive_int(env, "TRIAL_GLOBAL_DAILY_LIMIT", 500),
-            parse_concurrency=_positive_int(env, "TRIAL_PARSE_CONCURRENCY", 2),
+            parse_concurrency=_positive_int(env, "TRIAL_PARSE_CONCURRENCY", 1),
             parse_wait_seconds=_positive_float(env, "TRIAL_PARSE_WAIT_SECONDS", 20.0),
         )
 

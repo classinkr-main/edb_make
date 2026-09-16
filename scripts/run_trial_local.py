@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,7 @@ import uvicorn  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 
 from trial_config import TrialConfig  # noqa: E402
+from trial_demo import DemoConfig  # noqa: E402
 from trial_server import create_app  # noqa: E402
 from trial_turnstile import TEST_SECRET_ALWAYS_PASSES, TEST_SITE_KEY_ALWAYS_PASSES  # noqa: E402
 
@@ -44,6 +46,7 @@ def main() -> int:
     args = parser.parse_args()
 
     config = TrialConfig(
+        demo=DemoConfig.from_env(os.environ),
         turnstile_site_key=TEST_SITE_KEY_ALWAYS_PASSES if args.turnstile_test else None,
         turnstile_secret=TEST_SECRET_ALWAYS_PASSES if args.turnstile_test else None,
         daily_limit=args.daily_limit,

@@ -9,7 +9,7 @@ from PIL import Image
 
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from structured_schema import Box
-from trial_preview import PREVIEW_STEPS, build_parse_body, build_parse_payload, encode_jpeg_data_uri
+from trial_preview import PREVIEW_STEPS, PreviewBudgetExceeded, build_parse_body, build_parse_payload, encode_jpeg_data_uri
 
 
 def _noise(width: int, height: int, seed: int) -> Image.Image:
@@ -92,9 +92,17 @@ class TestBuildParsePayload(unittest.TestCase):
         self.assertLessEqual(len(tight_body), len(roomy_body) - 1)
         self.assertEqual(json.dumps(tight, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8"), tight_body)
 
-    def test_uses_last_step_when_nothing_fits(self):
-        payload = build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3, budget_bytes=10)
-        self.assertEqual(len(PREVIEW_STEPS) - 1, payload["preview_step"])
+    def test_rejects_when_even_last_step_exceeds_budget(self):
+        with self.assertRaises(PreviewBudgetExceeded):
+            build_parse_payload(_result(), remaining_today=1, elapsed_ms=1, processed_page_limit=3, budget_bytes=10)
+
+    def test_many_noisy_crops_cannot_escape_the_real_response_budget(self):
+        result = _result(problem_count=1, page_size=(450, 450), problem_size=(450, 450))
+        # Reuse one immutable crop to reproduce a large response without a large
+        # test memory footprint. All 60 entries must still be encoded in the JSON.
+        result.problems.extend([result.problems[0]] * 59)
+        with self.assertRaises(PreviewBudgetExceeded):
+            build_parse_body(result, remaining_today=1, elapsed_ms=1, processed_page_limit=4)
 
     def test_regions_with_non_finite_coordinates_are_dropped(self):
         result = _result()

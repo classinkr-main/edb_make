@@ -306,13 +306,13 @@ class TestParseInScratch(unittest.TestCase):
 
 
 class TestMakeInputs(unittest.TestCase):
-    def test_trims_to_three_pages_and_records_the_case(self):
+    def test_trims_to_four_pages_and_records_the_case(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "bench"
             source = _write_pdf(Path(temp_dir) / "긴 시험지.pdf", page_count=5)
             target = make_input(source, "korean", root=root)
             with fitz.open(target) as trimmed:
-                self.assertEqual(3, trimmed.page_count)
+                self.assertEqual(4, trimmed.page_count)
             cases = json.loads((root / "cases.json").read_text(encoding="utf-8"))
         self.assertEqual({"subject": "korean", "source_page_count": 5, "source_name": "긴 시험지.pdf"}, cases["긴_시험지"])
         self.assertEqual(root / "inputs" / "긴_시험지.pdf", target)
@@ -681,7 +681,7 @@ class TestComplexitySynthetic(unittest.TestCase):
             path = write_synthetic(Path(temp_dir) / "synthetic.pdf", words_per_page=500, drawings_per_page=0)
             all_numbers: list[int] = []
             with fitz.open(path) as doc:
-                self.assertEqual(3, doc.page_count)
+                self.assertEqual(4, doc.page_count)
                 for page in doc:
                     lines = page.get_text("text").splitlines()
                     matches = [number_line.match(line) for line in lines]

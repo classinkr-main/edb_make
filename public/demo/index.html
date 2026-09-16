@@ -3,14 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>문제 파서 무료 체험 · ClassIn EDB</title>
-  <meta name="description" content="시험지 PDF를 올리면 문항과 지문을 나눠 드려요. 설치 없이 무료로 체험해 보세요.">
-  <link rel="preconnect" href="https://challenges.cloudflare.com">
+  <title>문제 파서 행사 시연 · ClassIn EDB</title>
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="description" content="행사 참여자를 위한 문제 파서 시연 페이지입니다.">
   <link rel="stylesheet" href="/style.css">
   <script src="/trial_logic.js" defer></script>
+  <script src="/demo.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
-<body data-trial-mode="public">
+<body data-trial-mode="demo">
   <header class="site-header">
     <div class="site-header__inner">
       <span class="brand">ClassIn EDB <span class="brand__tag">문제 파서</span></span>
@@ -19,9 +20,27 @@
   </header>
 
   <main class="page">
+    <section class="demo-gate" id="demo-gate" aria-labelledby="demo-title">
+      <p class="eyebrow">행사 전용 시연</p>
+      <h1 id="demo-title">문제 파서를 체험해 보세요</h1>
+      <p class="lead">안내받은 비밀번호를 한 번 입력하면 시연 기간 동안 반복해서 이용할 수 있어요.</p>
+      <p class="notice" id="demo-message" role="status">시연 정보를 확인하고 있어요.</p>
+      <form class="demo-login" id="demo-login" hidden>
+        <label for="demo-password">시연 비밀번호</label>
+        <input id="demo-password" name="password" type="password" autocomplete="current-password" required maxlength="256">
+        <button class="primary-button" id="demo-login-button" type="submit">시연 시작하기</button>
+      </form>
+      <button type="button" class="secondary-button" id="demo-config-retry" hidden>다시 확인하기</button>
+      <a class="text-button" href="/">일반 무료 체험으로 이동</a>
+    </section>
+    <div class="demo-session" id="demo-session" hidden>
+      <p id="demo-expiration" class="muted"></p>
+      <button type="button" class="secondary-button" id="demo-logout">시연 종료 · 로그아웃</button>
+    </div>
+    <div id="demo-app" hidden>
     <section class="view view--upload" id="view-upload" aria-labelledby="upload-title">
       <div class="hero">
-        <p class="eyebrow">무료 체험 · 설치 없이</p>
+        <p class="eyebrow">행사 시연 · 설치 없이</p>
         <h1 id="upload-title">시험지를 올리면<br>문항을 나눠 드려요</h1>
         <p class="lead">글자가 들어 있는 PDF(예: 모의고사 원본)를 올려 보세요. 앞 4쪽의 문항과 지문을 바로 찾아 드려요.</p>
       </div>
@@ -30,7 +49,7 @@
         <input id="file-input" class="visually-hidden" type="file" accept="application/pdf,.pdf">
         <span class="dropzone__icon" aria-hidden="true">PDF</span>
         <span class="dropzone__title">PDF를 끌어놓거나 눌러서 고르세요</span>
-        <span class="dropzone__limits" id="limits-text">앞 4쪽 · 4MB · 하루 3회</span>
+        <span class="dropzone__limits" id="limits-text">앞 4쪽 · 4MB · 시연 기간에는 반복 이용 가능</span>
       </label>
 
       <!-- Not id="turnstile": element ids become window globals and would shadow the Turnstile API. -->
@@ -81,13 +100,14 @@
       <div class="result-foot">
         <button type="button" class="secondary-button" id="retry-button">다른 파일 해보기</button>
         <span class="muted" id="remaining-text"></span>
-        <button type="button" class="text-button text-button--accent" data-premium="limit_daily">✦ 프리미엄으로 더 누려보세요 →</button>
+        <button type="button" class="text-button text-button--accent" data-premium="edb">✦ 프리미엄으로 더 누려보세요 →</button>
       </div>
     </section>
+    </div>
   </main>
 
   <footer class="site-footer">
-    <p>접속 IP는 하루 이용 횟수 확인에만 쓰이고, 되돌릴 수 없는 형태로 바꿔 보관해요.</p>
+    <p>시연 기간에는 하루 횟수 제한 없이 이용할 수 있어요. 올린 파일은 처리 후 바로 삭제해요. 이미지 저장·문항 수정·EDB 내보내기는 프리미엄 기능이에요.</p>
   </footer>
 
   <dialog class="premium-dialog" id="premium-dialog" aria-labelledby="premium-title">

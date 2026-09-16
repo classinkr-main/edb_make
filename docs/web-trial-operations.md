@@ -2,7 +2,7 @@
 
 - 대상: `web-trial` 브랜치의 공개 문제 파서 체험판
 - 설계: `docs/superpowers/specs/2026-09-15-problem-parser-web-trial-design.md`
-- 최종 확인일: 2026-09-15 (외부 서비스 설정 화면 이름은 바뀔 수 있다)
+- 최종 확인일: 2026-09-16 (외부 서비스 설정 화면 이름은 바뀔 수 있다)
 
 ## 1. 무엇이 어디서 도는가
 
@@ -64,12 +64,12 @@
 | `TRIAL_HOSTNAMES` | 체험판 도메인, 쉼표로 여러 개 | 권장 (Turnstile 결과의 hostname 확인) |
 | `TRIAL_INQUIRY_URL` | 기본 `https://classin.co.kr/contact` | 아니오 |
 | `TRIAL_DAILY_LIMIT` / `TRIAL_GLOBAL_DAILY_LIMIT` | 기본 3 / 500 | 아니오 |
-| `TRIAL_MAX_BYTES` / `TRIAL_MAX_PAGES` / `TRIAL_MAX_SOURCE_PAGES` | 기본 4000000 / 3 / 100 | 아니오 |
-| `TRIAL_PARSE_CONCURRENCY` / `TRIAL_PARSE_WAIT_SECONDS` | 기본 2 / 20 (인스턴스당) | 아니오 |
-| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 8000 / 10000. 앞 3쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
+| `TRIAL_MAX_BYTES` / `TRIAL_MAX_PAGES` / `TRIAL_MAX_SOURCE_PAGES` | 기본 4000000 / 4 / 100 | 아니오 |
+| `TRIAL_PARSE_CONCURRENCY` / `TRIAL_PARSE_WAIT_SECONDS` | 기본 1 / 20 (인스턴스당). 4쪽 초기 운영은 1로 시작하고 클라우드 RSS·분산 실측 후 조정 | 아니오 |
+| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 8000 / 10000. 앞 4쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
 | `EDB_PROBLEM_ASSET_WORKERS` | 1 vCPU에서 crop 렌더 스레드 수. Task 15의 A/B 결과로 정한다 | 아니오 |
 
-**필수 6개 중 하나라도 비어 있으면 운영의 `/api/parse`는 503만 돌려준다.** 설정이 덜 된 채 배포돼도 파싱은 열리지 않는다. 환경변수를 바꾸면 재배포해야 반영된다.
+**필수 6개 중 하나라도 비어 있으면 운영의 `/api/parse`는 503만 돌려준다.** 설정이 덜 된 채 배포돼도 파싱은 열리지 않는다. 환경변수를 바꾸면 재배포해야 반영된다. 4쪽 전환 시 기존 `TRIAL_MAX_PAGES=3`이 있으면 `4`로 수정하거나 삭제한다. 배포 뒤 `/api/config`의 `max_pages: 4`와 4쪽 시험지의 전체 결과를 확인한다. 20문항은 대표 사용 예시이며 문항 수 상한이나 인식 보장이 아니다. 기존 `TRIAL_PARSE_CONCURRENCY=2`도 초기 운영에서는 `1`로 수정하거나 삭제한다. 이는 인스턴스당 제한이며 서비스 전체 동시 사용자 수가 아니다.
 
 ### 2-4. 스파이크 정리
 
@@ -104,7 +104,7 @@ curl -s -H "Authorization: Bearer $CRON_SECRET" $DOMAIN/api/cron/daily
 ```
 
 브라우저에서:
-1. 텍스트 PDF(모의고사 원본)를 올려 결과·박스·카드가 보이는지, 3쪽 넘는 파일이면 "앞 3쪽까지" 배너가 뜨는지 본다.
+1. 텍스트 PDF(모의고사 원본)를 올려 결과·박스·카드가 보이는지, 4쪽 넘는 파일이면 "앞 4쪽까지" 배너가 뜨는지 본다.
 2. 사진(JPG)을 골라 "스캔본·사진은 프리미엄 AI 인식으로" 팝업이 뜨는지 본다.
 3. 팝업의 [프리미엄 도입 문의]가 `classin.co.kr/contact`로 열리는지 본다.
 4. Supabase에서 이벤트가 쌓였는지 본다:
@@ -210,3 +210,35 @@ group by reject_detail order by 2 desc;
 - 업로드 화면: "올린 파일은 처리 후 바로 삭제하고 저장하지 않아요"
 - 푸터: "접속 IP는 하루 이용 횟수 확인에만 쓰이고, 되돌릴 수 없는 형태로 바꿔 보관해요." (IP는 비밀 salt와 날짜를 섞은 SHA-256 앞 16자로만 저장한다)
 - 프리미엄 팝업 문구의 기능 약속(쪽수 제한 없음, AI 정밀 인식, 문항 수정 등)이 설치형 앱 실제 기능과 맞는지 출시 전에 확인한다.
+
+## 8. 박람회 전용 시연
+
+- 주소: `/demo` (일반 체험판과 같은 배포·파서 사용).
+- 이번 행사: **2026-09-17 00:00 ~ 2026-09-19 18:00, 한국 시간**, 종료 시각은 포함하지 않는다.
+- 비밀번호로 인증한 브라우저만 `/api/demo/parse`를 호출할 수 있다. IP가 바뀌어도 인증 쿠키는 유지된다.
+- 시연은 IP별 3회·일반 전체 500회 차감과 Turnstile을 건너뛴다. 일반 `/api/parse`는 시연 쿠키가 있어도 기존 정책을 지킨다.
+- 4페이지·4MB·PDF 복잡도·응답 크기·인스턴스당 작업 제한은 동일하다. 시연도 일반 트래픽과 컴퓨팅 자원을 공유하므로 전용 처리 용량을 보장하지 않는다.
+- 비밀번호 확인 요청은 IP별 분당 5회·인스턴스 전체 분당 30회로 제한한다. 이미 인증한 뒤 반복 파싱하는 횟수에는 이 제한이 적용되지 않는다.
+- Supabase 한도 저장소 장애로 시연 파싱을 막지 않는다. 이벤트는 기존처럼 최선 노력으로 기록하며 `timing.demo = true`로 구분한다.
+
+Production 환경변수:
+
+| 이름 | 설정 |
+|---|---|
+| `TRIAL_DEMO_ENABLED` | `1` (기본은 꺼짐) |
+| `TRIAL_DEMO_STARTS_AT` | `2026-09-17T00:00:00+09:00` |
+| `TRIAL_DEMO_ENDS_AT` | `2026-09-19T18:00:00+09:00` |
+| `TRIAL_DEMO_PASSWORD_HASH` | `.venv/bin/python scripts/hash_trial_demo_password.py`로 비밀번호를 비공개 입력해 만든 해시 |
+| `TRIAL_DEMO_SESSION_SECRET` | 충분히 긴 임의 비밀값(최소 32자), 서버 환경변수에만 보관 |
+
+비밀번호 원문·해시·세션 비밀값은 저장소, URL, 브라우저 저장소에 넣지 않는다. 브라우저에는 서명된 HttpOnly·SameSite=Strict 쿠키만 저장되며 HTTPS에서는 Secure도 적용한다. 시작 전과 종료 시각 이후에는 새 로그인과 파싱 모두 거절한다. 기간은 최대 72시간이며 설정 누락·잘못된 시간창은 시연만 닫고 일반 체험판을 유지한다.
+
+환경변수 변경은 **재배포 후** 운영 주소에 반영된다. `TRIAL_DEMO_ENABLED=0`으로 바꾸고 재배포하면 운영 주소의 시연이 닫힌다. 비밀번호 해시·시간창·세션 비밀값을 바꾸고 재배포하면 기존 인증 쿠키가 무효화된다. 이전 배포 고유 주소가 외부에 공유됐다면 그 배포도 보호/삭제해야 한다.
+
+검증:
+1. `/api/demo/config`의 `active`·`authenticated`·`ends_at` 확인(비밀값은 반환하지 않음).
+2. 행사 전에는 로그인 폼이 닫히고, 기간 중에는 비밀번호 입력 후 업로드가 보이는지 확인.
+3. 같은 브라우저에서 4회 이상 처리·새로고침·로그아웃 확인. 일반 체험판의 제한은 그대로인지 확인.
+4. 종료 시각에는 쿠키가 남아 있어도 API가 401을 반환하는지 확인. 종료 전에 시작한 처리 작업은 완료될 수 있으나 새 파싱 작업은 시작하지 않는다.
+
+로컬 실행 스크립트도 `TRIAL_DEMO_*` 환경변수를 읽지만 Supabase와 운영 Turnstile은 연결하지 않는다. 실제 운영 시간창을 바꿔 사전 테스트하지 말고, 테스트 서버의 주입 가능한 시계를 이용한다.

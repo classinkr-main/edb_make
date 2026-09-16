@@ -16,8 +16,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from trial_input import DEFAULT_MAX_PAGES
+
 BENCH_ROOT = Path(os.environ.get("TRIAL_BENCH_ROOT") or Path.home() / "edb-trial-bench")
-MAX_PAGES = 3
+MAX_PAGES = DEFAULT_MAX_PAGES
 # Require the passage marker itself, not just two numbers anywhere in the
 # title: a free-text title ("표는 1-3족 원소의 성질을...") can contain a bare
 # "<digits><sep><digits>" run that has nothing to do with a passage range.

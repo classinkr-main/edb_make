@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from problem_parser import parse_problems  # noqa: E402
-from scripts.trial_bench.common import markdown_table, parse_in_scratch  # noqa: E402
+from scripts.trial_bench.common import MAX_PAGES, markdown_table, parse_in_scratch  # noqa: E402
 
 
 def max_rss_mb() -> float:
@@ -29,7 +29,7 @@ def max_rss_mb() -> float:
 
 def write_2xa3(path: Path) -> Path:
     doc = fitz.open()
-    for page_index in range(3):
+    for page_index in range(MAX_PAGES):
         page = doc.new_page(width=1190, height=1684)  # twice A3 in area
         for line in range(90):
             page.insert_text((40, 40 + line * 18), f"{page_index * 30 + line // 3 + 1}. 큰 페이지 문항 본문 줄 {line} ① a ② b ③ c ④ d ⑤ e", fontsize=9)

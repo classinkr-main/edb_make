@@ -156,7 +156,7 @@ class TestConfigAndHealth(TrialApiCase):
                 "inquiry_url": "https://classin.co.kr/contact",
                 "turnstile_site_key": "site",
                 "max_bytes": 4_000_000,
-                "max_pages": 3,
+                "max_pages": 4,
                 "daily_limit": 3,
             },
             response.json(),
@@ -182,13 +182,13 @@ class TestParseSuccess(TrialApiCase):
         self.assertEqual("no-store", response.headers["cache-control"])
         self.assertEqual(2, body["remaining_today"])
         self.assertEqual(16, body["source_page_count"])
-        self.assertEqual(3, body["processed_page_limit"])
+        self.assertEqual(4, body["processed_page_limit"])
         self.assertEqual([1, 2], [problem["number"] for problem in body["problems"]])
         self.assertTrue(body["problems"][0]["needs_review"])
         self.assertEqual(1, self.used())
-        self.assertEqual(3, self.parser.calls[0]["max_pages"])
+        self.assertEqual(4, self.parser.calls[0]["max_pages"])
         self.assertEqual(PDF_BODY, self.parser.calls[0]["bytes"])
-        self.assertEqual([3], self.inspector.calls)
+        self.assertEqual([4], self.inspector.calls)
         self.assertEqual([("tok", "203.0.113.7")], self.verifier.calls)
         event = self.store.events[-1]
         self.assertEqual(
@@ -338,6 +338,22 @@ class TestParseRejections(TrialApiCase):
         self.assertEqual(1, self.used())
         self.assertEqual("parse_failed", self.store.events[-1]["reject_code"])
 
+    def test_oversized_preview_returns_controlled_rejection_and_keeps_charge(self):
+        client = self.make_client(config=TrialConfig(ip_salt="salt", parse_concurrency=1))
+        original_encoder = trial_server.build_parse_body
+
+        def tiny_budget(*args, **kwargs):
+            return original_encoder(*args, **kwargs, budget_bytes=10)
+
+        with mock.patch.object(trial_server, "build_parse_body", side_effect=tiny_budget):
+            response = self.post_pdf(client)
+        self.assertRejected(response, 422, "page_too_complex", "ai")
+        self.assertLess(len(response.content), 1024)
+        self.assertEqual(1, self.used())  # The parser already spent CPU.
+        self.assertEqual("response_budget", self.store.events[-1]["reject_detail"])
+        # Encoding failure must also release the only processing slot.
+        self.assertEqual(200, self.post_pdf(client).status_code)
+
     def test_consume_with_unknown_outcome_is_refunded_by_request_id(self):
         store = CommitThenTimeoutStore()
         client = self.make_client(store=store)
@@ -455,6 +471,52 @@ class TestParseRejections(TrialApiCase):
         self.assertEqual(0, self.used("203.0.113.2"))
         self.assertEqual(1, self.used("203.0.113.1"))
         self.assertEqual(1, len(self.store.charges))
+
+    def test_inspection_is_bounded_before_quota_is_consumed(self):
+        entered = threading.Event()
+        release = threading.Event()
+        inspector = FakeInspector()
+
+        def blocking_inspector(source, *, max_pages):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise RuntimeError("test inspector gate timed out")
+            return inspector(source, max_pages=max_pages)
+
+        client = self.make_client(
+            config=TrialConfig(ip_salt="salt", parse_concurrency=1, parse_wait_seconds=0.1),
+            inspector=blocking_inspector,
+        )
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            first = pool.submit(self.post_pdf, client, ip="203.0.113.1")
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                self.assertEqual(0, self.used("203.0.113.1"))
+                second = self.post_pdf(client, ip="203.0.113.2")
+                self.assertRejected(second, 503, "busy")
+                self.assertEqual("slot_wait", self.store.events[-1]["reject_detail"])
+                self.assertEqual(0, self.used("203.0.113.2"))
+                self.assertEqual([], self.parser.calls)
+            finally:
+                release.set()
+            self.assertEqual(200, first.result(timeout=5).status_code)
+        self.assertEqual(1, len(inspector.calls))
+
+    def test_invalid_input_releases_inspection_slot_without_charging(self):
+        inspector = FakeInspector(error=PdfUnreadableError("locked"))
+        client = self.make_client(
+            config=TrialConfig(ip_salt="salt", parse_concurrency=1, parse_wait_seconds=0.1),
+            inspector=inspector,
+        )
+        self.assertRejected(self.post_pdf(client), 422, "unreadable_pdf")
+        self.assertEqual(0, self.used())
+        inspector.error = None
+        inspector.info = PdfInfo(page_count=1, scanned_pages=1, pages_without_text=1, max_page_area_pt=500_000.0)
+        self.assertRejected(self.post_pdf(client), 422, "no_text_layer", "scan")
+        self.assertEqual(0, self.used())
+        inspector.info = FakeInspector().info
+        self.assertEqual(200, self.post_pdf(client).status_code)
+        self.assertEqual(1, self.used())
 
     def test_waiting_requests_are_not_charged_and_do_not_block_other_routes(self):
         gate = threading.Event()

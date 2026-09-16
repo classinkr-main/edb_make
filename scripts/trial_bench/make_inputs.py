@@ -1,4 +1,4 @@
-"""Create the trial's exact input (first 3 pages, compacted) for each exam PDF.
+"""Create the trial's exact input (first 4 pages, compacted) for each exam PDF.
 
 Usage:
   GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/make_inputs.py --subject korean /path/a.pdf /path/b.pdf

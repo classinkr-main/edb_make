@@ -113,7 +113,7 @@ class TestRejectionCatalog(unittest.TestCase):
         codes = [rejection.code for rejection in REJECTIONS.values()]
         self.assertEqual(len(codes), len(set(codes)))
         for rejection in REJECTIONS.values():
-            self.assertIn(rejection.status, {400, 413, 415, 422, 429, 500, 503})
+            self.assertIn(rejection.status, {400, 401, 403, 413, 415, 422, 429, 500, 503})
             self.assertTrue(rejection.message)
 
     def test_payload_shape(self):
