@@ -9,12 +9,24 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image
+from PIL import Image, features
 
 from problem_parser import ParseResult
 
 # Vercel caps function response bodies at 4.5 MB; leave room for headers and slack.
 RESPONSE_BUDGET_BYTES = 3_500_000
+
+# WebP lossy is 25-40% smaller than JPEG at the same visual quality (spec 2026-09-16 §2-3).
+# The pinned Pillow wheel ships libwebp; the JPEG fallback only guards a build without it.
+PREVIEW_FORMAT = "WEBP" if features.check("webp") else "JPEG"
+PREVIEW_MIME = "image/webp" if PREVIEW_FORMAT == "WEBP" else "image/jpeg"
+# method 4 is ~1.7x slower for ~3% smaller output; method 6 takes minutes per request.
+WEBP_METHOD = 2
+
+# BOARD_THEME_PALETTES["charcoal"]["background"] in build_problem_board_edb. Kept as a
+# constant so this module never imports the pipeline (rejected requests must not load
+# OpenCV); test_trial_preview asserts the two stay equal.
+BOARD_BACKGROUND_RGB = (24, 28, 32)
 
 
 class PreviewBudgetExceeded(ValueError):
@@ -46,29 +58,46 @@ class PreviewStep:
     page_long_side: int
     problem_long_side: int
     quality: int
+    # None drops the board previews at this step (last resort before rejecting).
+    board_long_side: int | None = None
 
 
 PREVIEW_STEPS = (
-    PreviewStep(page_long_side=1200, problem_long_side=800, quality=78),
-    PreviewStep(page_long_side=1200, problem_long_side=600, quality=65),
-    PreviewStep(page_long_side=900, problem_long_side=600, quality=65),
-    PreviewStep(page_long_side=700, problem_long_side=450, quality=55),
+    PreviewStep(page_long_side=1000, problem_long_side=800, quality=78, board_long_side=800),
+    PreviewStep(page_long_side=1000, problem_long_side=600, quality=65, board_long_side=600),
+    PreviewStep(page_long_side=900, problem_long_side=600, quality=65, board_long_side=600),
+    PreviewStep(page_long_side=700, problem_long_side=450, quality=55, board_long_side=None),
 )
 
 
-def encode_jpeg_data_uri(image: Image.Image, *, long_side: int, quality: int) -> str:
-    preview = image.convert("RGB")
-    scale = long_side / max(preview.size)
-    if scale < 1:
-        size = (max(1, round(preview.width * scale)), max(1, round(preview.height * scale)))
-        # HAMMING instead of LANCZOS: same preview size, roughly half the resize cost (LANCZOS
-        # resize x25 cost about 0.17 s per request locally, ~0.7 s on Vercel) for no visible gain
-        # at preview sizes. reducing_gap=2.0 additionally lets Pillow run an integer reduce()
-        # first, which only engages on the >4x fallback steps.
-        preview = preview.resize(size, Image.Resampling.HAMMING, reducing_gap=2.0)
+def _downscale(image: Image.Image, long_side: int) -> Image.Image:
+    scale = long_side / max(image.size)
+    if scale >= 1:
+        return image
+    size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+    # HAMMING instead of LANCZOS: same preview size, roughly half the resize cost (LANCZOS
+    # resize x25 cost about 0.17 s per request locally, ~0.7 s on Vercel) for no visible gain
+    # at preview sizes. reducing_gap=2.0 additionally lets Pillow run an integer reduce()
+    # first, which only engages on the >4x fallback steps.
+    return image.resize(size, Image.Resampling.HAMMING, reducing_gap=2.0)
+
+
+def encode_preview_data_uri(image: Image.Image, *, long_side: int, quality: int) -> str:
+    preview = _downscale(image.convert("RGB"), long_side)
     buffer = io.BytesIO()
-    preview.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=False)
-    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    if PREVIEW_FORMAT == "WEBP":
+        preview.save(buffer, format="WEBP", quality=quality, method=WEBP_METHOD)
+    else:
+        preview.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=False)
+    return f"data:{PREVIEW_MIME};base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def compose_board_preview(board_image: Image.Image) -> Image.Image:
+    """Flatten a chalk-on-transparent cutout onto the charcoal board color."""
+    rgba = board_image.convert("RGBA")
+    flat = Image.new("RGBA", rgba.size, BOARD_BACKGROUND_RGB + (255,))
+    flat.alpha_composite(rgba)
+    return flat.convert("RGB")
 
 
 def _payload_for_step(
@@ -81,25 +110,14 @@ def _payload_for_step(
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     step = PREVIEW_STEPS[step_index]
-    payload: dict[str, Any] = {
-        "parser_version": result.parser_version,
-        "elapsed_ms": elapsed_ms,
-        "source_page_count": result.source_page_count,
-        "processed_page_count": len(result.pages),
-        "processed_page_limit": processed_page_limit,
-        "remaining_today": remaining_today,
-        "preview_step": step_index,
-        "pages": [
-            {
-                "page_id": page.page_id,
-                "index": page.index,
-                "width": page.width,
-                "height": page.height,
-                "preview": encode_jpeg_data_uri(page.image, long_side=step.page_long_side, quality=step.quality),
-            }
-            for page in result.pages
-        ],
-        "problems": [
+    problems = []
+    for problem in result.problems:
+        board = None
+        if step.board_long_side is not None and problem.board_image is not None:
+            board = encode_preview_data_uri(
+                compose_board_preview(problem.board_image), long_side=step.board_long_side, quality=step.quality
+            )
+        problems.append(
             {
                 "problem_id": problem.problem_id,
                 "number": problem.number,
@@ -111,10 +129,30 @@ def _payload_for_step(
                 ],
                 "risk_flags": list(problem.risk_flags),
                 "needs_review": needs_review(problem.risk_flags),
-                "preview": encode_jpeg_data_uri(problem.image, long_side=step.problem_long_side, quality=step.quality),
+                "preview": encode_preview_data_uri(problem.image, long_side=step.problem_long_side, quality=step.quality),
+                "board": board,
             }
-            for problem in result.problems
+        )
+    payload: dict[str, Any] = {
+        "parser_version": result.parser_version,
+        "elapsed_ms": elapsed_ms,
+        "source_page_count": result.source_page_count,
+        "processed_page_count": len(result.pages),
+        "processed_page_limit": processed_page_limit,
+        "remaining_today": remaining_today,
+        "preview_step": step_index,
+        "board_previews": any(problem["board"] is not None for problem in problems),
+        "pages": [
+            {
+                "page_id": page.page_id,
+                "index": page.index,
+                "width": page.width,
+                "height": page.height,
+                "preview": encode_preview_data_uri(page.image, long_side=step.page_long_side, quality=step.quality),
+            }
+            for page in result.pages
         ],
+        "problems": problems,
     }
     if extra:
         payload.update(extra)
