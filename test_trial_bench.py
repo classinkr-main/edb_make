@@ -578,12 +578,11 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
                 with self.assertRaises(AttributeError):
                     oracle_case(pdf_path, "physics", root=root)
 
-    def test_oracle_case_saves_a_failure_observation_and_reraises_when_parsing_fails(self):
+    def test_oracle_case_saves_a_failure_record_and_reraises_when_parsing_fails(self):
         # force_config's fail_on_error=True lets a Gemini exception propagate
         # out of repair_page_model, through build_pages, out of
-        # parse_in_scratch. Without this, the case leaves no observation JSON
-        # at all -- the only record of the failure would be a terminal
-        # traceback.
+        # parse_in_scratch. Without this, the case leaves no record of the
+        # failure at all -- the only trace would be a terminal traceback.
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "bench"
             pdf_path = Path(temp_dir) / "case.pdf"
@@ -591,13 +590,42 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
             with patch.object(oracle, "parse_problems", side_effect=RuntimeError("Gemini exploded")):
                 with self.assertRaisesRegex(RuntimeError, "Gemini exploded"):
                     oracle_case(pdf_path, "physics", root=root)
-            saved = json.loads((root / "oracle" / "case.json").read_text(encoding="utf-8"))
+            saved = json.loads((root / oracle.FAILURE_DIR / "case.json").read_text(encoding="utf-8"))
 
         page_repair = saved["oracle"]["page_repair"]
         self.assertEqual("oracle_failed", page_repair["status"])
         self.assertTrue(page_repair["no_page_records"])
         self.assertIn("Gemini exploded", page_repair["warning"])
         self.assertIn("Gemini exploded", saved["error"])
+
+    def test_a_failed_case_does_not_clobber_its_previous_successful_observation(self):
+        # oracle/<case>.json is this case's pending ground truth -- score.py
+        # scores the trial against it, and it is only regenerable with a live
+        # Gemini key and the out-of-repo corpus. A transient Gemini failure
+        # must not overwrite it with a failure stub: that both destroys the
+        # data and leaves score.py a record with no "problems"/"timing_ms",
+        # which would abort the scoring loop for every other case too.
+        good = self._fake_result([{"attempted": True, "applied": True, "changed": True, "status": "applied"}])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(oracle, "parse_problems", return_value=good):
+                oracle_case(pdf_path, "physics", root=root)
+            before = (root / "oracle" / "case.json").read_text(encoding="utf-8")
+
+            with patch.object(oracle, "parse_problems", side_effect=RuntimeError("Gemini exploded")):
+                with self.assertRaisesRegex(RuntimeError, "Gemini exploded"):
+                    oracle_case(pdf_path, "physics", root=root)
+
+            after = (root / "oracle" / "case.json").read_text(encoding="utf-8")
+            self.assertTrue((root / oracle.FAILURE_DIR / "case.json").is_file())
+
+        self.assertEqual(before, after)
+        observation = json.loads(after)
+        self.assertIn("problems", observation)
+        self.assertIn("timing_ms", observation)
+        self.assertNotIn("error", observation)
 
 
 class TestOracleMainReporting(unittest.TestCase):
@@ -977,6 +1005,31 @@ class TestScoreAll(unittest.TestCase):
             self.assertEqual(1, len(rows))
             self.assertEqual("1/2", rows[0]["ai_evidence"])
             self.assertTrue(rows[0]["ai_evidence_ok"])
+
+    def test_score_all_skips_an_unscorable_oracle_observation_instead_of_aborting_the_run(self):
+        # A failure-shaped record ({case, error, oracle}) left under oracle/
+        # -- by an older build, or by hand -- has no "problems" and no
+        # "timing_ms". Indexing into it raises KeyError inside the loop, which
+        # would cost every *other* case its row too: no report.md, no doc
+        # table. One bad case must cost only its own row.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for case in ("a", "b"):
+                common.save_json(common.bench_dir("trial", root) / f"{case}.json", _obs(case, [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("oracle", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            common.save_json(
+                common.bench_dir("oracle", root) / "a.json",
+                {"case": "a", "error": "Gemini exploded", "oracle": {"page_repair": oracle._failed_page_repair_summary(RuntimeError("Gemini exploded"))}},
+            )
+
+            warnings: list[str] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                rows = score_all([], root=root, warnings=warnings)
+
+        self.assertEqual(["b"], [row["case"] for row in rows])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("not a scorable oracle observation", warnings[0])
+        self.assertIn("Gemini exploded", warnings[0])
 
     def test_score_all_still_scores_a_case_whose_label_key_went_stale(self):
         """The before/after workflow: the fixed parser no longer emits an approved "trial only" key."""

@@ -110,10 +110,13 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
     classification changed: ``_apply_repair_payload`` writes unconditionally
     once validation passes, so an AI answer that reproduces the local
     baseline exactly still counts as applied. ``pages_changed`` is the field
-    that means "actually changed" (page_repair.py's ``summary["changed"]``,
-    a diff of block types and the ProblemUnit stem/choice/figure partition
-    against the pre-repair baseline) -- ``pages_applied`` is kept alongside
-    it only to show how many of the applied pages were rubber-stamps.
+    that means "actually changed" (page_repair.py's ``summary["changed"]``:
+    the union of its per-page diff against the pre-repair baseline over block
+    types, the ProblemUnit stem/choice/figure partition, display/problem
+    titles, ``bbox_px`` crop boxes and ``review_flags`` -- every AI-written
+    value that reaches this observation) -- ``pages_applied`` is kept
+    alongside it only to show how many of the applied pages were
+    rubber-stamps.
 
     Agreement with the trial on a case where ``pages_changed`` is 0 proves
     nothing about AI-grade recognition, so that case is flagged (``zero_applied``)
@@ -179,6 +182,13 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
 
 
 FAILURE_STATUS = "oracle_failed"
+# Failure records live in their own directory, never in bench_dir("oracle").
+# An observation under oracle/ is this case's pending ground truth -- the
+# thing score.py scores the trial against, regenerable only with a live
+# Gemini key and the out-of-repo corpus. Writing a failure stub over it
+# would let one transient Gemini error destroy that data, and score.py would
+# then read a record with no "problems"/"timing_ms" at all.
+FAILURE_DIR = "oracle_failures"
 
 
 def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
@@ -211,11 +221,12 @@ def oracle_case(input_pdf: Path, subject: str, *, ocr_mode: str = "auto", model:
         result = parse_in_scratch(input_pdf, parse_problems, subject=subject, ocr_mode=ocr_mode, ai_fallback_config=force_config(model))
     except Exception as exc:
         # Without this, a Gemini exception under fail_on_error=True propagates
-        # straight out of parse_in_scratch and this case leaves no observation
-        # JSON at all -- the only record of what went wrong would be a
-        # traceback in the terminal. Save a failure observation before
-        # re-raising so the run's durable record always covers every case.
-        observation = {
+        # straight out of parse_in_scratch and this case leaves no record of
+        # what went wrong but a traceback in the terminal. Save a failure
+        # record before re-raising -- into FAILURE_DIR, never over
+        # oracle/<case>.json, so the previous successful observation (this
+        # case's pending ground truth) survives a transient Gemini failure.
+        failure = {
             "case": case,
             "error": str(exc),
             "oracle": {
@@ -225,7 +236,7 @@ def oracle_case(input_pdf: Path, subject: str, *, ocr_mode: str = "auto", model:
                 "page_repair": _failed_page_repair_summary(exc),
             },
         }
-        save_json(bench_dir("oracle", root) / f"{case}.json", observation)
+        save_json(bench_dir(FAILURE_DIR, root) / f"{case}.json", failure)
         raise
     observation = observation_from_result(case, result, crops_dir=bench_dir("oracle_crops", root) / case)
     observation["oracle"] = {

@@ -382,8 +382,23 @@ class TestParseProblems(unittest.TestCase):
         self.assertEqual(["disabled", "disabled"], [entry["status"] for entry in result.page_repair])
         for entry in result.page_repair:
             self.assertEqual(
-                {"status": "disabled", "enabled": False, "attempted": False, "applied": False, "cache_hit": False, "mode": "off"},
-                {key: entry[key] for key in ("status", "enabled", "attempted", "applied", "cache_hit", "mode")},
+                {
+                    "status": "disabled",
+                    "enabled": False,
+                    "attempted": False,
+                    "applied": False,
+                    "cache_hit": False,
+                    "mode": "off",
+                    # A page AI repair never touched carries no AI evidence:
+                    # pin the defaults end-to-end, so a build that reported
+                    # changed=True with no GEMINI_API_KEY set cannot ship.
+                    "changed": False,
+                    "blocks_changed": 0,
+                },
+                {
+                    key: entry[key]
+                    for key in ("status", "enabled", "attempted", "applied", "cache_hit", "mode", "changed", "blocks_changed")
+                },
             )
 
     def test_images_survive_work_dir_removal(self):

@@ -8,9 +8,11 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from itertools import zip_longest
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib import error, request
 
 from PIL import Image
@@ -133,18 +135,62 @@ def _page_repair_stage_metadata(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _classification_state(
-    page: PageModel,
-) -> tuple[dict[str, BlockType], frozenset[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]]:
-    """Snapshot the classification-relevant state of a page: each block's
-    ``block_type``, plus the stem/choice/figure block-id partition of its
-    ProblemUnits. Deliberately excludes metadata (``grouping_source``,
-    ``ai_grouping_role``, ...): ``_apply_repair_payload`` always stamps
-    ``grouping_source="ai_fallback"`` on every block it writes, so a
-    metadata diff would read as "changed" even when the AI's answer
-    reproduces the local baseline exactly.
+class _PageOutputState(NamedTuple):
+    """Snapshot of everything an AI page repair can write that reaches the
+    scored output (``scripts/trial_bench/common.py``'s
+    ``observation_from_result``, and from there score.py's keys, regions and
+    review rate).
+
+    Included, because each of these is only ever written when the AI
+    actually supplied it:
+
+    - ``block_types`` -- ``_apply_repair_payload``'s re-typing of blocks.
+    - ``problem_partition`` -- the stem/choice/figure block-id partition of
+      the regrouped ProblemUnits, i.e. the grouping itself.
+    - ``block_titles`` -- ``block.metadata["display_title"]``, which the AI's
+      ``display_titles`` writes and assemble_page.py's
+      ``_problem_display_title`` turns into ``ProblemUnit.title``, which
+      ``common.problem_key`` turns into the observation key (and which the
+      passage-range detection reads).
+    - ``problem_titles`` -- the per-problem title that results, in page order.
+    - ``problem_boxes`` -- ``problem.metadata["bbox_px"]``, which
+      build_problem_board_edb.py's ``_should_prefer_problem_metadata_bbox``
+      makes *replace* the locally derived crop box on every AI-grouped
+      problem -- i.e. every region the oracle observation scores.
+    - ``problem_annotations`` -- ``problem.metadata["review_flags"]`` (score.py's
+      review rate) and whether an ``ai_problem_unit`` was attached at all.
+
+    Excluded: ``grouping_source``, ``grouping_reason`` and
+    ``ai_grouping_role``. ``_apply_repair_payload`` and
+    ``_annotate_problem_metadata`` stamp those onto every block and problem
+    they touch whether or not the AI's answer differed from the local
+    baseline, so diffing them would make every applied page read as
+    "changed".
     """
+
+    block_types: dict[str, BlockType]
+    problem_partition: frozenset[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]
+    block_titles: dict[str, str | None]
+    problem_titles: tuple[str | None, ...]
+    problem_boxes: tuple[str, ...]
+    problem_annotations: tuple[str, ...]
+
+
+def _metadata_fingerprint(value: Any) -> str:
+    """Hashable, key-order-insensitive rendering of a metadata value, so two
+    snapshots compare equal exactly when the value is the same."""
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _classification_state(page: PageModel) -> _PageOutputState:
     block_types = {block.block_id: block.block_type for block in page.blocks}
+    block_titles: dict[str, str | None] = {}
+    for block in page.blocks:
+        raw_title = block.metadata.get("display_title")
+        block_titles[block.block_id] = raw_title.strip() if isinstance(raw_title, str) else None
     problem_partition = frozenset(
         (
             tuple(sorted(problem.stem_block_ids)),
@@ -153,19 +199,91 @@ def _classification_state(
         )
         for problem in page.problems
     )
-    return block_types, problem_partition
+    problem_titles = tuple(problem.title for problem in page.problems)
+    problem_boxes = tuple(
+        _metadata_fingerprint(problem.metadata.get("bbox_px")) for problem in page.problems
+    )
+    problem_annotations = tuple(
+        _metadata_fingerprint(
+            {
+                "review_flags": problem.metadata.get("review_flags"),
+                "ai_problem_unit": bool(problem.metadata.get("ai_problem_unit")),
+            }
+        )
+        for problem in page.problems
+    )
+    return _PageOutputState(
+        block_types=block_types,
+        problem_partition=problem_partition,
+        block_titles=block_titles,
+        problem_titles=problem_titles,
+        problem_boxes=problem_boxes,
+        problem_annotations=problem_annotations,
+    )
 
 
 def _count_changed_blocks(
-    baseline_block_types: dict[str, BlockType],
-    repaired_block_types: dict[str, BlockType],
+    baseline_by_block_id: Mapping[str, Any],
+    repaired_by_block_id: Mapping[str, Any],
 ) -> int:
-    all_ids = set(baseline_block_types) | set(repaired_block_types)
+    all_ids = set(baseline_by_block_id) | set(repaired_by_block_id)
     return sum(
         1
         for block_id in all_ids
-        if baseline_block_types.get(block_id) != repaired_block_types.get(block_id)
+        if baseline_by_block_id.get(block_id) != repaired_by_block_id.get(block_id)
     )
+
+
+_MISSING_SLOT = object()
+
+
+def _count_changed_slots(baseline: Sequence[Any], repaired: Sequence[Any]) -> int:
+    """Per-problem diff, index-aligned in page (reading) order. A repair that
+    changes the number of problems counts every surplus/missing slot as
+    changed -- that regrouping is also reported on its own through
+    ``problems_regrouped``."""
+    return sum(
+        1
+        for before, after in zip_longest(baseline, repaired, fillvalue=_MISSING_SLOT)
+        if before != after
+    )
+
+
+def _repair_change_counters(
+    baseline: _PageOutputState,
+    repaired: _PageOutputState,
+) -> dict[str, Any]:
+    """The change signal behind the bench oracle's "NO AI EVIDENCE" verdict
+    (scripts/trial_bench/oracle.py) and score.py's zero-evidence footnote.
+
+    Kept as separate counters so "the AI regrouped the page" stays
+    distinguishable from "the AI only supplied titles, crop boxes or review
+    flags"; ``changed`` is their union, because any one of them is the AI's
+    answer reaching the scored output.
+    """
+    blocks_changed = _count_changed_blocks(baseline.block_types, repaired.block_types)
+    problems_regrouped = repaired.problem_partition != baseline.problem_partition
+    titles_changed = _count_changed_blocks(
+        baseline.block_titles, repaired.block_titles
+    ) + _count_changed_slots(baseline.problem_titles, repaired.problem_titles)
+    boxes_overridden = _count_changed_slots(baseline.problem_boxes, repaired.problem_boxes)
+    problem_metadata_changed = _count_changed_slots(
+        baseline.problem_annotations, repaired.problem_annotations
+    )
+    return {
+        "blocks_changed": blocks_changed,
+        "problems_regrouped": problems_regrouped,
+        "titles_changed": titles_changed,
+        "boxes_overridden": boxes_overridden,
+        "problem_metadata_changed": problem_metadata_changed,
+        "changed": bool(
+            blocks_changed
+            or problems_regrouped
+            or titles_changed
+            or boxes_overridden
+            or problem_metadata_changed
+        ),
+    }
 
 
 def _attach_ai_fallback_summary(page: PageModel, summary: dict[str, Any]) -> PageModel:
@@ -173,10 +291,14 @@ def _attach_ai_fallback_summary(page: PageModel, summary: dict[str, Any]) -> Pag
     summary.setdefault("stage_label", "3단계 문항 경계 보정")
     # Every summary that never reaches an "applied" branch (disabled,
     # not_needed, missing_api_key, error, invalid_response, ...) never
-    # changed the page's classification either, so default both fields
-    # here; the two "applied" branches in repair_page_model overwrite them
-    # with the real diff against the pre-repair baseline.
+    # changed the page's output either, so default every counter here; the
+    # two "applied" branches in repair_page_model overwrite them with the
+    # real diff against the pre-repair baseline.
     summary.setdefault("blocks_changed", 0)
+    summary.setdefault("problems_regrouped", False)
+    summary.setdefault("titles_changed", 0)
+    summary.setdefault("boxes_overridden", 0)
+    summary.setdefault("problem_metadata_changed", 0)
     summary.setdefault("changed", False)
     page.metadata["ai_fallback"] = summary
     raw_stages = page.metadata.get("ai_stages")
@@ -198,11 +320,11 @@ def repair_page_model(
     resolved_config = config or AIFallbackConfig()
     pipeline_cache = cache or PipelineCache.for_source(prepared_page.source_path)
     baseline = group_problem_units(page)
-    # Snapshot classification state now, before anything mutates `baseline`
-    # in place: `_apply_repair_payload` below writes onto `baseline.blocks`
-    # directly and returns the same object, so capturing this after that
-    # call would compare the repaired page against itself.
-    baseline_block_types, baseline_problem_partition = _classification_state(baseline)
+    # Snapshot the pre-repair output state now, before anything mutates
+    # `baseline` in place: `_apply_repair_payload` below writes onto
+    # `baseline.blocks` directly and returns the same object, so capturing
+    # this after that call would compare the repaired page against itself.
+    baseline_state = _classification_state(baseline)
     route_decision = decide_page_route(
         baseline,
         ocr_mode=ocr_mode,
@@ -282,8 +404,12 @@ def repair_page_model(
                 trigger_reasons=trigger_reasons,
             )
             repaired = group_problem_units(replace(repaired, problems=[]))
-            repaired_block_types, repaired_problem_partition = _classification_state(repaired)
-            blocks_changed = _count_changed_blocks(baseline_block_types, repaired_block_types)
+            repaired.metadata["difficulty_profile"] = baseline.metadata.get("difficulty_profile", {})
+            repaired.metadata["route_decision"] = baseline.metadata.get("route_decision", {})
+            # Snapshot *after* the AI's problem-unit metadata is written, not
+            # straight after grouping: bbox_px and review_flags land here and
+            # reach the crop boxes and review rate the oracle scores.
+            _annotate_problem_metadata(repaired, trigger_reasons, problem_unit_metadata)
             summary.update(
                 {
                     "applied": True,
@@ -294,8 +420,7 @@ def repair_page_model(
                     "repaired_problem_count": len(repaired.problems),
                     "ai_notes": list(repair_payload.get("notes") or []),
                     "problem_units_accepted": len(problem_unit_metadata),
-                    "blocks_changed": blocks_changed,
-                    "changed": bool(blocks_changed) or repaired_problem_partition != baseline_problem_partition,
+                    **_repair_change_counters(baseline_state, _classification_state(repaired)),
                 }
             )
             if cached_model and cached_model != resolved_config.resolved_model:
@@ -306,9 +431,6 @@ def repair_page_model(
                 }
             if problem_unit_warnings:
                 summary["problem_units_warnings"] = problem_unit_warnings
-            repaired.metadata["difficulty_profile"] = baseline.metadata.get("difficulty_profile", {})
-            repaired.metadata["route_decision"] = baseline.metadata.get("route_decision", {})
-            _annotate_problem_metadata(repaired, trigger_reasons, problem_unit_metadata)
             return _attach_ai_fallback_summary(repaired, summary)
 
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -381,8 +503,12 @@ def repair_page_model(
         response_id=response_id,
     )
 
-    repaired_block_types, repaired_problem_partition = _classification_state(repaired)
-    blocks_changed = _count_changed_blocks(baseline_block_types, repaired_block_types)
+    repaired.metadata["difficulty_profile"] = baseline.metadata.get("difficulty_profile", {})
+    repaired.metadata["route_decision"] = baseline.metadata.get("route_decision", {})
+    # Snapshot *after* the AI's problem-unit metadata is written, not straight
+    # after grouping: bbox_px and review_flags land here and reach the crop
+    # boxes and review rate the oracle scores.
+    _annotate_problem_metadata(repaired, trigger_reasons, problem_unit_metadata)
     summary.update(
         {
             "applied": True,
@@ -394,8 +520,7 @@ def repair_page_model(
             "repaired_problem_count": len(repaired.problems),
             "ai_notes": list(repair_payload.get("notes") or []),
             "problem_units_accepted": len(problem_unit_metadata),
-            "blocks_changed": blocks_changed,
-            "changed": bool(blocks_changed) or repaired_problem_partition != baseline_problem_partition,
+            **_repair_change_counters(baseline_state, _classification_state(repaired)),
         }
     )
     if used_model != resolved_config.resolved_model:
@@ -414,9 +539,6 @@ def repair_page_model(
         }
     if problem_unit_warnings:
         summary["problem_units_warnings"] = problem_unit_warnings
-    repaired.metadata["difficulty_profile"] = baseline.metadata.get("difficulty_profile", {})
-    repaired.metadata["route_decision"] = baseline.metadata.get("route_decision", {})
-    _annotate_problem_metadata(repaired, trigger_reasons, problem_unit_metadata)
     _maybe_write_debug_artifacts(
         prepared_page=prepared_page,
         page=repaired,

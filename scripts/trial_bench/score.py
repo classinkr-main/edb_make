@@ -250,9 +250,11 @@ def render_report(rows: list[dict[str, Any]]) -> str:
             "\n\n> **AI page repair produced no evidence of a real change for "
             f"{len(zero_evidence_cases)} of {len(rows)} case(s): "
             + ", ".join(f"`{case}`" for case in zero_evidence_cases)
-            + ".** Those rows' scores show agreement with the trial's own local baseline, "
-            "not confirmation by AI-grade recognition -- see `ai_evidence` and rerun "
-            "scripts/trial_bench/oracle.py to refresh."
+            + ".** On those cases the forced-AI oracle's block types, problem grouping, "
+            "titles, crop boxes and review flags all came out identical to what the local "
+            "baseline produced on its own, so those rows' scores show agreement with the "
+            "trial's own local baseline, not confirmation by AI-grade recognition -- see "
+            "`ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh."
         )
     return table
 
@@ -268,6 +270,19 @@ def score_all(cases: list[str], root: Path = BENCH_ROOT, warnings: list[str] | N
             continue
         labels_path = bench_dir("labels", root) / f"{case}.json"
         trial, oracle = load_json(trial_path), load_json(oracle_path)
+        # An unscorable observation must cost this case its row, not the whole
+        # run: expected_from indexes oracle["problems"] and the row build
+        # indexes oracle["timing_ms"], so a truncated or failure-shaped record
+        # left here by an interrupted oracle run would raise KeyError and
+        # abort the loop for every other case too -- no report.md, no doc
+        # table. Skipping matches what a missing observation already does.
+        if not isinstance(oracle, dict) or "problems" not in oracle or "timing_ms" not in oracle or oracle.get("error"):
+            if not isinstance(oracle, dict):
+                reason = "not a JSON object"
+            else:
+                reason = str(oracle.get("error") or "no problems/timing_ms")
+            _warn(f"score.py: case {case!r}: {oracle_path} is not a scorable oracle observation ({reason}); skipping this case", warnings)
+            continue
         labels = load_json(labels_path) if labels_path.is_file() else None
         expected, status = expected_from(oracle, trial, labels, warnings=warnings)
         row = score_case(trial, expected)
