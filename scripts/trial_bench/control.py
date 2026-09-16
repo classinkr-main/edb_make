@@ -24,11 +24,25 @@ Usage:
       --source ~/edb-trial-bench/inputs/social_saengwoon_2020suneung_20191015.pdf \\
       --page 0 --subject social
 
-The control input is never a corpus case: everything this script touches
-lives under ``bench_dir("control", root)`` (default
-``~/edb-trial-bench/control/``), never under ``inputs/``, ``oracle/`` or
-``cases.json`` where scripts/trial_bench/observe.py's ``select_inputs`` or
-score.py would pick it up.
+The control input is never a corpus case: ``main()`` always computes
+``control_root = bench_dir(CONTROL_DIR, BENCH_ROOT)`` (``~/edb-trial-bench/control/``
+unless ``TRIAL_BENCH_ROOT`` is set) and passes it explicitly to every call, so
+everything this script touches lives under that root, never under the
+corpus's own ``inputs/``, ``oracle/`` or ``cases.json`` where
+scripts/trial_bench/observe.py's ``select_inputs`` or score.py would pick it
+up. ``build_control_pdf`` and ``run_control`` take ``root`` as a required
+keyword argument with no default, precisely so a caller can never fall back
+to the corpus root by omission.
+
+Neither this script's "control" framing nor its baseline is AI-free: with
+``ocr_mode="auto"`` (the default) and a ``GEMINI_API_KEY`` configured,
+``ocr_backend.build_ocr_backend("auto")`` resolves to ``GeminiOCRBackend``,
+so the pre-repair baseline this control diffs against was itself produced by
+Gemini's vision OCR of the same page image. What this control isolates is
+page *repair*: the forced-Gemini pass either does or does not change that
+Gemini-OCR baseline. See docs/web-trial-quality.md's 2026-09-17 section for
+the full framing and a genuinely AI-free baseline (``--ocr-mode none``) for
+contrast.
 """
 
 from __future__ import annotations
@@ -58,7 +72,7 @@ def build_control_pdf(
     page_index: int,
     *,
     dpi: int = 200,
-    root: Path = BENCH_ROOT,
+    root: Path,
     name: str | None = None,
 ) -> Path:
     """Re-emit page ``page_index`` (0-based) of ``source_pdf`` as a new,
@@ -69,11 +83,19 @@ def build_control_pdf(
     ``page.get_text()`` returns "" on it (asserted by
     test_trial_bench_control.py) and preprocess.py's text-marker extraction
     (``extract_pdf_problem_markers`` / ``extract_pdf_text_lines``) has
-    nothing to read -- the local baseline is whatever ``ocr_mode="auto"``
-    recovers on its own, and only Gemini page repair ever sees the actual
-    page image well enough to redo the structure. Saved under
+    nothing to read. This does NOT make the resulting run's pre-repair
+    baseline AI-free: with ``ocr_mode="auto"`` and a ``GEMINI_API_KEY`` set,
+    ``ocr_backend.build_ocr_backend`` resolves ``"auto"`` to
+    ``GeminiOCRBackend``, so that baseline is itself Gemini's vision OCR of
+    this same page image, run before page repair -- see the module
+    docstring and docs/web-trial-quality.md's 2026-09-17 section for what
+    this control actually isolates (page *repair*, not OCR). ``root`` has no
+    default on purpose: the caller must pass a control root (``main()``
+    passes ``bench_dir(CONTROL_DIR, BENCH_ROOT)``) so this can never write
+    under the corpus's own ``inputs/`` by omission -- see
+    test_trial_bench_control.py's coverage of ``main()``. Saved under
     ``bench_dir("inputs", root)``, i.e. ``<control-root>/inputs/<name>.pdf``,
-    never the corpus's own ``inputs/`` (the caller passes a control root).
+    never the corpus's own ``inputs/``.
     """
     case = name or f"{case_id(source_pdf)}-p{page_index + 1}-image-only"
     target = bench_dir("inputs", root) / f"{case}.pdf"
@@ -107,20 +129,28 @@ def run_control(
     *,
     ocr_mode: str = "auto",
     model: str = "",
-    root: Path = BENCH_ROOT,
+    root: Path,
 ) -> dict[str, Any]:
     """Run the same forced-Gemini oracle path as oracle.oracle_case over one
     control input, and return both the saved observation and the raw
     per-page ``ai_fallback`` entries (page_repair.py's ``_repair_change_counters``
-    output merged into each page's summary) so the caller can print which
-    counter fired, not just the case-level aggregate.
+    output, plus its always-present ``baseline_block_count``/
+    ``baseline_problem_count``, merged into each page's summary) so the
+    caller can print which counter fired, not just the case-level aggregate.
+    The same per-page list is also saved into the observation (as
+    ``oracle.page_repair_pages``), so this is the one artifact on disk that
+    still carries those counters after the process exits -- re-deriving them
+    otherwise would need a fresh, paid, non-deterministic Gemini call.
 
     Deliberately not a call to ``oracle.oracle_case`` followed by a second
     call to get at ``result.page_repair``: that would run the (paid,
     non-deterministic) Gemini request twice and the two runs could disagree.
     This mirrors oracle_case's body instead, reusing its config and summary
     helpers so a control case's saved JSON is shaped exactly like a corpus
-    case's, just parked under a control root.
+    case's, just parked under a control root. ``root`` has no default on
+    purpose -- see ``build_control_pdf``'s docstring; a stray default here
+    would silently overwrite ``<BENCH_ROOT>/oracle/<case>.json``, the
+    corpus's own ground truth.
     """
     case = control_pdf.stem
     try:
@@ -144,15 +174,17 @@ def run_control(
         }
         save_json(bench_dir(oracle.FAILURE_DIR, root) / f"{case}.json", failure)
         raise
+    pages = [dict(entry) for entry in result.page_repair]
     observation = observation_from_result(case, result, crops_dir=bench_dir("oracle_crops", root) / case)
     observation["oracle"] = {
         "ocr_mode": ocr_mode,
         "model": model or "default",
         "ai_mode": "force",
         "page_repair": oracle.summarize_page_repair(result.page_repair),
+        "page_repair_pages": pages,
     }
     save_json(bench_dir("oracle", root) / f"{case}.json", observation)
-    return {"observation": observation, "pages": [dict(entry) for entry in result.page_repair]}
+    return {"observation": observation, "pages": pages}
 
 
 def _page_rows(pages: list[dict[str, Any]]) -> list[list[Any]]:
@@ -162,6 +194,14 @@ def _page_rows(pages: list[dict[str, Any]]) -> list[list[Any]]:
             [
                 index,
                 entry.get("status", ""),
+                # The pre-repair baseline this page's diff is measured
+                # against -- always present (page_repair.py sets both
+                # unconditionally, before checking whether AI repair is even
+                # enabled), and NOT AI-free: with ocr_mode="auto" and a
+                # GEMINI_API_KEY set, this baseline was itself produced by
+                # Gemini vision OCR of the page image, before page repair ran.
+                entry.get("baseline_block_count", ""),
+                entry.get("baseline_problem_count", ""),
                 entry.get("changed", False),
                 entry.get("blocks_changed", 0),
                 entry.get("problems_regrouped", False),
@@ -237,7 +277,8 @@ def main(argv: list[str] | None = None) -> int:
     print(
         markdown_table(
             [
-                "page", "status", "changed", "blocks_changed", "problems_regrouped",
+                "page", "status", "baseline_block_count", "baseline_problem_count",
+                "changed", "blocks_changed", "problems_regrouped",
                 "titles_changed", "boxes_overridden", "problem_metadata_changed", "model_used", "error",
             ],
             _page_rows(result["pages"]),
