@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import math
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ from PIL import Image
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
 from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
+from scripts.trial_bench.complexity import write_synthetic
 from scripts.trial_bench.load import summarize_wave
 from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench.oracle import force_config
@@ -670,6 +672,26 @@ class TestProbeSummaries(unittest.TestCase):
         ]
         summary = summarize_wave(rows)
         self.assertEqual({"requests": 5, "ok": 3, "busy": 1, "failed_other": 1, "p50_ms": 12000, "p95_ms": 13000, "max_ms": 13000, "instances": 2, "max_per_instance": 2, "cold": 1}, summary)
+
+
+class TestComplexitySynthetic(unittest.TestCase):
+    def test_numbers_only_every_fifth_line_with_one_running_counter(self):
+        number_line = re.compile(r"^(\d+)\. ")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = write_synthetic(Path(temp_dir) / "synthetic.pdf", words_per_page=500, drawings_per_page=0)
+            all_numbers: list[int] = []
+            with fitz.open(path) as doc:
+                self.assertEqual(3, doc.page_count)
+                for page in doc:
+                    lines = page.get_text("text").splitlines()
+                    matches = [number_line.match(line) for line in lines]
+                    numbered = [match.group(1) for match in matches if match]
+                    self.assertGreaterEqual(len(numbered), 5)
+                    self.assertLessEqual(len(numbered), 12)
+                    all_numbers.extend(int(value) for value in numbered)
+
+        for previous, current in zip(all_numbers, all_numbers[1:]):
+            self.assertLess(previous, current, "numbers must strictly increase across the whole document")
 
 
 if __name__ == "__main__":

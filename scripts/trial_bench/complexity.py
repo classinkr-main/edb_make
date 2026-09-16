@@ -48,15 +48,20 @@ def line_layout(words_per_page: int) -> tuple[float, float]:
 def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, pages: int = 3) -> Path:
     doc = fitz.open()
     pitch, fontsize = line_layout(words_per_page)
+    number = 1
     for page_index in range(pages):
         page = doc.new_page(width=842, height=1191)  # A3-ish like CSAT papers at 72 pt/in
         y = TOP_Y
-        number = page_index * 20 + 1
         words = 0
+        line_index = 0
         while words < words_per_page and y < BOTTOM_Y:
-            page.insert_text((40, y), f"{number}. {LINE}", fontsize=fontsize)
+            if line_index % 5 == 0:
+                page.insert_text((40, y), f"{number}. {LINE}", fontsize=fontsize)
+                number += 1
+            else:
+                page.insert_text((40, y), LINE, fontsize=fontsize)
             words += WORDS_PER_LINE
-            number += 1
+            line_index += 1
             y += pitch
         for index in range(drawings_per_page):
             x = 40 + (index % 70) * 11
