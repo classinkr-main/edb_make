@@ -63,6 +63,7 @@
 
 - 드로잉이 렌더 시간을 지배한다. 3쪽 기준 3000개/쪽이 Vercel 환산 12.9초, 4000개가 20.7초, 5000개부터 30초를 넘는다(31.4초; 위 §3-1 표). 체험판이 4쪽을 처리하게 되면서(42bd62c) 같은 밀도의 비용은 약 4/3배가 된다.
 - 기본값을 `TRIAL_MAX_WORDS_PER_PAGE=4500`, `TRIAL_MAX_DRAWINGS_PER_PAGE=2500`으로 낮췄다(코드 `trial_input.DEFAULT_MAX_*`). 두 상한을 동시에 채운 4쪽 입력을 그 값 그대로 재면(2026-09-17, `GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 4500 --drawings 2500 --pages 4`) render 5930 ms·segment 269 ms·assets 319 ms·total 6573 ms(문항 103개)로 Vercel 환산 **28.3초**다 -- "약 28초"는 assumption이 아니라 이 값이며, 2건이 겹쳐도 60초 안이다.
+- 2026-09-17 추가: 칠판용 컷아웃(설계 2026-09-16)을 켜면 같은 입력이 31.2초가 되어 기본값을 **2000**으로 다시 내렸다. §7-2 참고.
 - 코퍼스가 13개 입력으로 넓어지면서 실제 시험지 최대도 달라졌다: 단어는 674 → **886**/쪽(`english_go2_hakpyeong_20260324.pdf`), 드로잉은 613/쪽(`2026학년도-수능-국어-언어와매체-홀수형.pdf`)으로 그대로다(2026-09-17, `~/edb-trial-bench/inputs/`의 13개 파일 전체를 아래 명령으로 다시 잼):
   ```
   GEMINI_API_KEY= .venv/bin/python -c "
