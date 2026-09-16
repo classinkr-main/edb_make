@@ -26,15 +26,20 @@ LINE = "이 문장은 복잡도 실험을 위한 채움 글입니다 하나 둘 
 
 def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, pages: int = 3) -> Path:
     doc = fitz.open()
+    number = 1
     for page_index in range(pages):
         page = doc.new_page(width=842, height=1191)  # A3-ish like CSAT papers at 72 pt/in
         y = 40.0
-        number = page_index * 20 + 1
         words = 0
+        line = 0
         while words < words_per_page and y < 1150:
-            page.insert_text((40, y), f"{number}. {LINE}", fontsize=8)
+            if line % 5 == 0:
+                page.insert_text((40, y), f"{number}. {LINE}", fontsize=8)
+                number += 1
+            else:
+                page.insert_text((40, y), LINE, fontsize=8)
             words += 15
-            number += 1
+            line += 1
             y += 11
         for index in range(drawings_per_page):
             x = 40 + (index % 70) * 11
@@ -43,20 +48,6 @@ def write_synthetic(path: Path, *, words_per_page: int, drawings_per_page: int, 
     doc.save(path, garbage=4, deflate=True)
     doc.close()
     return path
-
-
-def max_content_stream_bytes(path: Path, *, max_pages: int) -> int:
-    """Max, over the leading pages, of the compressed content-stream bytes.
-
-    Same quantity Task 5's inspect_pdf gates on (MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE
-    = 1 MB) before it even decompresses a page, so the synthetic rows here can
-    be checked directly against that threshold.
-    """
-    with fitz.open(path, filetype="pdf") as doc:
-        return max(
-            (sum(len(doc.xref_stream_raw(xref)) for xref in doc[index].get_contents()) for index in range(min(max_pages, doc.page_count))),
-            default=0,
-        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -70,11 +61,10 @@ def main(argv: list[str] | None = None) -> int:
             for drawings in args.drawings:
                 pdf = write_synthetic(Path(temp_dir) / f"w{words}_d{drawings}.pdf", words_per_page=words, drawings_per_page=drawings)
                 info = inspect_pdf(pdf, max_pages=3)
-                content_bytes = max_content_stream_bytes(pdf, max_pages=3)
                 result = parse_in_scratch(pdf, parse_problems)
                 total = result.timing_ms["total"]
-                rows.append([info.max_words_per_page, info.max_drawings_per_page, result.timing_ms.get("render"), result.timing_ms.get("segment"), result.timing_ms.get("assets"), total, round(total * VERCEL_FACTOR / 1000, 1), len(result.problems), content_bytes])
-    print(markdown_table(["words/pg", "drawings/pg", "render_ms", "segment_ms", "assets_ms", "total_ms", "vercel_est_s", "problems", "content_bytes/pg"], rows))
+                rows.append([info.max_words_per_page, info.max_drawings_per_page, result.timing_ms.get("render"), result.timing_ms.get("segment"), result.timing_ms.get("assets"), total, round(total * VERCEL_FACTOR / 1000, 1), len(result.problems)])
+    print(markdown_table(["words/pg", "drawings/pg", "render_ms", "segment_ms", "assets_ms", "total_ms", "vercel_est_s", "problems"], rows))
     return 0
 
 
