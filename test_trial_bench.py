@@ -3,15 +3,18 @@ import io
 import json
 import math
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import fitz
 from PIL import Image
 
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
-from scripts.trial_bench import common
+from scripts.trial_bench import common, memory
 from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
 from scripts.trial_bench.complexity import write_synthetic
 from scripts.trial_bench.load import summarize_wave
@@ -20,6 +23,7 @@ from scripts.trial_bench.oracle import force_config
 from scripts.trial_bench.probe import summarize_file
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
 from structured_schema import Box
+from trial_input import DEFAULT_MAX_PAGES
 
 
 def _result() -> ParseResult:
@@ -692,6 +696,82 @@ class TestComplexitySynthetic(unittest.TestCase):
 
         for previous, current in zip(all_numbers, all_numbers[1:]):
             self.assertLess(previous, current, "numbers must strictly increase across the whole document")
+
+
+class TestMemoryBench(unittest.TestCase):
+    def test_write_2xa3_uses_the_real_trial_page_count(self):
+        # The trial's own page cap (trial_input.DEFAULT_MAX_PAGES) went from 3
+        # to 4; the synthetic case must track it, not a number frozen in the
+        # bench, or it stops matching what the trial server actually parses.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = memory.write_2xa3(Path(temp_dir) / "2xa3.pdf")
+            with fitz.open(path) as doc:
+                self.assertEqual(DEFAULT_MAX_PAGES, doc.page_count)
+
+    def test_run_two_overlapping_parses_reports_pages_and_peak_after_both_finish(self):
+        calls = []
+
+        def _fake_parse_in_scratch(pdf, parse, **kwargs):
+            calls.append(pdf)
+            return _result()  # 1 page, timing_ms={"total": 7}
+
+        with patch.object(memory, "parse_in_scratch", side_effect=_fake_parse_in_scratch), \
+                patch.object(memory, "max_rss_mb", return_value=42.5) as rss_mock:
+            payload = memory.run_two_overlapping_parses(Path("dummy.pdf"))
+
+        self.assertEqual(2, len(calls), "must still run two overlapping parses per case")
+        self.assertEqual({"pages": 1, "rss_peak_mb": 42.5, "total_ms_a": 7, "total_ms_b": 7}, payload)
+        rss_mock.assert_called_once()  # read once, after both parses -- not before/after pairs
+
+    def test_measure_case_runs_a_fresh_subprocess_and_never_parses_in_the_parent(self):
+        # This is the bug fix: the parent must not call parse_in_scratch (or
+        # read its own rss) to build a row. If it did, this file's peak could
+        # inherit whatever a previous case already pushed ru_maxrss to, which
+        # is exactly the process-lifetime-high-water-mark bug being fixed.
+        fake_payload = {"pages": 4, "rss_peak_mb": 199.0, "total_ms_a": 1000, "total_ms_b": 1100}
+        fake_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(fake_payload) + "\n", stderr="")
+        with patch.object(memory, "parse_in_scratch", side_effect=AssertionError("must not parse in the parent process")), \
+                patch.object(memory.subprocess, "run", return_value=fake_completed) as run_mock:
+            result = memory.measure_case(Path("/tmp/x.pdf"))
+
+        self.assertEqual(fake_payload, result)
+        command = run_mock.call_args.args[0]
+        self.assertEqual(sys.executable, command[0])
+        self.assertIn("--worker", command)
+        self.assertEqual("/tmp/x.pdf", command[-1])
+        self.assertTrue(run_mock.call_args.kwargs.get("check"))
+
+    def test_main_reports_each_rows_own_isolated_peak_not_a_running_maximum(self):
+        # A smaller later file reporting a *smaller* peak than an earlier,
+        # bigger one is only possible once each row comes from its own fresh
+        # process; the old cumulative-rss bug could only ever grow.
+        payloads = [
+            {"pages": 4, "rss_peak_mb": 900.0, "total_ms_a": 1, "total_ms_b": 2},
+            {"pages": 1, "rss_peak_mb": 61.0, "total_ms_a": 3, "total_ms_b": 4},
+        ]
+        completed = [subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(payload)) for payload in payloads]
+        with patch.object(memory.subprocess, "run", side_effect=completed):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = memory.main(["big.pdf", "small.pdf"])
+        text = out.getvalue()
+
+        self.assertEqual(0, exit_code)
+        self.assertIn("| big.pdf | 4 | 900.0 | 1 | 2 |", text)
+        self.assertIn("| small.pdf | 1 | 61.0 | 3 | 4 |", text)
+        self.assertNotIn("rss_before", text)
+        self.assertNotIn("cumulative", text)
+
+    def test_worker_flag_prints_the_measured_payload_as_the_last_json_line(self):
+        with patch.object(memory, "parse_in_scratch", return_value=_result()), \
+                patch.object(memory, "max_rss_mb", return_value=12.3):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = memory.main(["--worker", "input.pdf"])
+
+        self.assertEqual(0, exit_code)
+        payload = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual({"pages": 1, "rss_peak_mb": 12.3, "total_ms_a": 7, "total_ms_b": 7}, payload)
 
 
 if __name__ == "__main__":
