@@ -54,6 +54,25 @@ def force_config(model: str = "") -> dict[str, Any]:
     bypass is removed -- and then it would silently skip exactly the dense
     pages the oracle most needs AI repair on. test_page_repair.py's
     ``test_force_mode_ignores_max_regions`` pins the bypass.
+
+    ``max_tokens=8192`` and ``max_output_token_cap=8192`` are a fourth,
+    oracle-only delta with no desktop equivalent at all (desktop's
+    ``ai_fallback_config`` dict never carries ``max_output_token_cap`` --
+    see ``build_problem_board_edb.py``'s ``_build_ai_fallback_config`` --
+    so ``page_repair.AIFallbackConfig.max_output_token_cap`` stays ``None``
+    and desktop's per-block output-token estimate is untouched). Both
+    English bench cases failed with "Gemini response JSON decode failed:
+    Unterminated string" before this; instrumenting the failure
+    (page_repair.GeminiRepairTruncatedError's diagnostics) on
+    english_2020suneung_go3_20191107 showed the response was cut off by
+    finishReason=MAX_TOKENS at only 776 effective output tokens -- not the
+    2048/3072 hard cap, but page_repair.py's ``_repair_output_token_budget``
+    per-block *estimate* (512 + 24*11 blocks), which was calibrated against
+    short synthetic block ids ("block-1") and badly undercounts a real
+    page's id ("english_2020suneung_go3_20191107-page-001-block-011", 50+
+    characters, repeated twice per block). ``max_output_token_cap`` bypasses
+    that estimate for this path only; see oracle_failures/ for the captured
+    record and this module's docstring/plan for the re-run after the fix.
     """
     return {
         "mode": "force",
@@ -61,10 +80,11 @@ def force_config(model: str = "") -> dict[str, Any]:
         "model": model,
         "threshold": 0.72,
         "max_regions": 48,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
         "timeout_ms": 60000,
         "save_debug": False,
         "fail_on_error": True,
+        "max_output_token_cap": 8192,
     }
 
 
@@ -191,6 +211,24 @@ FAILURE_STATUS = "oracle_failed"
 FAILURE_DIR = "oracle_failures"
 
 
+def _gemini_diagnostics_from(exc: Exception) -> dict[str, Any] | None:
+    """Best-effort diagnostics recovered from a Gemini page-repair failure.
+
+    Present when ``exc`` is a ``page_repair.GeminiRepairResponseError`` (or a
+    wrapping RuntimeError that copied its diagnostics onto itself --
+    ``page_repair._copy_gemini_diagnostics``, which the retry and
+    model-fallback loops apply before re-raising): the response's
+    finishReason, the effective/configured max output tokens, prompt/response
+    sizes, and the first and last 200 characters of the raw response text.
+    Absent for every other kind of failure (missing API key, network error,
+    an invalid_response validation failure that never touched JSON parsing),
+    so a case that failed for an unrelated reason does not carry a
+    misleading "no diagnostics available" stand-in.
+    """
+    diagnostics = getattr(exc, "diagnostics", None)
+    return dict(diagnostics) if isinstance(diagnostics, Mapping) else None
+
+
 def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
     """A page_repair summary for a case whose parse raised before it produced
     any pages at all (force_config's fail_on_error=True lets a Gemini
@@ -199,6 +237,10 @@ def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
     the same way, but status/warning name the failure instead of reporting a
     clean-looking 0/0 row.
     """
+    diagnostics = _gemini_diagnostics_from(exc)
+    error_entry: dict[str, Any] = {"page_index": None, "status": FAILURE_STATUS, "error": str(exc)}
+    if diagnostics is not None:
+        error_entry["gemini_diagnostics"] = diagnostics
     return {
         "pages_total": 0,
         "pages_attempted": 0,
@@ -207,10 +249,11 @@ def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
         "pages_changed": 0,
         "models_used": [],
         "statuses": {FAILURE_STATUS: 1},
-        "errors": [{"page_index": None, "status": FAILURE_STATUS, "error": str(exc)}],
+        "errors": [error_entry],
         "zero_applied": False,
         "no_page_records": True,
         "status": FAILURE_STATUS,
+        "gemini_truncated": bool(getattr(exc, "truncated", False)),
         "warning": f"oracle_case raised before any page was parsed -- {exc}",
     }
 

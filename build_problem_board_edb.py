@@ -6497,6 +6497,14 @@ def _build_ai_fallback_config(
 def _to_page_ai_config(ai_fallback_config: dict[str, Any] | None) -> AIFallbackConfig:
     if not ai_fallback_config:
         return build_page_ai_fallback_config()
+    # max_output_token_cap has no desktop caller (_build_ai_fallback_config
+    # above never emits it): only scripts/trial_bench/oracle.py's
+    # force_config sets this key, to bypass page_repair.py's per-block
+    # output-token estimate for the forced oracle path. Every desktop
+    # config dict is missing the key, so .get(...) is None there and
+    # build_page_ai_fallback_config keeps its own default (None => no
+    # bypass, unchanged behaviour).
+    raw_max_output_token_cap = ai_fallback_config.get("max_output_token_cap")
     return build_page_ai_fallback_config(
         mode=str(ai_fallback_config.get("mode") or ("auto" if bool(ai_fallback_config.get("enabled")) else "off")),
         provider=str(ai_fallback_config.get("provider") or "gemini"),
@@ -6507,6 +6515,7 @@ def _to_page_ai_config(ai_fallback_config: dict[str, Any] | None) -> AIFallbackC
         timeout_ms=int(ai_fallback_config.get("timeout_ms") or 30000),
         save_debug=bool(ai_fallback_config.get("save_debug")),
         fail_on_error=bool(ai_fallback_config.get("fail_on_error")),
+        max_output_token_cap=int(raw_max_output_token_cap) if raw_max_output_token_cap else None,
     )
 
 

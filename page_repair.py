@@ -42,6 +42,74 @@ _PROBLEM_UNIT_TRIGGER_REASONS = {
 
 _SUPPORTED_PROVIDER_ALIASES = {"gemini", "google"}
 
+# Gemini's finishReason values that mean "the response was cut off by the
+# output token budget", as opposed to a genuinely malformed JSON response
+# (finish_reason STOP) -- see GeminiRepairResponseError below.
+_GEMINI_TRUNCATION_FINISH_REASONS = {"MAX_TOKENS", "LENGTH"}
+
+
+class GeminiRepairResponseError(RuntimeError):
+    """A Gemini page-repair response failed to parse as the expected JSON
+    object, carrying the diagnostics needed to tell that failure apart from
+    an output-token-budget truncation (``truncated``) instead of just a
+    prose message. See ``_gemini_response_diagnostics`` for the fields.
+    """
+
+    def __init__(self, message: str, *, diagnostics: dict[str, Any], truncated: bool = False) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics
+        self.truncated = truncated
+
+
+class GeminiRepairTruncatedError(GeminiRepairResponseError):
+    """The response's ``finishReason`` was MAX_TOKENS/LENGTH: Gemini stopped
+    generating before the JSON closed because it ran out of output-token
+    budget (``effective_max_output_tokens`` in ``diagnostics``), not because
+    the model produced a malformed answer. Retrying the identical request is
+    pointless -- ``temperature`` is 0.0, so the same budget reproduces the
+    same truncation -- the fix is a bigger budget or a smaller unit of work.
+    """
+
+    def __init__(self, message: str, *, diagnostics: dict[str, Any]) -> None:
+        super().__init__(message, diagnostics=diagnostics, truncated=True)
+
+
+def _gemini_response_diagnostics(
+    *,
+    model: str,
+    finish_reason: str,
+    effective_max_output_tokens: int,
+    configured_max_output_tokens: int,
+    prompt: str,
+    response_text: str,
+    block_count: int,
+    include_problem_units: bool,
+) -> dict[str, Any]:
+    """Everything needed to tell a genuine malformed-JSON response apart
+    from an output-token-budget truncation, without re-running the request:
+    the finishReason Gemini actually returned, the token budget the code
+    computed for this call (vs. what force_config/build_ai_fallback_config
+    configured), and enough of the raw response (sizes plus head/tail) to
+    see where and how it broke without dumping the whole page's text into a
+    log or an oracle failure record.
+    """
+    prompt_bytes = prompt.encode("utf-8")
+    response_bytes = response_text.encode("utf-8")
+    return {
+        "model": model,
+        "finish_reason": finish_reason,
+        "effective_max_output_tokens": effective_max_output_tokens,
+        "configured_max_output_tokens": configured_max_output_tokens,
+        "block_count": block_count,
+        "include_problem_units": include_problem_units,
+        "prompt_char_count": len(prompt),
+        "prompt_byte_count": len(prompt_bytes),
+        "response_char_count": len(response_text),
+        "response_byte_count": len(response_bytes),
+        "response_head": response_text[:200],
+        "response_tail": response_text[-200:],
+    }
+
 
 @dataclass(slots=True)
 class AIFallbackConfig:
@@ -54,6 +122,13 @@ class AIFallbackConfig:
     timeout_ms: int = 30000
     save_debug: bool = False
     fail_on_error: bool = False
+    # None (every desktop caller) means _repair_output_token_budget uses its
+    # built-in per-block estimate and 2048/3072 hard cap, unchanged. Set only
+    # by scripts/trial_bench/oracle.py's force_config, to bypass that
+    # estimate for the forced-repair oracle path -- see
+    # _repair_output_token_budget's docstring for why the estimate itself
+    # (not just the hard cap) truncated real English pages.
+    max_output_token_cap: int | None = None
 
     @property
     def resolved_model(self) -> str:
@@ -89,6 +164,7 @@ class AIFallbackConfig:
             "timeout_ms": self.timeout_ms,
             "save_debug": self.save_debug,
             "fail_on_error": self.fail_on_error,
+            "max_output_token_cap": self.max_output_token_cap,
         }
 
 
@@ -103,6 +179,7 @@ def build_ai_fallback_config(
     timeout_ms: int = 30000,
     save_debug: bool = False,
     fail_on_error: bool = False,
+    max_output_token_cap: int | None = None,
 ) -> AIFallbackConfig:
     return AIFallbackConfig(
         mode=mode,
@@ -114,6 +191,7 @@ def build_ai_fallback_config(
         timeout_ms=timeout_ms,
         save_debug=save_debug,
         fail_on_error=fail_on_error,
+        max_output_token_cap=int(max_output_token_cap) if max_output_token_cap else None,
     )
 
 
@@ -656,7 +734,9 @@ def _request_ai_repair_with_model_fallback(
             attempts.append({"model": model, "status": "error", "error": str(exc)})
             if _is_fatal_ai_repair_error(exc):
                 break
-    raise RuntimeError(f"AI repair failed after model fallback: {last_exc}") from last_exc
+    wrapped = RuntimeError(f"AI repair failed after model fallback: {last_exc}")
+    _copy_gemini_diagnostics(source=last_exc, target=wrapped)
+    raise wrapped from last_exc
 
 
 def _request_ai_repair_with_retry(
@@ -684,10 +764,33 @@ def _request_ai_repair_with_retry(
             last_exc = exc
             if not _is_retryable_ai_repair_error(exc):
                 raise
-    raise RuntimeError(f"AI repair failed after retries: {last_exc}") from last_exc
+    wrapped = RuntimeError(f"AI repair failed after retries: {last_exc}")
+    _copy_gemini_diagnostics(source=last_exc, target=wrapped)
+    raise wrapped from last_exc
+
+
+def _copy_gemini_diagnostics(*, source: Exception | None, target: Exception) -> None:
+    """Carry a GeminiRepairResponseError's diagnostics onto a wrapping
+    RuntimeError, so oracle.py's failure record still sees the finishReason,
+    token budget and response sizes after `_request_ai_repair_with_retry`/
+    `_request_ai_repair_with_model_fallback` rewrap the underlying error with
+    a summary message. A bare ``raise`` (the non-retryable/non-fatal exit
+    paths) re-raises the original object and never needs this.
+    """
+    diagnostics = getattr(source, "diagnostics", None)
+    if diagnostics is not None:
+        target.diagnostics = diagnostics
+        target.truncated = bool(getattr(source, "truncated", False))
 
 
 def _is_retryable_ai_repair_error(exc: Exception) -> bool:
+    if isinstance(exc, GeminiRepairResponseError) and exc.truncated:
+        # temperature=0.0 makes the same request reproduce the same
+        # truncation -- retrying it burns a call and a 2s sleep for a
+        # deterministic loss. A different model/config might still help, so
+        # this is not fatal to the caller's model-fallback loop, just to the
+        # same-model retry.
+        return False
     if _is_fatal_ai_repair_error(exc):
         return False
     message = str(exc)
@@ -739,8 +842,33 @@ def _repair_output_token_budget(
     *,
     configured_max_tokens: int,
     include_problem_units: bool,
+    max_output_token_cap: int | None = None,
 ) -> int:
-    """Bound structured repair output without truncating normal block arrays."""
+    """Bound structured repair output without truncating normal block arrays.
+
+    ``max_output_token_cap`` (AIFallbackConfig.max_output_token_cap, unset by
+    every desktop caller) bypasses the per-block estimate and hard cap below
+    entirely, returning ``min(configured_max_tokens, max_output_token_cap)``
+    instead. Only scripts/trial_bench/oracle.py's force_config sets it, so
+    every existing caller computes exactly the value it always has.
+
+    That bypass exists because the estimate itself, not just the 2048/3072
+    hard cap, was the actual truncation cause diagnosed on
+    english_2020suneung_go3_20191107 (oracle_failures/): with block_count=11
+    and include_problem_units=False, "512 + 24*block_count" computed 776,
+    under the 2048 hard cap and nowhere near force_config's configured 4096.
+    "24 tokens per block" was calibrated against short synthetic block ids
+    ("block-1"); a real per-page id
+    ("<case>-page-001-block-011", 50+ characters) appears twice per block --
+    once in problem_start_block_ids, once as a display_titles entry -- so
+    the true per-block cost scales with the source filename length, which
+    this estimate never accounts for. The response was captured
+    mid-``display_titles`` array (its ``block_id`` string cut off
+    mid-write), and Gemini's own finishReason was MAX_TOKENS -- see
+    page_repair.GeminiRepairTruncatedError and the diagnostics it carries.
+    """
+    if max_output_token_cap is not None:
+        return max(512, min(int(configured_max_tokens), int(max_output_token_cap)))
     block_count = max(1, len(page.blocks))
     estimated = 512 + 24 * block_count
     if include_problem_units:
@@ -763,6 +891,7 @@ def _request_gemini_repair(
         page,
         configured_max_tokens=config.max_tokens,
         include_problem_units=include_problem_units,
+        max_output_token_cap=config.max_output_token_cap,
     )
     prompt = _build_repair_prompt(
         page,
@@ -815,13 +944,45 @@ def _request_gemini_repair(
     json_text = "".join(
         part.get("text", "") for part in parts if isinstance(part, dict) and part.get("text")
     )
+    finish_reason = str(candidates[0].get("finishReason") or "unknown")
     if not json_text:
-        finish_reason = candidates[0].get("finishReason") or "unknown"
-        raise RuntimeError(f"Gemini response contained no text (finish={finish_reason})")
+        diagnostics = _gemini_response_diagnostics(
+            model=config.resolved_model,
+            finish_reason=finish_reason,
+            effective_max_output_tokens=output_token_limit,
+            configured_max_output_tokens=config.max_tokens,
+            prompt=prompt,
+            response_text=json_text,
+            block_count=len(page.blocks),
+            include_problem_units=include_problem_units,
+        )
+        message = f"Gemini response contained no text (finish={finish_reason})"
+        if finish_reason in _GEMINI_TRUNCATION_FINISH_REASONS:
+            raise GeminiRepairTruncatedError(message, diagnostics=diagnostics)
+        raise GeminiRepairResponseError(message, diagnostics=diagnostics)
     try:
         parsed = json.loads(json_text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Gemini response JSON decode failed: {exc}") from exc
+        diagnostics = _gemini_response_diagnostics(
+            model=config.resolved_model,
+            finish_reason=finish_reason,
+            effective_max_output_tokens=output_token_limit,
+            configured_max_output_tokens=config.max_tokens,
+            prompt=prompt,
+            response_text=json_text,
+            block_count=len(page.blocks),
+            include_problem_units=include_problem_units,
+        )
+        if finish_reason in _GEMINI_TRUNCATION_FINISH_REASONS:
+            raise GeminiRepairTruncatedError(
+                f"Gemini response truncated at {output_token_limit} output tokens "
+                f"(finish_reason={finish_reason}, model={config.resolved_model}): {exc}",
+                diagnostics=diagnostics,
+            ) from exc
+        raise GeminiRepairResponseError(
+            f"Gemini response JSON decode failed (finish_reason={finish_reason}): {exc}",
+            diagnostics=diagnostics,
+        ) from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("Gemini response was not a JSON object")
     token_usage = normalize_gemini_token_usage(raw_response)

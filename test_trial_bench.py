@@ -369,8 +369,21 @@ class TestOracleConfig(unittest.TestCase):
             "fail_on_error": False,
         }
         config = force_config("")
-        self.assertEqual(set(desktop_forced), set(config))
-        deltas = {key: (desktop_forced[key], config[key]) for key in desktop_forced if desktop_forced[key] != config[key]}
+        # max_output_token_cap has no desktop equivalent at all -- see
+        # force_config's docstring and build_problem_board_edb.py's
+        # _to_page_ai_config, which only reads the key when the caller's
+        # dict carries it. Desktop's ai_fallback_config dicts never do, so
+        # AIFallbackConfig.max_output_token_cap stays None for every desktop
+        # caller and page_repair.py's per-block output-token estimate is
+        # untouched -- checked directly (not just implied by this diff) in
+        # test_page_repair.py's max_output_token_cap tests.
+        self.assertEqual(set(config) - set(desktop_forced), {"max_output_token_cap"})
+        self.assertEqual(8192, config["max_output_token_cap"])
+        deltas = {
+            key: (desktop_forced[key], config[key])
+            for key in desktop_forced
+            if desktop_forced[key] != config[key]
+        }
         self.assertEqual(
             {
                 # The two deliberate deltas force_config's docstring explains.
@@ -381,9 +394,64 @@ class TestOracleConfig(unittest.TestCase):
                 # test_force_mode_ignores_max_regions), so the oracle is left
                 # on the pipeline default instead of the desktop's override.
                 "max_regions": (30, 48),
+                # Raised alongside max_output_token_cap=8192 above so
+                # configured_max_tokens never clamps the bypass back down --
+                # see force_config's docstring for the truncation this fixes.
+                "max_tokens": (4096, 8192),
             },
             deltas,
         )
+
+    def test_force_config_max_output_token_cap_reaches_ai_fallback_config(self):
+        # Ties force_config's dict directly to the real pipeline conversion
+        # (build_problem_board_edb._to_page_ai_config) rather than trusting
+        # that the key name alone is enough -- this is the exact function
+        # AIFallbackConfig.max_output_token_cap must come out through for the
+        # oracle's Gemini calls to actually use it.
+        import build_problem_board_edb as board
+
+        config = board._to_page_ai_config(force_config(""))
+        self.assertEqual(8192, config.max_output_token_cap)
+
+
+class TestFailedPageRepairSummaryDiagnostics(unittest.TestCase):
+    """oracle._failed_page_repair_summary must surface a Gemini failure's
+    diagnostics (page_repair.GeminiRepairResponseError.diagnostics, copied
+    onto any wrapping RuntimeError by page_repair._copy_gemini_diagnostics)
+    when present, and must not fabricate them for an unrelated failure
+    (missing API key, network error) that never carries any.
+    """
+
+    def test_surfaces_diagnostics_and_truncated_flag_when_present(self):
+        diagnostics = {
+            "model": "gemini-3.6-flash",
+            "finish_reason": "MAX_TOKENS",
+            "effective_max_output_tokens": 776,
+            "configured_max_output_tokens": 4096,
+            "block_count": 11,
+            "include_problem_units": False,
+            "prompt_char_count": 2353,
+            "prompt_byte_count": 2377,
+            "response_char_count": 1345,
+            "response_byte_count": 1345,
+            "response_head": "{\n  \"problem_start_block_ids\": [",
+            "response_tail": "block-004\",\n      \"title\": \"4.\"",
+        }
+        exc = RuntimeError("AI repair failed after model fallback: Gemini response truncated ...")
+        exc.diagnostics = diagnostics
+        exc.truncated = True
+
+        summary = oracle._failed_page_repair_summary(exc)
+
+        self.assertTrue(summary["gemini_truncated"])
+        self.assertEqual(diagnostics, summary["errors"][0]["gemini_diagnostics"])
+        self.assertEqual("oracle_failed", summary["status"])
+
+    def test_omits_diagnostics_for_a_failure_that_never_touched_gemini_json(self):
+        summary = oracle._failed_page_repair_summary(RuntimeError("GEMINI_API_KEY not set"))
+
+        self.assertFalse(summary["gemini_truncated"])
+        self.assertNotIn("gemini_diagnostics", summary["errors"][0])
 
 
 class TestSummarizePageRepair(unittest.TestCase):

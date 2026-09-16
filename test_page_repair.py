@@ -721,6 +721,295 @@ class TestPageRepairConfig(unittest.TestCase):
         self.assertIn("Return problem_units only", complex_prompt)
 
 
+class TestRepairOutputTokenBudgetOverride(unittest.TestCase):
+    """_repair_output_token_budget's max_output_token_cap bypass -- the fix
+    for the truncation diagnosed on english_2020suneung_go3_20191107
+    (oracle_failures/): with 11 blocks and no problem units, the per-block
+    estimate (512 + 24*11 = 776) was the actual binding constraint, well
+    under even the 2048 hard cap and far under force_config's configured
+    4096. See scripts/trial_bench/oracle.py's force_config docstring.
+    """
+
+    @staticmethod
+    def _page_with_blocks(count: int) -> PageModel:
+        return PageModel(
+            page_id="page-1",
+            width_px=100,
+            height_px=100,
+            subject=Subject.SCIENCE,
+            blocks=[
+                ContentBlock(
+                    block_id=f"block-{index}",
+                    block_type=BlockType.STEM,
+                    bbox=Box(left=0, top=index * 10, width=80, height=8),
+                    reading_order=index,
+                    text=f"{index + 1}.",
+                )
+                for index in range(count)
+            ],
+        )
+
+    def test_no_override_reproduces_the_diagnosed_truncation_budget(self):
+        page = self._page_with_blocks(11)
+        self.assertEqual(
+            776,
+            page_repair._repair_output_token_budget(
+                page, configured_max_tokens=8192, include_problem_units=False
+            ),
+        )
+
+    def test_override_bypasses_the_per_block_estimate_and_the_hard_cap(self):
+        page = self._page_with_blocks(11)
+        self.assertEqual(
+            8192,
+            page_repair._repair_output_token_budget(
+                page,
+                configured_max_tokens=8192,
+                include_problem_units=False,
+                max_output_token_cap=8192,
+            ),
+        )
+
+    def test_override_still_defers_to_a_lower_configured_max_tokens(self):
+        page = self._page_with_blocks(11)
+        self.assertEqual(
+            2000,
+            page_repair._repair_output_token_budget(
+                page,
+                configured_max_tokens=2000,
+                include_problem_units=False,
+                max_output_token_cap=8192,
+            ),
+        )
+
+    def test_override_keeps_the_512_floor(self):
+        page = self._page_with_blocks(1)
+        self.assertEqual(
+            512,
+            page_repair._repair_output_token_budget(
+                page,
+                configured_max_tokens=8192,
+                include_problem_units=False,
+                max_output_token_cap=100,
+            ),
+        )
+
+    def test_ai_fallback_config_max_output_token_cap_defaults_to_none(self):
+        # Every desktop caller (build_problem_board_edb.py's
+        # _build_ai_fallback_config never emits the key) gets this default,
+        # so page_repair.py's estimate/hard cap are untouched for them.
+        self.assertIsNone(page_repair.AIFallbackConfig().max_output_token_cap)
+        self.assertIsNone(build_ai_fallback_config(mode="force").max_output_token_cap)
+
+    def test_build_ai_fallback_config_sets_max_output_token_cap(self):
+        config = build_ai_fallback_config(mode="force", max_output_token_cap=8192)
+        self.assertEqual(8192, config.max_output_token_cap)
+
+
+class TestGeminiRepairTruncatedError(unittest.TestCase):
+    """A response cut off by the output-token budget (finishReason MAX_TOKENS
+    or LENGTH) must raise page_repair.GeminiRepairTruncatedError with
+    diagnostics -- not the old bare 'Gemini response JSON decode failed'
+    RuntimeError -- so the failure is distinguishable, and inspectable,
+    without re-running the request. A malformed response with a normal
+    finish reason must NOT be misclassified as a truncation.
+    """
+
+    @staticmethod
+    def _page_and_prepared_page() -> tuple[PreparedPage, PageModel]:
+        prepared_page = PreparedPage(
+            page_id="page-1",
+            source_path="sample.png",
+            page_number=1,
+            image=Image.new("RGB", (100, 120), "white"),
+            original_size=(100, 120),
+        )
+        page = PageModel(
+            page_id="page-1",
+            width_px=100,
+            height_px=120,
+            subject=Subject.SCIENCE,
+            blocks=[
+                ContentBlock(
+                    block_id="block-1",
+                    block_type=BlockType.STEM,
+                    bbox=Box(left=0, top=0, width=80, height=40),
+                    reading_order=0,
+                    text="1. 문제",
+                )
+            ],
+        )
+        return prepared_page, page
+
+    def test_max_tokens_finish_reason_raises_the_typed_truncation_error(self):
+        # Reproduces the exact shape of the diagnosed failure: a response cut
+        # off mid-string, JSON decode fails, finishReason is MAX_TOKENS.
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {
+                        "finishReason": "MAX_TOKENS",
+                        "content": {"parts": [{"text": '{"problem_start_block_ids": ["blo'}]},
+                    }
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force", max_tokens=6789)
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with self.assertRaises(page_repair.GeminiRepairTruncatedError) as ctx:
+                    page_repair._request_gemini_repair(
+                        prepared_page=prepared_page,
+                        page=page,
+                        config=config,
+                        trigger_reasons=["forced"],
+                        api_key="test-key",
+                    )
+
+        exc = ctx.exception
+        self.assertTrue(exc.truncated)
+        diagnostics = exc.diagnostics
+        self.assertEqual("MAX_TOKENS", diagnostics["finish_reason"])
+        self.assertEqual(config.resolved_model, diagnostics["model"])
+        self.assertEqual(536, diagnostics["effective_max_output_tokens"])
+        self.assertEqual(6789, diagnostics["configured_max_output_tokens"])
+        self.assertEqual(1, diagnostics["block_count"])
+        self.assertFalse(diagnostics["include_problem_units"])
+        self.assertGreater(diagnostics["prompt_char_count"], 0)
+        # >= not ==: the prompt embeds block OCR text, which can include
+        # multi-byte UTF-8 characters (Korean here).
+        self.assertGreaterEqual(diagnostics["prompt_byte_count"], diagnostics["prompt_char_count"])
+        response_text = '{"problem_start_block_ids": ["blo'
+        self.assertEqual(len(response_text), diagnostics["response_char_count"])
+        self.assertEqual(response_text, diagnostics["response_head"])
+        self.assertEqual(response_text, diagnostics["response_tail"])
+
+    def test_a_normal_finish_reason_is_not_misclassified_as_truncated(self):
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {"finishReason": "STOP", "content": {"parts": [{"text": "not json at all"}]}}
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with self.assertRaises(page_repair.GeminiRepairResponseError) as ctx:
+                    page_repair._request_gemini_repair(
+                        prepared_page=prepared_page,
+                        page=page,
+                        config=config,
+                        trigger_reasons=["forced"],
+                        api_key="test-key",
+                    )
+
+        exc = ctx.exception
+        self.assertNotIsInstance(exc, page_repair.GeminiRepairTruncatedError)
+        self.assertFalse(exc.truncated)
+        self.assertEqual("STOP", exc.diagnostics["finish_reason"])
+
+    def test_retry_loop_does_not_retry_a_truncated_response(self):
+        # temperature=0.0 means an identical retry reproduces the identical
+        # truncation -- retrying wastes a call and a 2s sleep on a
+        # deterministic loss, so this must fail on the first attempt.
+        calls = []
+
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            calls.append(url)
+            return {
+                "candidates": [
+                    {"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": '{"a": "b'}]}}
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")
+        sleep_calls = []
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with patch.object(
+                    page_repair.time, "sleep", side_effect=lambda seconds: sleep_calls.append(seconds)
+                ):
+                    with self.assertRaises(page_repair.GeminiRepairTruncatedError):
+                        page_repair._request_ai_repair_with_retry(
+                            prepared_page=prepared_page,
+                            page=page,
+                            config=config,
+                            trigger_reasons=["forced"],
+                            api_key="test-key",
+                        )
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual([], sleep_calls)
+
+    def test_model_fallback_still_tries_the_fallback_model_and_keeps_diagnostics(self):
+        # Truncation is not classified fatal to the model-fallback loop (a
+        # different model could plausibly need a different budget), only to
+        # the same-model retry above -- but when every candidate model also
+        # truncates, the final wrapped RuntimeError must still carry the
+        # last attempt's diagnostics for oracle.py to record.
+        def fake_post_json(url, payload, *, headers, timeout_ms):
+            return {
+                "candidates": [
+                    {"finishReason": "MAX_TOKENS", "content": {"parts": [{"text": '{"a": "b'}]}}
+                ]
+            }
+
+        prepared_page, page = self._page_and_prepared_page()
+        config = build_ai_fallback_config(mode="force")  # default model falls back to FALLBACK_GEMINI_REPAIR_MODEL
+
+        with patch.object(page_repair, "_image_to_base64", return_value="encoded-image"):
+            with patch.object(page_repair, "_post_json", side_effect=fake_post_json):
+                with patch.object(page_repair.time, "sleep", side_effect=lambda seconds: None):
+                    with self.assertRaises(RuntimeError) as ctx:
+                        page_repair._request_ai_repair_with_model_fallback(
+                            prepared_page=prepared_page,
+                            page=page,
+                            config=config,
+                            trigger_reasons=["forced"],
+                            api_key="test-key",
+                        )
+
+        exc = ctx.exception
+        self.assertIn("AI repair failed after model fallback", str(exc))
+        self.assertNotIsInstance(exc, page_repair.GeminiRepairResponseError)
+        self.assertTrue(getattr(exc, "truncated", False))
+        self.assertEqual("MAX_TOKENS", exc.diagnostics["finish_reason"])
+        self.assertEqual(page_repair.FALLBACK_GEMINI_REPAIR_MODEL, exc.diagnostics["model"])
+
+
+class TestToPageAiConfigMaxOutputTokenCap(unittest.TestCase):
+    """build_problem_board_edb._to_page_ai_config forwards
+    max_output_token_cap when the caller's dict carries it (only
+    scripts/trial_bench/oracle.py's force_config does), and defaults it to
+    None -- unchanged desktop behaviour -- otherwise.
+    """
+
+    def test_forwards_the_cap_when_present(self):
+        import build_problem_board_edb as board
+
+        config = board._to_page_ai_config({"mode": "force", "max_output_token_cap": 8192})
+        self.assertEqual(8192, config.max_output_token_cap)
+
+    def test_defaults_to_none_when_absent(self):
+        import build_problem_board_edb as board
+
+        config = board._to_page_ai_config({"mode": "force"})
+        self.assertIsNone(config.max_output_token_cap)
+
+    def test_none_config_dict_also_defaults_to_none(self):
+        import build_problem_board_edb as board
+
+        config = board._to_page_ai_config(None)
+        self.assertIsNone(config.max_output_token_cap)
+
+
 class TestClassificationState(unittest.TestCase):
     """White-box tests for the diff page_repair.py uses to tell "applied"
     (a validated AI response was written) apart from "changed" (the write
