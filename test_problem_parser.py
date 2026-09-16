@@ -362,6 +362,30 @@ class TestParseProblems(unittest.TestCase):
             self.assertIn("recognize", result.timing_ms)
             self.assertIn("crops", result.timing_ms)
 
+    def test_page_repair_is_populated_with_one_disabled_entry_per_page_by_default(self):
+        # The one link that makes ParseResult.page_repair real -- reading
+        # ai_fallback out of each PageModel's metadata into
+        # ParseResult.page_repair -- had no test at all: every oracle test
+        # patches oracle.parse_problems with a hand-built ParseResult, so the
+        # metadata extraction was only ever asserted against fake dicts
+        # handed straight to summarize_page_repair. Pin it here against a
+        # real parse instead, and with it the trial-side claim that every
+        # trial entry (ai_fallback_config=None, the trial's default) is an
+        # inert "disabled".
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            path = _write_text_exam_pdf(root / "exam.pdf", [[1, 2], [3, 4]])
+            result = parse_problems(path, work_dir=root / "work")
+
+        self.assertEqual(len(result.pages), len(result.page_repair))
+        self.assertEqual(2, len(result.page_repair))
+        self.assertEqual(["disabled", "disabled"], [entry["status"] for entry in result.page_repair])
+        for entry in result.page_repair:
+            self.assertEqual(
+                {"status": "disabled", "enabled": False, "attempted": False, "applied": False, "cache_hit": False, "mode": "off"},
+                {key: entry[key] for key in ("status", "enabled", "attempted", "applied", "cache_hit", "mode")},
+            )
+
     def test_images_survive_work_dir_removal(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

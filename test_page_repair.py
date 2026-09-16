@@ -9,7 +9,7 @@ from PIL import Image
 import page_repair
 from page_repair import build_ai_fallback_config, repair_page_model
 from preprocess import PreparedPage
-from structured_schema import BlockType, Box, ContentBlock, PageModel, Subject
+from structured_schema import BlockType, Box, ContentBlock, PageModel, ProblemUnit, Subject
 
 
 class TestPageRepairConfig(unittest.TestCase):
@@ -477,6 +477,80 @@ class TestPageRepairConfig(unittest.TestCase):
             repaired.metadata["ai_stages"]["page_repair"],
         )
 
+    def test_ai_answer_matching_the_local_baseline_is_applied_but_not_changed(self):
+        # Reproduces the review finding: page_repair.py used to set
+        # summary["applied"] = True whenever a response validated, with no
+        # signal for whether the write actually differed from the pre-repair
+        # baseline. A stubbed Gemini answer that returns exactly the
+        # baseline's own problem_start_block_ids must still report
+        # applied=True (a validated response was written and _apply_repair_
+        # payload always stamps grouping_source="ai_fallback") but
+        # changed=False and blocks_changed=0 -- "the oracle agreed" and
+        # "Gemini confirmed the trial's own grouping verbatim" must stay
+        # distinguishable.
+        prepared_page = PreparedPage(
+            page_id="page-1",
+            source_path="sample.png",
+            page_number=1,
+            image=Image.new("RGB", (100, 120), "white"),
+            original_size=(100, 120),
+        )
+        page = PageModel(
+            page_id="page-1",
+            width_px=100,
+            height_px=120,
+            subject=Subject.SCIENCE,
+            blocks=[
+                ContentBlock(
+                    block_id=f"block-{index}",
+                    block_type=BlockType.STEM,
+                    bbox=Box(left=0, top=index * 10, width=80, height=8),
+                    reading_order=index,
+                    text=f"{index + 1}. 문제",
+                )
+                for index in range(2)
+            ],
+        )
+        # The local baseline already classifies both numbered blocks as
+        # their own problem start (each has its own "N." marker); this
+        # payload reproduces that classification exactly.
+        payload = {
+            "problem_start_block_ids": ["block-0", "block-1"],
+            "choice_block_ids": [],
+            "figure_block_ids": [],
+            "display_titles": [],
+            "notes": [],
+        }
+
+        class EmptyCache:
+            def load_ai_repair(self, **_kwargs):
+                return None
+
+            def save_ai_repair(self, **_kwargs):
+                return None
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}):
+            with patch.object(
+                page_repair,
+                "_request_ai_repair_with_model_fallback",
+                return_value=(payload, "response-1", "gemini-3.1-pro-preview", [], {}),
+            ):
+                repaired = repair_page_model(
+                    prepared_page,
+                    page,
+                    ocr_mode="gemini",
+                    config=build_ai_fallback_config(mode="force"),
+                    cache=EmptyCache(),
+                )
+
+        summary = repaired.metadata["ai_fallback"]
+        self.assertEqual("applied", summary["status"])
+        self.assertTrue(summary["applied"])
+        self.assertEqual(2, summary["baseline_problem_count"])
+        self.assertEqual(2, summary["repaired_problem_count"])
+        self.assertEqual(0, summary["blocks_changed"])
+        self.assertFalse(summary["changed"])
+
     def test_repair_prompt_prioritizes_all_problem_starts_on_busy_pages(self):
         page = PageModel(
             page_id="page-1",
@@ -506,6 +580,85 @@ class TestPageRepairConfig(unittest.TestCase):
             ["merged_problem_block"],
         )
         self.assertIn("Return problem_units only", complex_prompt)
+
+
+class TestClassificationState(unittest.TestCase):
+    """White-box tests for the diff page_repair.py uses to tell "applied"
+    (a validated AI response was written) apart from "changed" (the write
+    actually differs from the pre-repair baseline) -- see
+    test_ai_answer_matching_the_local_baseline_is_applied_but_not_changed
+    above for the end-to-end version through repair_page_model.
+    """
+
+    def _page(self, block_types: dict[str, BlockType], problems: list[ProblemUnit]) -> PageModel:
+        return PageModel(
+            page_id="page-1",
+            width_px=100,
+            height_px=100,
+            subject=Subject.SCIENCE,
+            blocks=[
+                ContentBlock(
+                    block_id=block_id,
+                    block_type=block_type,
+                    bbox=Box(left=0, top=0, width=10, height=10),
+                    reading_order=index,
+                )
+                for index, (block_id, block_type) in enumerate(block_types.items())
+            ],
+            problems=problems,
+        )
+
+    def test_identical_pages_have_zero_changed_blocks(self):
+        page = self._page(
+            {"block-0": BlockType.TITLE, "block-1": BlockType.STEM},
+            [ProblemUnit(unit_id="p1", subject=Subject.SCIENCE, title=None, stem_block_ids=["block-0", "block-1"])],
+        )
+        before = page_repair._classification_state(page)
+        after = page_repair._classification_state(page)
+        self.assertEqual(0, page_repair._count_changed_blocks(before[0], after[0]))
+        self.assertEqual(before[1], after[1])
+
+    def test_a_retyped_block_counts_as_changed(self):
+        baseline = self._page({"block-0": BlockType.STEM, "block-1": BlockType.CHOICE}, [])
+        repaired = self._page({"block-0": BlockType.TITLE, "block-1": BlockType.CHOICE}, [])
+        baseline_types, _ = page_repair._classification_state(baseline)
+        repaired_types, _ = page_repair._classification_state(repaired)
+        self.assertEqual(1, page_repair._count_changed_blocks(baseline_types, repaired_types))
+
+    def test_a_different_problem_partition_counts_as_changed_even_with_identical_block_types(self):
+        # Two problems merged into one: no block changed type, but the
+        # stem/choice/figure partition of the ProblemUnits differs -- the
+        # "problem_units" half of the diff, not the "blocks" half.
+        block_types = {"block-0": BlockType.TITLE, "block-1": BlockType.TITLE}
+        baseline = self._page(
+            block_types,
+            [
+                ProblemUnit(unit_id="p1", subject=Subject.SCIENCE, title=None, stem_block_ids=["block-0"]),
+                ProblemUnit(unit_id="p2", subject=Subject.SCIENCE, title=None, stem_block_ids=["block-1"]),
+            ],
+        )
+        repaired = self._page(
+            block_types,
+            [ProblemUnit(unit_id="p1", subject=Subject.SCIENCE, title=None, stem_block_ids=["block-0", "block-1"])],
+        )
+        baseline_types, baseline_partition = page_repair._classification_state(baseline)
+        repaired_types, repaired_partition = page_repair._classification_state(repaired)
+        self.assertEqual(0, page_repair._count_changed_blocks(baseline_types, repaired_types))
+        self.assertNotEqual(baseline_partition, repaired_partition)
+
+    def test_grouping_source_metadata_alone_is_not_a_change(self):
+        # _apply_repair_payload always stamps grouping_source="ai_fallback"
+        # on every block it writes, whether or not the AI's answer differed
+        # from the baseline -- the diff must ignore metadata entirely, or
+        # every applied page would read as "changed".
+        baseline = self._page({"block-0": BlockType.TITLE}, [])
+        baseline.blocks[0].metadata["grouping_source"] = None
+        repaired = self._page({"block-0": BlockType.TITLE}, [])
+        repaired.blocks[0].metadata["grouping_source"] = "ai_fallback"
+        repaired.blocks[0].metadata["grouping_reason"] = ["forced"]
+        baseline_types, _ = page_repair._classification_state(baseline)
+        repaired_types, _ = page_repair._classification_state(repaired)
+        self.assertEqual(0, page_repair._count_changed_blocks(baseline_types, repaired_types))
 
 
 if __name__ == "__main__":

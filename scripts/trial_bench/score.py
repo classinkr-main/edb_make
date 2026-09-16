@@ -134,6 +134,29 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return numerator / denominator if denominator else None
 
 
+def ai_evidence_cell(page_repair: Any) -> tuple[str, bool | None]:
+    """(cell text, has_evidence) from an oracle observation's ``oracle.page_repair``
+    (scripts/trial_bench/oracle.py's ``summarize_page_repair`` output).
+
+    ``has_evidence`` is ``None`` when there is nothing to judge -- the field
+    is missing or malformed, e.g. an oracle observation from before this
+    instrumentation existed -- which is distinct from ``False`` (measured,
+    and found no real change). Only ``False`` triggers the report's
+    zero-evidence footnote; a scored report must not silently read a `1.00`
+    row as AI-confirmed when the oracle run behind it never proved AI page
+    repair changed anything.
+    """
+    if not isinstance(page_repair, dict) or "pages_total" not in page_repair:
+        return "?", None
+    pages_total = page_repair.get("pages_total") or 0
+    if pages_total == 0:
+        return "no records", False
+    pages_changed = page_repair.get("pages_changed") or 0
+    has_evidence = pages_changed > 0
+    cell = f"{pages_changed}/{pages_total}" if has_evidence else f"{pages_changed}/{pages_total} (NO EVIDENCE)"
+    return cell, has_evidence
+
+
 def score_case(trial: dict[str, Any], expected: dict[str, dict[str, Any]]) -> dict[str, Any]:
     trial_by_key = {problem["key"]: problem for problem in trial["problems"]}
     questions_t = {key for key in trial_by_key if key.startswith("q")}
@@ -187,12 +210,17 @@ def _keys_cell(keys: list[str]) -> str:
 
 
 def render_report(rows: list[dict[str, Any]]) -> str:
-    headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms"]
+    headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms", "ai_evidence"]
     table_rows = [
         [
             row["case"], row["status"], _fmt(row["question_recall"]), _fmt(row["question_precision"]),
             _fmt(row["passage_recall"]), _fmt(row["passage_precision"]), _fmt(row["mean_iou"]), row["low_iou"],
             _fmt(row["review_rate"]), _keys_cell(row["missing"]), _keys_cell(row["extra"]), row["trial_ms"], row["oracle_ms"],
+            # A row built by hand (as the tests here do) rather than by
+            # score_all carries no ai_evidence field at all -- "?" says the
+            # report cannot vouch for this row either way, distinct from
+            # score_all's own "no records"/"NO EVIDENCE" cells.
+            row.get("ai_evidence", "?"),
         ]
         for row in rows
     ]
@@ -208,10 +236,25 @@ def render_report(rows: list[dict[str, Any]]) -> str:
                 "합계", f"{sum(1 for row in rows if row['status'] == 'approved')}/{count} approved",
                 _fmt(mean("question_recall")), _fmt(mean("question_precision")), _fmt(mean("passage_recall")),
                 _fmt(mean("passage_precision")), _fmt(mean("mean_iou")), sum(row["low_iou"] for row in rows),
-                _fmt(mean("review_rate")), sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "",
+                _fmt(mean("review_rate")), sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "", "",
             ]
         )
-    return markdown_table(headers, table_rows)
+    table = markdown_table(headers, table_rows)
+    # The caveat lives next to the numbers it qualifies and is regenerated
+    # every run, so it can never go stale the way a hand-written banner in
+    # docs/web-trial-quality.md did (docs/web-trial-quality.md's old "AI 근거
+    # 없음" paragraph stayed put after update_doc rewrote only the table).
+    zero_evidence_cases = [row["case"] for row in rows if row.get("ai_evidence_ok") is False]
+    if zero_evidence_cases:
+        table += (
+            "\n\n> **AI page repair produced no evidence of a real change for "
+            f"{len(zero_evidence_cases)} of {len(rows)} case(s): "
+            + ", ".join(f"`{case}`" for case in zero_evidence_cases)
+            + ".** Those rows' scores show agreement with the trial's own local baseline, "
+            "not confirmation by AI-grade recognition -- see `ai_evidence` and rerun "
+            "scripts/trial_bench/oracle.py to refresh."
+        )
+    return table
 
 
 def score_all(cases: list[str], root: Path = BENCH_ROOT, warnings: list[str] | None = None) -> list[dict[str, Any]]:
@@ -228,7 +271,9 @@ def score_all(cases: list[str], root: Path = BENCH_ROOT, warnings: list[str] | N
         labels = load_json(labels_path) if labels_path.is_file() else None
         expected, status = expected_from(oracle, trial, labels, warnings=warnings)
         row = score_case(trial, expected)
-        row.update(status=status, oracle_ms=oracle["timing_ms"].get("total"))
+        oracle_page_repair = (oracle.get("oracle") or {}).get("page_repair") if isinstance(oracle.get("oracle"), dict) else None
+        evidence_cell, evidence_ok = ai_evidence_cell(oracle_page_repair)
+        row.update(status=status, oracle_ms=oracle["timing_ms"].get("total"), ai_evidence=evidence_cell, ai_evidence_ok=evidence_ok)
         rows.append(row)
     return rows
 

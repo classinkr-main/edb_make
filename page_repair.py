@@ -133,9 +133,51 @@ def _page_repair_stage_metadata(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _classification_state(
+    page: PageModel,
+) -> tuple[dict[str, BlockType], frozenset[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]]]:
+    """Snapshot the classification-relevant state of a page: each block's
+    ``block_type``, plus the stem/choice/figure block-id partition of its
+    ProblemUnits. Deliberately excludes metadata (``grouping_source``,
+    ``ai_grouping_role``, ...): ``_apply_repair_payload`` always stamps
+    ``grouping_source="ai_fallback"`` on every block it writes, so a
+    metadata diff would read as "changed" even when the AI's answer
+    reproduces the local baseline exactly.
+    """
+    block_types = {block.block_id: block.block_type for block in page.blocks}
+    problem_partition = frozenset(
+        (
+            tuple(sorted(problem.stem_block_ids)),
+            tuple(sorted(problem.choice_block_ids)),
+            tuple(sorted(problem.figure_block_ids)),
+        )
+        for problem in page.problems
+    )
+    return block_types, problem_partition
+
+
+def _count_changed_blocks(
+    baseline_block_types: dict[str, BlockType],
+    repaired_block_types: dict[str, BlockType],
+) -> int:
+    all_ids = set(baseline_block_types) | set(repaired_block_types)
+    return sum(
+        1
+        for block_id in all_ids
+        if baseline_block_types.get(block_id) != repaired_block_types.get(block_id)
+    )
+
+
 def _attach_ai_fallback_summary(page: PageModel, summary: dict[str, Any]) -> PageModel:
     summary.setdefault("stage", "page_repair")
     summary.setdefault("stage_label", "3단계 문항 경계 보정")
+    # Every summary that never reaches an "applied" branch (disabled,
+    # not_needed, missing_api_key, error, invalid_response, ...) never
+    # changed the page's classification either, so default both fields
+    # here; the two "applied" branches in repair_page_model overwrite them
+    # with the real diff against the pre-repair baseline.
+    summary.setdefault("blocks_changed", 0)
+    summary.setdefault("changed", False)
     page.metadata["ai_fallback"] = summary
     raw_stages = page.metadata.get("ai_stages")
     stages = dict(raw_stages) if isinstance(raw_stages, dict) else {}
@@ -156,6 +198,11 @@ def repair_page_model(
     resolved_config = config or AIFallbackConfig()
     pipeline_cache = cache or PipelineCache.for_source(prepared_page.source_path)
     baseline = group_problem_units(page)
+    # Snapshot classification state now, before anything mutates `baseline`
+    # in place: `_apply_repair_payload` below writes onto `baseline.blocks`
+    # directly and returns the same object, so capturing this after that
+    # call would compare the repaired page against itself.
+    baseline_block_types, baseline_problem_partition = _classification_state(baseline)
     route_decision = decide_page_route(
         baseline,
         ocr_mode=ocr_mode,
@@ -235,6 +282,8 @@ def repair_page_model(
                 trigger_reasons=trigger_reasons,
             )
             repaired = group_problem_units(replace(repaired, problems=[]))
+            repaired_block_types, repaired_problem_partition = _classification_state(repaired)
+            blocks_changed = _count_changed_blocks(baseline_block_types, repaired_block_types)
             summary.update(
                 {
                     "applied": True,
@@ -245,6 +294,8 @@ def repair_page_model(
                     "repaired_problem_count": len(repaired.problems),
                     "ai_notes": list(repair_payload.get("notes") or []),
                     "problem_units_accepted": len(problem_unit_metadata),
+                    "blocks_changed": blocks_changed,
+                    "changed": bool(blocks_changed) or repaired_problem_partition != baseline_problem_partition,
                 }
             )
             if cached_model and cached_model != resolved_config.resolved_model:
@@ -330,6 +381,8 @@ def repair_page_model(
         response_id=response_id,
     )
 
+    repaired_block_types, repaired_problem_partition = _classification_state(repaired)
+    blocks_changed = _count_changed_blocks(baseline_block_types, repaired_block_types)
     summary.update(
         {
             "applied": True,
@@ -341,6 +394,8 @@ def repair_page_model(
             "repaired_problem_count": len(repaired.problems),
             "ai_notes": list(repair_payload.get("notes") or []),
             "problem_units_accepted": len(problem_unit_metadata),
+            "blocks_changed": blocks_changed,
+            "changed": bool(blocks_changed) or repaired_problem_partition != baseline_problem_partition,
         }
     )
     if used_model != resolved_config.resolved_model:

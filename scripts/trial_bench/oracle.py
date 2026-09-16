@@ -68,11 +68,25 @@ def force_config(model: str = "") -> dict[str, Any]:
     }
 
 
-ZERO_APPLIED_WARNING = (
+ZERO_CHANGED_WARNING = (
     "0/{total} pages were changed by AI page repair for this case -- "
     "agreement with the trial is NOT evidence of AI-grade recognition; "
-    "AI repair either never ran or ran and made no change. "
+    "AI repair either never ran, or ran and its answer matched the local "
+    "baseline exactly (a validated 'applied' response is not the same thing "
+    "-- {applied}/{total} pages were applied without changing anything). "
     "Page statuses: {statuses}."
+)
+
+# Distinct from ZERO_CHANGED_WARNING: pages_total == 0 means the
+# instrumentation produced no per-page records at all (a renamed/missing
+# ParseResult.page_repair field, or a build_pages branch that never attaches
+# ai_fallback -- see build_problem_board_edb.py's page-as-is path), not that
+# AI repair ran and changed nothing. Collapsing the two into one flag would
+# make the instrumentation's own failure mode read as a normal, if boring,
+# measurement.
+NO_PAGE_RECORDS_WARNING = (
+    "no page-repair metadata recorded for this case -- the oracle "
+    "instrumentation did not run; this observation is not evidence of anything."
 )
 
 
@@ -84,23 +98,32 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
     """Turn ParseResult.page_repair (one ``ai_fallback`` metadata dict per
     page -- see page_repair.py's ``_attach_ai_fallback_summary``) into the
     counts that prove AI repair actually did something, not just that it
-    was configured to run.
+    was configured to run and its answer accepted.
 
     Field names and meaning match the existing per-run aggregates
     (``build_structured_page_json.py``'s ``build_run_summary`` and
     ``build_problem_board_edb.py``'s ``_summarize_ai_fallback_usage``):
     "attempted" is a fresh Gemini call this run, "cache_hit" reused a
-    previous real answer without calling Gemini again, and "applied" is the
-    only one of the three that means the page's block classification
-    actually changed -- from a fresh call or a cache hit either way. A page
-    can be attempted (or a cache hit) and still not applied (rejected,
-    errored, or the model found nothing to change), so ``pages_applied`` is
-    the number that matters: agreement with the trial on a case where it is
-    0 proves nothing about AI-grade recognition, so that case is flagged
-    rather than left to look identical to a case where AI repair genuinely
-    fixed something.
+    previous real answer without calling Gemini again, and "applied" means a
+    response validated and was written onto the page -- from a fresh call or
+    a cache hit either way. Applied does NOT mean the page's block
+    classification changed: ``_apply_repair_payload`` writes unconditionally
+    once validation passes, so an AI answer that reproduces the local
+    baseline exactly still counts as applied. ``pages_changed`` is the field
+    that means "actually changed" (page_repair.py's ``summary["changed"]``,
+    a diff of block types and the ProblemUnit stem/choice/figure partition
+    against the pre-repair baseline) -- ``pages_applied`` is kept alongside
+    it only to show how many of the applied pages were rubber-stamps.
 
-    ``errors`` alone is not enough to explain a zero-applied case: page_repair
+    Agreement with the trial on a case where ``pages_changed`` is 0 proves
+    nothing about AI-grade recognition, so that case is flagged (``zero_applied``)
+    rather than left to look identical to a case where AI repair genuinely
+    changed something. ``pages_total == 0`` is a different, louder failure --
+    the instrumentation recorded no per-page data at all -- and gets its own
+    ``no_page_records`` flag instead of being silently exempted from
+    ``zero_applied``.
+
+    ``errors`` alone is not enough to explain a zero-changed case: page_repair
     reports most of its no-ops through ``status`` and never sets ``error``
     (``missing_api_key``, ``not_needed``, ``too_many_blocks``), so the per-
     status counts travel with the flag as the reason it fired.
@@ -109,6 +132,7 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
     pages_attempted = 0
     pages_cache_hit = 0
     pages_applied = 0
+    pages_changed = 0
     models_used: set[str] = set()
     statuses: dict[str, int] = {}
     errors: list[dict[str, Any]] = []
@@ -121,6 +145,8 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
             pages_cache_hit += 1
         if entry.get("applied"):
             pages_applied += 1
+        if entry.get("changed"):
+            pages_changed += 1
         model_used = str(entry.get("model_used") or "").strip()
         if model_used:
             models_used.add(model_used)
@@ -129,33 +155,84 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
         error = str(entry.get("error") or "").strip()
         if error:
             errors.append({"page_index": index, "status": str(entry.get("status") or ""), "error": error})
-    zero_applied = pages_total > 0 and pages_applied == 0
+    no_page_records = pages_total == 0
+    zero_applied = pages_total > 0 and pages_changed == 0
+    if no_page_records:
+        warning = NO_PAGE_RECORDS_WARNING
+    elif zero_applied:
+        warning = ZERO_CHANGED_WARNING.format(total=pages_total, applied=pages_applied, statuses=format_statuses(statuses))
+    else:
+        warning = None
     return {
         "pages_total": pages_total,
         "pages_attempted": pages_attempted,
         "pages_cache_hit": pages_cache_hit,
         "pages_applied": pages_applied,
+        "pages_changed": pages_changed,
         "models_used": sorted(models_used),
         "statuses": dict(sorted(statuses.items())),
         "errors": errors,
         "zero_applied": zero_applied,
-        "warning": (
-            ZERO_APPLIED_WARNING.format(total=pages_total, statuses=format_statuses(statuses))
-            if zero_applied
-            else None
-        ),
+        "no_page_records": no_page_records,
+        "warning": warning,
+    }
+
+
+FAILURE_STATUS = "oracle_failed"
+
+
+def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
+    """A page_repair summary for a case whose parse raised before it produced
+    any pages at all (force_config's fail_on_error=True lets a Gemini
+    exception propagate out of repair_page_model). Shaped like
+    summarize_page_repair's normal output so main() and score.py can read it
+    the same way, but status/warning name the failure instead of reporting a
+    clean-looking 0/0 row.
+    """
+    return {
+        "pages_total": 0,
+        "pages_attempted": 0,
+        "pages_cache_hit": 0,
+        "pages_applied": 0,
+        "pages_changed": 0,
+        "models_used": [],
+        "statuses": {FAILURE_STATUS: 1},
+        "errors": [{"page_index": None, "status": FAILURE_STATUS, "error": str(exc)}],
+        "zero_applied": False,
+        "no_page_records": True,
+        "status": FAILURE_STATUS,
+        "warning": f"oracle_case raised before any page was parsed -- {exc}",
     }
 
 
 def oracle_case(input_pdf: Path, subject: str, *, ocr_mode: str = "auto", model: str = "", root: Path = BENCH_ROOT) -> dict[str, Any]:
     case = input_pdf.stem
-    result = parse_in_scratch(input_pdf, parse_problems, subject=subject, ocr_mode=ocr_mode, ai_fallback_config=force_config(model))
+    try:
+        result = parse_in_scratch(input_pdf, parse_problems, subject=subject, ocr_mode=ocr_mode, ai_fallback_config=force_config(model))
+    except Exception as exc:
+        # Without this, a Gemini exception under fail_on_error=True propagates
+        # straight out of parse_in_scratch and this case leaves no observation
+        # JSON at all -- the only record of what went wrong would be a
+        # traceback in the terminal. Save a failure observation before
+        # re-raising so the run's durable record always covers every case.
+        observation = {
+            "case": case,
+            "error": str(exc),
+            "oracle": {
+                "ocr_mode": ocr_mode,
+                "model": model or "default",
+                "ai_mode": "force",
+                "page_repair": _failed_page_repair_summary(exc),
+            },
+        }
+        save_json(bench_dir("oracle", root) / f"{case}.json", observation)
+        raise
     observation = observation_from_result(case, result, crops_dir=bench_dir("oracle_crops", root) / case)
     observation["oracle"] = {
         "ocr_mode": ocr_mode,
         "model": model or "default",
         "ai_mode": "force",
-        "page_repair": summarize_page_repair(getattr(result, "page_repair", ()) or ()),
+        "page_repair": summarize_page_repair(result.page_repair),
     }
     save_json(bench_dir("oracle", root) / f"{case}.json", observation)
     return observation
@@ -175,11 +252,22 @@ def main(argv: list[str] | None = None) -> int:
     cases = load_json(BENCH_ROOT / "cases.json") if (BENCH_ROOT / "cases.json").is_file() else {}
     rows = []
     warnings: list[tuple[str, str]] = []
+    failed_cases: list[str] = []
     for pdf in select_inputs(args.cases):
         subject = str(cases.get(pdf.stem, {}).get("subject") or "unknown")
-        observation = oracle_case(pdf, subject, ocr_mode=args.ocr_mode, model=args.model)
+        try:
+            observation = oracle_case(pdf, subject, ocr_mode=args.ocr_mode, model=args.model)
+        except Exception as exc:
+            # A failed case must not cost the run its whole table: oracle_case
+            # has already saved this case's own failure observation to disk,
+            # and the cases that already succeeded are still worth printing
+            # and pasting into docs, so keep going instead of dying here.
+            failed_cases.append(pdf.stem)
+            warnings.append((pdf.stem, f"oracle_case raised before any page was parsed -- {exc}"))
+            rows.append([pdf.stem, subject, "-", "-", "-", "-", "-", "ERROR", "-", "-", 1])
+            continue
         page_repair = observation["oracle"]["page_repair"]
-        applied = f"{page_repair['pages_applied']}/{page_repair['pages_total']}"
+        changed = f"{page_repair['pages_changed']}/{page_repair['pages_total']}"
         rows.append(
             [
                 pdf.stem,
@@ -192,7 +280,11 @@ def main(argv: list[str] | None = None) -> int:
                 # The verdict rides inside the cell, not just in the note
                 # below, because this table gets pasted into docs a row at a
                 # time and "0/4" on its own reads as an unremarkable number.
-                f"{applied} (NO AI EVIDENCE)" if page_repair["zero_applied"] else applied,
+                # This is the real change signal (page_repair.py's
+                # summary["changed"]), not the "applied" (validated-and-written)
+                # count that repair_applied shows next to it.
+                f"{changed} (NO AI EVIDENCE)" if (page_repair["zero_applied"] or page_repair["no_page_records"]) else changed,
+                f"{page_repair['pages_applied']}/{page_repair['pages_total']}",
                 ", ".join(page_repair["models_used"]) or "-",
                 len(page_repair["errors"]),
             ]
@@ -203,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         markdown_table(
             [
                 "case", "subject", "problems", "passages", "total_ms",
-                "repair_attempted", "repair_cached", "repair_applied", "repair_model", "repair_errors",
+                "repair_attempted", "repair_cached", "repair_changed", "repair_applied", "repair_model", "repair_errors",
             ],
             rows,
         )
@@ -213,12 +305,12 @@ def main(argv: list[str] | None = None) -> int:
     # operator's copy for the run they are watching (score.py's _warn split).
     if warnings:
         print()
-        print(f"> **AI page repair changed nothing in {len(warnings)} of {len(rows)} case(s).**")
+        print(f"> **{len(warnings)} of {len(rows)} case(s) are NOT evidence of AI-grade recognition.**")
         for case_name, warning in warnings:
             print(f"> - `{case_name}`: {warning}")
     for case_name, warning in warnings:
         print(f"oracle.py: WARNING {case_name}: {warning}", file=sys.stderr)
-    return 0
+    return 1 if failed_cases else 0
 
 
 if __name__ == "__main__":

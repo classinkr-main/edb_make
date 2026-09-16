@@ -387,44 +387,56 @@ class TestOracleConfig(unittest.TestCase):
 
 
 class TestSummarizePageRepair(unittest.TestCase):
-    def test_counts_attempted_applied_models_and_errors_from_page_metadata(self):
+    def test_counts_attempted_applied_changed_models_and_errors_from_page_metadata(self):
         # Fake per-page ai_fallback metadata -- the shape page_repair.py's
         # _attach_ai_fallback_summary attaches to PageModel.metadata. No
         # network, no PageModel, no Gemini call.
         page_repair = [
-            {"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview", "status": "applied"},
+            {"attempted": True, "applied": True, "changed": True, "model_used": "gemini-3.1-pro-preview", "status": "applied"},
             # A cache hit reused a previous real answer without a fresh
             # network call -- counted separately from "attempted", matching
             # build_run_summary/_summarize_ai_fallback_usage's own fields.
-            {"attempted": False, "cache_hit": True, "applied": True, "model_used": "gemini-3.1-pro-preview", "status": "cache_hit"},
+            {"attempted": False, "cache_hit": True, "applied": True, "changed": True, "model_used": "gemini-3.1-pro-preview", "status": "cache_hit"},
+            # A validated response was written (applied) but it reproduced
+            # the local baseline exactly -- counts toward pages_applied, not
+            # pages_changed. This is the exact ambiguity page_repair.py's
+            # summary["changed"] exists to resolve.
+            {"attempted": True, "applied": True, "changed": False, "model_used": "gemini-3.1-pro-preview", "status": "applied"},
             {"attempted": True, "applied": False, "status": "error", "error": "HTTP 500: boom"},
             {"attempted": False, "applied": False, "status": "disabled"},
         ]
         summary = summarize_page_repair(page_repair)
-        self.assertEqual(4, summary["pages_total"])
-        self.assertEqual(2, summary["pages_attempted"])
+        self.assertEqual(5, summary["pages_total"])
+        self.assertEqual(3, summary["pages_attempted"])
         self.assertEqual(1, summary["pages_cache_hit"])
-        self.assertEqual(2, summary["pages_applied"])
+        self.assertEqual(3, summary["pages_applied"])
+        self.assertEqual(2, summary["pages_changed"])
         self.assertEqual(["gemini-3.1-pro-preview"], summary["models_used"])
-        self.assertEqual([{"page_index": 2, "status": "error", "error": "HTTP 500: boom"}], summary["errors"])
-        self.assertEqual({"applied": 1, "cache_hit": 1, "disabled": 1, "error": 1}, summary["statuses"])
+        self.assertEqual([{"page_index": 3, "status": "error", "error": "HTTP 500: boom"}], summary["errors"])
+        self.assertEqual({"applied": 2, "cache_hit": 1, "disabled": 1, "error": 1}, summary["statuses"])
         self.assertFalse(summary["zero_applied"])
+        self.assertFalse(summary["no_page_records"])
         self.assertIsNone(summary["warning"])
 
-    def test_zero_applied_case_is_flagged_even_when_repair_was_attempted(self):
-        # Attempted but never changed anything -- agreement with the trial
-        # here is a silent no-op, not evidence the AI recognized anything.
+    def test_zero_changed_case_is_flagged_even_when_pages_were_applied(self):
+        # "applied" (a validated response was written) is not "changed" (the
+        # write actually differed from the local baseline) -- agreement with
+        # the trial here is a silent no-op, not evidence the AI recognized
+        # anything, even though one page was fully applied.
         page_repair = [
-            {"attempted": True, "applied": False, "status": "not_needed"},
-            {"attempted": False, "applied": False, "status": "disabled"},
+            {"attempted": True, "applied": True, "changed": False, "status": "applied"},
+            {"attempted": False, "applied": False, "changed": False, "status": "disabled"},
         ]
         summary = summarize_page_repair(page_repair)
-        self.assertEqual(0, summary["pages_applied"])
+        self.assertEqual(1, summary["pages_applied"])
+        self.assertEqual(0, summary["pages_changed"])
         self.assertTrue(summary["zero_applied"])
+        self.assertFalse(summary["no_page_records"])
         self.assertIsNotNone(summary["warning"])
         self.assertIn("NOT evidence of AI-grade recognition", summary["warning"])
+        self.assertIn("1/2 pages were applied without changing anything", summary["warning"])
 
-    def test_the_zero_applied_warning_names_the_statuses_that_explain_why(self):
+    def test_the_zero_changed_warning_names_the_statuses_that_explain_why(self):
         # page_repair.py reports most silent no-ops through "status" without
         # ever setting "error" -- an unset GEMINI_API_KEY is the dangerous
         # one, since it makes a whole run look like "AI repair changed
@@ -444,18 +456,25 @@ class TestSummarizePageRepair(unittest.TestCase):
         summary = summarize_page_repair([{"applied": False}])
         self.assertEqual({"unknown": 1}, summary["statuses"])
 
-    def test_a_page_that_did_change_something_is_not_flagged(self):
-        summary = summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.6-flash"}])
+    def test_a_page_that_actually_changed_something_is_not_flagged(self):
+        summary = summarize_page_repair([{"attempted": True, "applied": True, "changed": True, "model_used": "gemini-3.6-flash"}])
         self.assertFalse(summary["zero_applied"])
+        self.assertFalse(summary["no_page_records"])
         self.assertIsNone(summary["warning"])
 
-    def test_empty_page_repair_is_not_flagged_as_a_no_op_case(self):
-        # No pages at all is a different failure mode (nothing was measured)
-        # from "measured and found nothing changed" -- don't conflate them.
+    def test_empty_page_repair_is_flagged_as_no_page_records_not_zero_applied(self):
+        # No pages at all is a different, louder failure mode (the
+        # instrumentation recorded nothing -- a renamed/missing
+        # ParseResult.page_repair field, or a build_pages branch that never
+        # attaches ai_fallback) from "measured and found nothing changed".
+        # Collapsing them into the same silent, unflagged state would let the
+        # instrumentation's own failure mode read as a clean 0/0 row.
         summary = summarize_page_repair([])
         self.assertEqual(0, summary["pages_total"])
         self.assertFalse(summary["zero_applied"])
-        self.assertIsNone(summary["warning"])
+        self.assertTrue(summary["no_page_records"])
+        self.assertIsNotNone(summary["warning"])
+        self.assertIn("did not run", summary["warning"])
 
 
 class TestOracleCaseRepairInstrumentation(unittest.TestCase):
@@ -472,7 +491,7 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
 
     def test_observation_json_carries_the_repair_counts(self):
         fake_result = self._fake_result(
-            [{"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview", "status": "applied"}]
+            [{"attempted": True, "applied": True, "changed": True, "model_used": "gemini-3.1-pro-preview", "status": "applied"}]
         )
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "bench"
@@ -487,10 +506,12 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
             "pages_attempted": 1,
             "pages_cache_hit": 0,
             "pages_applied": 1,
+            "pages_changed": 1,
             "models_used": ["gemini-3.1-pro-preview"],
             "statuses": {"applied": 1},
             "errors": [],
             "zero_applied": False,
+            "no_page_records": False,
             "warning": None,
         }
         self.assertEqual(expected, observation["oracle"]["page_repair"])
@@ -498,8 +519,10 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
         # what the function returned in-process.
         self.assertEqual(expected, saved["oracle"]["page_repair"])
 
-    def test_a_zero_applied_case_is_flagged_in_the_saved_observation(self):
-        fake_result = self._fake_result([{"attempted": True, "applied": False, "status": "not_needed"}])
+    def test_a_zero_changed_case_is_flagged_in_the_saved_observation(self):
+        # Applied (a validated response was written) but not changed (it
+        # matched the local baseline) -- still zero evidence.
+        fake_result = self._fake_result([{"attempted": True, "applied": True, "changed": False, "status": "applied"}])
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "bench"
             pdf_path = Path(temp_dir) / "case.pdf"
@@ -510,15 +533,81 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
         self.assertTrue(observation["oracle"]["page_repair"]["zero_applied"])
         self.assertIn("NOT evidence of AI-grade recognition", observation["oracle"]["page_repair"]["warning"])
 
+    def test_oracle_case_forwards_ocr_mode_and_forced_ai_config_to_the_parser(self):
+        # patch.object(oracle, "parse_problems", return_value=fake_result) --
+        # the pattern every other test in this class uses -- proves nothing
+        # about what oracle_case actually asked the parser to do: an
+        # oracle_case that dropped ai_fallback_config entirely, or hardcoded
+        # ocr_mode, would produce this exact fake_result and pass every
+        # assertion above. Capture the kwargs at the boundary instead, same
+        # as test_problem_parser.py's test_recognition_arguments_reach_build_pages.
+        fake_result = self._fake_result([])
+        captured = {}
+
+        def recorder(*args, **kwargs):
+            captured.update(kwargs)
+            return fake_result
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(oracle, "parse_problems", side_effect=recorder):
+                oracle_case(pdf_path, "physics", ocr_mode="auto", model="gemini-3.6-flash", root=root)
+
+        self.assertEqual("physics", captured.get("subject"))
+        self.assertEqual("auto", captured.get("ocr_mode"))
+        self.assertEqual(force_config("gemini-3.6-flash"), captured.get("ai_fallback_config"))
+
+    def test_oracle_case_does_not_silently_swallow_a_missing_page_repair_attribute(self):
+        # oracle.py used to read getattr(result, "page_repair", ()) or () --
+        # a renamed/missing field degraded to an empty tuple and printed a
+        # clean-looking 0/0 row instead of failing loudly. Reading
+        # result.page_repair directly turns that into an AttributeError.
+        class ResultWithoutPageRepair:
+            pages: list = []
+            problems: list = []
+            source_page_count = 0
+            timing_ms: dict = {}
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(oracle, "parse_problems", return_value=ResultWithoutPageRepair()):
+                with self.assertRaises(AttributeError):
+                    oracle_case(pdf_path, "physics", root=root)
+
+    def test_oracle_case_saves_a_failure_observation_and_reraises_when_parsing_fails(self):
+        # force_config's fail_on_error=True lets a Gemini exception propagate
+        # out of repair_page_model, through build_pages, out of
+        # parse_in_scratch. Without this, the case leaves no observation JSON
+        # at all -- the only record of the failure would be a terminal
+        # traceback.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(oracle, "parse_problems", side_effect=RuntimeError("Gemini exploded")):
+                with self.assertRaisesRegex(RuntimeError, "Gemini exploded"):
+                    oracle_case(pdf_path, "physics", root=root)
+            saved = json.loads((root / "oracle" / "case.json").read_text(encoding="utf-8"))
+
+        page_repair = saved["oracle"]["page_repair"]
+        self.assertEqual("oracle_failed", page_repair["status"])
+        self.assertTrue(page_repair["no_page_records"])
+        self.assertIn("Gemini exploded", page_repair["warning"])
+        self.assertIn("Gemini exploded", saved["error"])
+
 
 class TestOracleMainReporting(unittest.TestCase):
-    def test_main_prints_repair_counts_and_flags_only_the_zero_applied_case(self):
+    def test_main_prints_repair_counts_and_flags_only_the_zero_changed_case(self):
         observations = {
             "case-a": {
                 "problems": [{"key": "q1"}],
                 "passage_ranges": [],
                 "timing_ms": {"total": 100},
-                "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview"}])},
+                "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "changed": True, "model_used": "gemini-3.1-pro-preview"}])},
             },
             "case-b": {
                 "problems": [{"key": "q1"}, {"key": "q2"}],
@@ -547,12 +636,13 @@ class TestOracleMainReporting(unittest.TestCase):
         # stdout is the durable record: the table gets pasted into
         # docs/web-trial-quality.md and read later by someone who never saw
         # this terminal, so the verdict has to ride along in the row itself
-        # and in a note under the table -- a stderr-only warning vanishes the
-        # moment anyone redirects stdout into a file.
+        # (repair_changed, not repair_applied) and in a note under the table
+        # -- a stderr-only warning vanishes the moment anyone redirects
+        # stdout into a file.
         report = out.getvalue()
-        self.assertIn("| case-a | unknown | 1 | 0 | 100 | 1/1 | 0/1 | 1/1 | gemini-3.1-pro-preview | 0 |", report)
-        self.assertIn("| case-b | unknown | 2 | 0 | 200 | 1/1 | 0/1 | 0/1 (NO AI EVIDENCE) | - | 0 |", report)
-        self.assertIn("AI page repair changed nothing in 1 of 2 case(s)", report)
+        self.assertIn("| case-a | unknown | 1 | 0 | 100 | 1/1 | 0/1 | 1/1 | 1/1 | gemini-3.1-pro-preview | 0 |", report)
+        self.assertIn("| case-b | unknown | 2 | 0 | 200 | 1/1 | 0/1 | 0/1 (NO AI EVIDENCE) | 0/1 | - | 0 |", report)
+        self.assertIn("1 of 2 case(s) are NOT evidence of AI-grade recognition", report)
         self.assertIn("`case-b`", report)
         self.assertIn("NOT evidence of AI-grade recognition", report)
         self.assertNotIn("`case-a`", report)
@@ -562,12 +652,12 @@ class TestOracleMainReporting(unittest.TestCase):
         self.assertIn("NOT evidence of AI-grade recognition", warning_text)
         self.assertNotIn("case-a:", warning_text)
 
-    def test_main_prints_no_zero_applied_note_when_every_case_changed_a_page(self):
+    def test_main_prints_no_zero_changed_note_when_every_case_changed_a_page(self):
         observation = {
             "problems": [{"key": "q1"}],
             "passage_ranges": [],
             "timing_ms": {"total": 100},
-            "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview"}])},
+            "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "changed": True, "model_used": "gemini-3.1-pro-preview"}])},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             empty_root = Path(temp_dir)
@@ -583,8 +673,70 @@ class TestOracleMainReporting(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         self.assertNotIn("NO AI EVIDENCE", out.getvalue())
-        self.assertNotIn("changed nothing", out.getvalue())
+        self.assertNotIn("NOT evidence of AI-grade recognition", out.getvalue())
         self.assertEqual("", err.getvalue())
+
+    def test_main_flags_a_case_whose_oracle_run_produced_no_page_records(self):
+        # pages_total == 0 is the instrumentation's own failure mode (see
+        # TestSummarizePageRepair's no_page_records tests) -- it must not
+        # read as an unremarkable, unflagged 0/0 row.
+        observation = {
+            "problems": [],
+            "passage_ranges": [],
+            "timing_ms": {"total": 100},
+            "oracle": {"page_repair": summarize_page_repair([])},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            empty_root = Path(temp_dir)
+            with (
+                patch.dict(os.environ, {"GEMINI_API_KEY": "fake-oracle-test-key"}),
+                patch.object(oracle, "BENCH_ROOT", empty_root),
+                patch.object(oracle, "select_inputs", return_value=[Path("case-a.pdf")]),
+                patch.object(oracle, "oracle_case", return_value=observation),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = oracle.main(["--runtime-dir", str(empty_root)])
+
+        self.assertEqual(0, exit_code)
+        report = out.getvalue()
+        self.assertIn("0/0 (NO AI EVIDENCE)", report)
+        self.assertIn("did not run", report)
+        self.assertIn("did not run", err.getvalue())
+
+    def test_main_still_prints_the_table_and_exits_nonzero_when_one_case_fails(self):
+        # A case whose oracle_case call raises (force_config's
+        # fail_on_error=True) must not cost the run its whole table: the
+        # cases that already succeeded are still worth printing and pasting
+        # into docs.
+        def fake_oracle_case(pdf, subject, *, ocr_mode, model):
+            if pdf.stem == "case-a":
+                return {
+                    "problems": [{"key": "q1"}],
+                    "passage_ranges": [],
+                    "timing_ms": {"total": 100},
+                    "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "changed": True}])},
+                }
+            raise RuntimeError("Gemini exploded")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            empty_root = Path(temp_dir)
+            with (
+                patch.dict(os.environ, {"GEMINI_API_KEY": "fake-oracle-test-key"}),
+                patch.object(oracle, "BENCH_ROOT", empty_root),
+                patch.object(oracle, "select_inputs", return_value=[Path("case-a.pdf"), Path("case-b.pdf")]),
+                patch.object(oracle, "oracle_case", side_effect=fake_oracle_case),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = oracle.main(["--runtime-dir", str(empty_root)])
+
+        self.assertEqual(1, exit_code)
+        report = out.getvalue()
+        self.assertIn("| case-a |", report)
+        self.assertIn("| case-b |", report)
+        self.assertIn("ERROR", report)
+        self.assertIn("Gemini exploded", err.getvalue())
 
 
 def _obs(case: str, problems: list[tuple], total_ms: int = 100) -> dict:
@@ -752,8 +904,36 @@ class TestScore(unittest.TestCase):
         header, _, body = report.splitlines()[:3]
         self.assertNotIn("원소", body)
         self.assertIn("q5 t:#1 t:#2", body)
-        self.assertTrue(body.endswith("| 100 | 200 |"), body)
+        # Trailing "?" is the ai_evidence column's fallback for a row with no
+        # such field, same as every other hand-built fixture in this class.
+        self.assertTrue(body.endswith("| 100 | 200 | ? |"), body)
         self.assertEqual(header.count("|"), body.count("|"))
+
+    def test_render_report_adds_an_ai_evidence_column_and_a_zero_evidence_footnote(self):
+        rows = [
+            {"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200, "ai_evidence": "2/2", "ai_evidence_ok": True},
+            {"case": "b", "status": "pending", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200, "ai_evidence": "0/2 (NO EVIDENCE)", "ai_evidence_ok": False},
+        ]
+        report = render_report(rows)
+        self.assertIn("ai_evidence", report.splitlines()[0])
+        self.assertIn("| a | approved | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 100 | 200 | 2/2 |", report)
+        self.assertIn("| b | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 100 | 200 | 0/2 (NO EVIDENCE) |", report)
+        # The caveat is generated fresh every call, inside the same string
+        # that update_doc wraps in DOC_START/DOC_END -- unlike the old
+        # hand-written banner in docs/web-trial-quality.md, it cannot go
+        # stale relative to the numbers next to it.
+        self.assertIn("AI page repair produced no evidence of a real change for 1 of 2 case(s): `b`", report)
+
+    def test_render_report_marks_a_row_with_no_ai_evidence_field_as_unknown_not_zero(self):
+        # A row with no ai_evidence field at all (every other render_report
+        # test in this file, matching score.py's output before this
+        # instrumentation existed) renders "?" and must not be swept into
+        # the zero-evidence footnote -- "unknown" is not "measured and found
+        # nothing".
+        rows = [{"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}]
+        report = render_report(rows)
+        self.assertIn("| a | approved | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 100 | 200 | ? |", report)
+        self.assertNotIn("no evidence of a real change", report)
 
 
 class TestScoreAll(unittest.TestCase):
@@ -775,9 +955,28 @@ class TestScoreAll(unittest.TestCase):
             self.assertEqual("pending", by_case["b"]["status"])
             self.assertEqual(111, by_case["a"]["trial_ms"])
             self.assertEqual(222, by_case["a"]["oracle_ms"])  # from the oracle's total, not the trial's
+            # _obs() (used for both the trial and oracle fixture files here)
+            # carries no "oracle" key at all -- an oracle observation from
+            # before this instrumentation existed -- so score_all must fall
+            # back to "unknown", not crash or claim zero evidence.
+            self.assertEqual("?", by_case["a"]["ai_evidence"])
+            self.assertIsNone(by_case["a"]["ai_evidence_ok"])
 
             filtered = score_all(["a"], root=root)
             self.assertEqual(["a"], [row["case"] for row in filtered])
+
+    def test_score_all_reads_ai_evidence_from_the_oracle_observations_page_repair(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            oracle_obs = _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200)
+            oracle_obs["oracle"] = {"page_repair": {"pages_total": 2, "pages_changed": 1}}
+            common.save_json(common.bench_dir("oracle", root) / "a.json", oracle_obs)
+
+            rows = score_all([], root=root)
+            self.assertEqual(1, len(rows))
+            self.assertEqual("1/2", rows[0]["ai_evidence"])
+            self.assertTrue(rows[0]["ai_evidence_ok"])
 
     def test_score_all_still_scores_a_case_whose_label_key_went_stale(self):
         """The before/after workflow: the fixed parser no longer emits an approved "trial only" key."""
