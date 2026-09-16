@@ -349,19 +349,41 @@ class TestOracleConfig(unittest.TestCase):
         self.assertTrue(config["fail_on_error"])
         self.assertEqual("gemini-x", force_config("gemini-x")["model"])
 
-    def test_force_config_deltas_from_the_desktop_forced_path_are_the_documented_ones(self):
-        # app_server.py's two ai_fallback="force" call sites both compute
-        # ai_config.get("timeout_ms") or 30000, and neither overrides
-        # run_problem_export's fail_on_ai_error default (False). Everything
-        # else here is set equal to force_config's own value on purpose --
-        # this pins that only the two deltas the docstring documents exist,
-        # not that force_config independently re-derives every desktop
-        # default (max_regions differs too, but is inert under mode="force"
-        # in page_repair.py's routing, so it is out of scope here).
-        desktop_forced = dict(force_config(""), timeout_ms=30000, fail_on_error=False)
+    def test_force_config_differs_from_the_desktop_forced_path_only_where_documented(self):
+        # Transcribed from app_server.py's ai_fallback="force" call sites,
+        # which send threshold=0.72, max_regions=30, timeout_ms=30000 and
+        # leave run_problem_export's fail_on_ai_error at its default False;
+        # max_tokens/temperature go in unset and build_ai_fallback_config
+        # resolves max_tokens to 4096. Spelled out rather than derived from
+        # force_config so that a new or silently changed key here fails the
+        # test instead of being absorbed into the baseline.
+        desktop_forced = {
+            "mode": "force",
+            "provider": "gemini",
+            "model": "",
+            "threshold": 0.72,
+            "max_regions": 30,
+            "max_tokens": 4096,
+            "timeout_ms": 30000,
+            "save_debug": False,
+            "fail_on_error": False,
+        }
         config = force_config("")
+        self.assertEqual(set(desktop_forced), set(config))
         deltas = {key: (desktop_forced[key], config[key]) for key in desktop_forced if desktop_forced[key] != config[key]}
-        self.assertEqual({"timeout_ms": (30000, 60000), "fail_on_error": (False, True)}, deltas)
+        self.assertEqual(
+            {
+                # The two deliberate deltas force_config's docstring explains.
+                "timeout_ms": (30000, 60000),
+                "fail_on_error": (False, True),
+                # Not a third delta in behaviour: force mode never consults
+                # max_regions (pinned by test_page_repair.py's
+                # test_force_mode_ignores_max_regions), so the oracle is left
+                # on the pipeline default instead of the desktop's override.
+                "max_regions": (30, 48),
+            },
+            deltas,
+        )
 
 
 class TestSummarizePageRepair(unittest.TestCase):
@@ -385,6 +407,7 @@ class TestSummarizePageRepair(unittest.TestCase):
         self.assertEqual(2, summary["pages_applied"])
         self.assertEqual(["gemini-3.1-pro-preview"], summary["models_used"])
         self.assertEqual([{"page_index": 2, "status": "error", "error": "HTTP 500: boom"}], summary["errors"])
+        self.assertEqual({"applied": 1, "cache_hit": 1, "disabled": 1, "error": 1}, summary["statuses"])
         self.assertFalse(summary["zero_applied"])
         self.assertIsNone(summary["warning"])
 
@@ -400,6 +423,26 @@ class TestSummarizePageRepair(unittest.TestCase):
         self.assertTrue(summary["zero_applied"])
         self.assertIsNotNone(summary["warning"])
         self.assertIn("NOT evidence of AI-grade recognition", summary["warning"])
+
+    def test_the_zero_applied_warning_names_the_statuses_that_explain_why(self):
+        # page_repair.py reports most silent no-ops through "status" without
+        # ever setting "error" -- an unset GEMINI_API_KEY is the dangerous
+        # one, since it makes a whole run look like "AI repair changed
+        # nothing" with an empty error list. The warning has to carry the
+        # reason, not just the count.
+        summary = summarize_page_repair(
+            [
+                {"attempted": False, "applied": False, "status": "missing_api_key"},
+                {"attempted": False, "applied": False, "status": "missing_api_key"},
+            ]
+        )
+        self.assertEqual([], summary["errors"])
+        self.assertEqual({"missing_api_key": 2}, summary["statuses"])
+        self.assertIn("missing_api_key=2", summary["warning"])
+
+    def test_a_page_entry_without_a_status_is_counted_as_unknown(self):
+        summary = summarize_page_repair([{"applied": False}])
+        self.assertEqual({"unknown": 1}, summary["statuses"])
 
     def test_a_page_that_did_change_something_is_not_flagged(self):
         summary = summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.6-flash"}])
@@ -445,6 +488,7 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
             "pages_cache_hit": 0,
             "pages_applied": 1,
             "models_used": ["gemini-3.1-pro-preview"],
+            "statuses": {"applied": 1},
             "errors": [],
             "zero_applied": False,
             "warning": None,
@@ -500,13 +544,47 @@ class TestOracleMainReporting(unittest.TestCase):
                     exit_code = oracle.main(["--runtime-dir", str(empty_root)])
 
         self.assertEqual(0, exit_code)
-        table = out.getvalue()
-        self.assertIn("| case-a | unknown | 1 | 0 | 100 | 1/1 | 0/1 | 1/1 | gemini-3.1-pro-preview | 0 |", table)
-        self.assertIn("| case-b | unknown | 2 | 0 | 200 | 1/1 | 0/1 | 0/1 | - | 0 |", table)
+        # stdout is the durable record: the table gets pasted into
+        # docs/web-trial-quality.md and read later by someone who never saw
+        # this terminal, so the verdict has to ride along in the row itself
+        # and in a note under the table -- a stderr-only warning vanishes the
+        # moment anyone redirects stdout into a file.
+        report = out.getvalue()
+        self.assertIn("| case-a | unknown | 1 | 0 | 100 | 1/1 | 0/1 | 1/1 | gemini-3.1-pro-preview | 0 |", report)
+        self.assertIn("| case-b | unknown | 2 | 0 | 200 | 1/1 | 0/1 | 0/1 (NO AI EVIDENCE) | - | 0 |", report)
+        self.assertIn("AI page repair changed nothing in 1 of 2 case(s)", report)
+        self.assertIn("`case-b`", report)
+        self.assertIn("NOT evidence of AI-grade recognition", report)
+        self.assertNotIn("`case-a`", report)
+        # stderr keeps the operator-facing copy, matching score.py's _warn.
         warning_text = err.getvalue()
         self.assertIn("case-b:", warning_text)
         self.assertIn("NOT evidence of AI-grade recognition", warning_text)
         self.assertNotIn("case-a:", warning_text)
+
+    def test_main_prints_no_zero_applied_note_when_every_case_changed_a_page(self):
+        observation = {
+            "problems": [{"key": "q1"}],
+            "passage_ranges": [],
+            "timing_ms": {"total": 100},
+            "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview"}])},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            empty_root = Path(temp_dir)
+            with (
+                patch.dict(os.environ, {"GEMINI_API_KEY": "fake-oracle-test-key"}),
+                patch.object(oracle, "BENCH_ROOT", empty_root),
+                patch.object(oracle, "select_inputs", return_value=[Path("case-a.pdf")]),
+                patch.object(oracle, "oracle_case", return_value=observation),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = oracle.main(["--runtime-dir", str(empty_root)])
+
+        self.assertEqual(0, exit_code)
+        self.assertNotIn("NO AI EVIDENCE", out.getvalue())
+        self.assertNotIn("changed nothing", out.getvalue())
+        self.assertEqual("", err.getvalue())
 
 
 def _obs(case: str, problems: list[tuple], total_ms: int = 100) -> dict:

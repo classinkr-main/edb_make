@@ -205,6 +205,72 @@ class TestPageRepairConfig(unittest.TestCase):
         self.assertTrue(any("gemini-3.1-pro-preview" in url for url in urls))
         self.assertTrue(any("gemini-3.6-flash" in url for url in urls))
 
+    def test_force_mode_ignores_max_regions(self):
+        # The bench oracle (scripts/trial_bench/oracle.py force_config) runs
+        # mode="force" and leaves max_regions at the pipeline default 48
+        # instead of the desktop forced path's 30, on the grounds that force
+        # mode never consults it. If that ever stopped being true, a dense
+        # page would be skipped as "too_many_blocks" -- exactly the silent
+        # no-op the oracle's repair counters exist to expose -- so pin it
+        # here rather than only asserting it in a docstring.
+        prepared_page = PreparedPage(
+            page_id="page-1",
+            source_path="sample.png",
+            page_number=1,
+            image=Image.new("RGB", (100, 120), "white"),
+            original_size=(100, 120),
+        )
+        page = PageModel(
+            page_id="page-1",
+            width_px=100,
+            height_px=120,
+            subject=Subject.SCIENCE,
+            blocks=[
+                ContentBlock(
+                    block_id=f"block-{index}",
+                    block_type=BlockType.STEM,
+                    bbox=Box(left=0, top=index * 10, width=80, height=8),
+                    reading_order=index,
+                    text=f"{index + 1}. 문제",
+                )
+                for index in range(4)
+            ],
+        )
+        payload = {
+            "problem_start_block_ids": ["block-0"],
+            "choice_block_ids": [],
+            "figure_block_ids": [],
+            "display_titles": [],
+            "notes": [],
+        }
+
+        class EmptyCache:
+            def load_ai_repair(self, **_kwargs):
+                return None
+
+            def save_ai_repair(self, **_kwargs):
+                return None
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-key"}):
+            with patch.object(
+                page_repair,
+                "_request_ai_repair_with_model_fallback",
+                return_value=(payload, "response-1", "gemini-3.1-pro-preview", [], {}),
+            ):
+                repaired = repair_page_model(
+                    prepared_page,
+                    page,
+                    ocr_mode="gemini",
+                    # One block over the cap: "auto" would skip, "force" must not.
+                    config=build_ai_fallback_config(mode="force", max_regions=3),
+                    cache=EmptyCache(),
+                )
+
+        summary = repaired.metadata["ai_fallback"]
+        self.assertEqual("applied", summary["status"])
+        self.assertTrue(summary["attempted"])
+        self.assertNotIn("skip_reason", summary)
+
     def test_invalid_repair_response_still_records_provider_token_usage(self):
         prepared_page = PreparedPage(
             page_id="page-1",

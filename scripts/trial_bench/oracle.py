@@ -45,6 +45,15 @@ def force_config(model: str = "") -> dict[str, Any]:
       exactly like "AI agreed with the trial" in the scored output. Raising
       instead makes a broken oracle run fail loudly rather than quietly
       banking an unearned "perfect agreement".
+
+    ``max_regions`` is the one other value that differs (48, the pipeline
+    default, against the desktop's 30) and is deliberately left alone: under
+    ``mode="force"`` page_repair.py skips the ``max_regions`` gate entirely,
+    so it changes nothing here. Matching the desktop's 30 would be the more
+    dangerous choice, since it would only start to matter the day that
+    bypass is removed -- and then it would silently skip exactly the dense
+    pages the oracle most needs AI repair on. test_page_repair.py's
+    ``test_force_mode_ignores_max_regions`` pins the bypass.
     """
     return {
         "mode": "force",
@@ -62,8 +71,13 @@ def force_config(model: str = "") -> dict[str, Any]:
 ZERO_APPLIED_WARNING = (
     "0/{total} pages were changed by AI page repair for this case -- "
     "agreement with the trial is NOT evidence of AI-grade recognition; "
-    "AI repair either never ran or ran and made no change."
+    "AI repair either never ran or ran and made no change. "
+    "Page statuses: {statuses}."
 )
+
+
+def format_statuses(statuses: Mapping[str, int]) -> str:
+    return ", ".join(f"{status}={count}" for status, count in sorted(statuses.items())) or "none"
 
 
 def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -85,12 +99,18 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
     0 proves nothing about AI-grade recognition, so that case is flagged
     rather than left to look identical to a case where AI repair genuinely
     fixed something.
+
+    ``errors`` alone is not enough to explain a zero-applied case: page_repair
+    reports most of its no-ops through ``status`` and never sets ``error``
+    (``missing_api_key``, ``not_needed``, ``too_many_blocks``), so the per-
+    status counts travel with the flag as the reason it fired.
     """
     pages_total = len(page_repair)
     pages_attempted = 0
     pages_cache_hit = 0
     pages_applied = 0
     models_used: set[str] = set()
+    statuses: dict[str, int] = {}
     errors: list[dict[str, Any]] = []
     for index, entry in enumerate(page_repair):
         if not isinstance(entry, Mapping):
@@ -104,6 +124,8 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
         model_used = str(entry.get("model_used") or "").strip()
         if model_used:
             models_used.add(model_used)
+        status = str(entry.get("status") or "").strip() or "unknown"
+        statuses[status] = statuses.get(status, 0) + 1
         error = str(entry.get("error") or "").strip()
         if error:
             errors.append({"page_index": index, "status": str(entry.get("status") or ""), "error": error})
@@ -114,9 +136,14 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
         "pages_cache_hit": pages_cache_hit,
         "pages_applied": pages_applied,
         "models_used": sorted(models_used),
+        "statuses": dict(sorted(statuses.items())),
         "errors": errors,
         "zero_applied": zero_applied,
-        "warning": ZERO_APPLIED_WARNING.format(total=pages_total) if zero_applied else None,
+        "warning": (
+            ZERO_APPLIED_WARNING.format(total=pages_total, statuses=format_statuses(statuses))
+            if zero_applied
+            else None
+        ),
     }
 
 
@@ -147,11 +174,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     cases = load_json(BENCH_ROOT / "cases.json") if (BENCH_ROOT / "cases.json").is_file() else {}
     rows = []
-    warnings: list[str] = []
+    warnings: list[tuple[str, str]] = []
     for pdf in select_inputs(args.cases):
         subject = str(cases.get(pdf.stem, {}).get("subject") or "unknown")
         observation = oracle_case(pdf, subject, ocr_mode=args.ocr_mode, model=args.model)
         page_repair = observation["oracle"]["page_repair"]
+        applied = f"{page_repair['pages_applied']}/{page_repair['pages_total']}"
         rows.append(
             [
                 pdf.stem,
@@ -161,13 +189,16 @@ def main(argv: list[str] | None = None) -> int:
                 observation["timing_ms"].get("total"),
                 f"{page_repair['pages_attempted']}/{page_repair['pages_total']}",
                 f"{page_repair['pages_cache_hit']}/{page_repair['pages_total']}",
-                f"{page_repair['pages_applied']}/{page_repair['pages_total']}",
+                # The verdict rides inside the cell, not just in the note
+                # below, because this table gets pasted into docs a row at a
+                # time and "0/4" on its own reads as an unremarkable number.
+                f"{applied} (NO AI EVIDENCE)" if page_repair["zero_applied"] else applied,
                 ", ".join(page_repair["models_used"]) or "-",
                 len(page_repair["errors"]),
             ]
         )
         if page_repair["warning"]:
-            warnings.append(f"{pdf.stem}: {page_repair['warning']}")
+            warnings.append((pdf.stem, str(page_repair["warning"])))
     print(
         markdown_table(
             [
@@ -177,8 +208,16 @@ def main(argv: list[str] | None = None) -> int:
             rows,
         )
     )
-    for warning in warnings:
-        print(f"WARNING: {warning}", file=sys.stderr)
+    # stdout carries the whole finding, because stdout is what gets redirected
+    # into a file or pasted into docs/web-trial-quality.md; stderr carries the
+    # operator's copy for the run they are watching (score.py's _warn split).
+    if warnings:
+        print()
+        print(f"> **AI page repair changed nothing in {len(warnings)} of {len(rows)} case(s).**")
+        for case_name, warning in warnings:
+            print(f"> - `{case_name}`: {warning}")
+    for case_name, warning in warnings:
+        print(f"oracle.py: WARNING {case_name}: {warning}", file=sys.stderr)
     return 0
 
 
