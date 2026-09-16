@@ -709,19 +709,27 @@ class TestMemoryBench(unittest.TestCase):
                 self.assertEqual(DEFAULT_MAX_PAGES, doc.page_count)
 
     def test_run_two_overlapping_parses_reports_pages_and_peak_after_both_finish(self):
-        calls = []
+        # An ordered event log (not a bare call count) proves *when* the RSS
+        # read happens: a mutant that reads max_rss_mb() before either parse
+        # runs would still satisfy a call-count-only assertion but would
+        # report the child's import-time baseline instead of the peak during
+        # the two parses.
+        events = []
 
         def _fake_parse_in_scratch(pdf, parse, **kwargs):
-            calls.append(pdf)
+            events.append("parse")
             return _result()  # 1 page, timing_ms={"total": 7}
 
+        def _fake_max_rss_mb():
+            events.append("rss")
+            return 42.5
+
         with patch.object(memory, "parse_in_scratch", side_effect=_fake_parse_in_scratch), \
-                patch.object(memory, "max_rss_mb", return_value=42.5) as rss_mock:
+                patch.object(memory, "max_rss_mb", side_effect=_fake_max_rss_mb):
             payload = memory.run_two_overlapping_parses(Path("dummy.pdf"))
 
-        self.assertEqual(2, len(calls), "must still run two overlapping parses per case")
         self.assertEqual({"pages": 1, "rss_peak_mb": 42.5, "total_ms_a": 7, "total_ms_b": 7}, payload)
-        rss_mock.assert_called_once()  # read once, after both parses -- not before/after pairs
+        self.assertEqual(["parse", "parse", "rss"], events, "must read peak RSS once, after both parses finish")
 
     def test_measure_case_runs_a_fresh_subprocess_and_never_parses_in_the_parent(self):
         # This is the bug fix: the parent must not call parse_in_scratch (or
@@ -737,6 +745,8 @@ class TestMemoryBench(unittest.TestCase):
         self.assertEqual(fake_payload, result)
         command = run_mock.call_args.args[0]
         self.assertEqual(sys.executable, command[0])
+        self.assertEqual(str(memory.SCRIPT_PATH), command[1], "child must be told to run this same script")
+        self.assertTrue(memory.SCRIPT_PATH.is_file())
         self.assertIn("--worker", command)
         self.assertEqual("/tmp/x.pdf", command[-1])
         self.assertTrue(run_mock.call_args.kwargs.get("check"))
@@ -750,13 +760,20 @@ class TestMemoryBench(unittest.TestCase):
             {"pages": 1, "rss_peak_mb": 61.0, "total_ms_a": 3, "total_ms_b": 4},
         ]
         completed = [subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(payload)) for payload in payloads]
-        with patch.object(memory.subprocess, "run", side_effect=completed):
+        with patch.object(memory.subprocess, "run", side_effect=completed) as run_mock:
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 exit_code = memory.main(["big.pdf", "small.pdf"])
         text = out.getvalue()
 
         self.assertEqual(0, exit_code)
+        # Each row's own file, in order, must reach its own child -- a mutant
+        # that measures the same (e.g. first) file for every row would still
+        # pass if the test only checked stdout against the mocked payloads.
+        self.assertEqual(
+            ["big.pdf", "small.pdf"],
+            [call.args[0][-1] for call in run_mock.call_args_list],
+        )
         self.assertIn("| big.pdf | 4 | 900.0 | 1 | 2 |", text)
         self.assertIn("| small.pdf | 1 | 61.0 | 3 | 4 |", text)
         self.assertNotIn("rss_before", text)
