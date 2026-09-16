@@ -1,8 +1,12 @@
-"""How parse time grows with words and drawings per page (synthetic 4-page PDFs).
+"""How parse time grows with words and drawings per page (synthetic PDFs, default
+pages = the trial's own page cap).
 
 Usage:
   GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 500 1000 2000 4000 8000 --drawings 0 2000 8000
-Vercel estimate = local × 4.3 (docs/web-trial-spike-results.md §2-3).
+  GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/complexity.py --words 500 --drawings 3000 4000 5000 6000 --pages 3
+Vercel estimate = local × 4.3 (docs/web-trial-spike-results.md §2-3). ``--pages`` controls
+both how many pages the synthetic PDF gets and the max_pages cap the parse runs with, so a
+sweep can be reproduced at a page count other than the trial's current cap.
 """
 
 from __future__ import annotations
@@ -76,14 +80,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--words", type=int, nargs="+", default=[500, 1000, 2000, 4000, 8000])
     parser.add_argument("--drawings", type=int, nargs="+", default=[0, 2000, 8000])
+    parser.add_argument(
+        "--pages",
+        type=int,
+        default=MAX_PAGES,
+        help=(
+            "pages per synthetic PDF, and the max_pages cap the parse runs with "
+            "(default: the trial's own page cap, currently %(default)s). Pass e.g. "
+            "--pages 3 to reproduce a sweep run before the cap moved to 4."
+        ),
+    )
     args = parser.parse_args(argv)
     rows = []
     with tempfile.TemporaryDirectory(prefix="trial-complexity-") as temp_dir:
         for words in args.words:
             for drawings in args.drawings:
-                pdf = write_synthetic(Path(temp_dir) / f"w{words}_d{drawings}.pdf", words_per_page=words, drawings_per_page=drawings)
-                info = inspect_pdf(pdf, max_pages=MAX_PAGES)
-                result = parse_in_scratch(pdf, parse_problems)
+                pdf = write_synthetic(Path(temp_dir) / f"w{words}_d{drawings}.pdf", words_per_page=words, drawings_per_page=drawings, pages=args.pages)
+                info = inspect_pdf(pdf, max_pages=args.pages)
+                result = parse_in_scratch(pdf, parse_problems, max_pages=args.pages)
                 total = result.timing_ms["total"]
                 rows.append([info.max_words_per_page, info.max_drawings_per_page, result.timing_ms.get("render"), result.timing_ms.get("segment"), result.timing_ms.get("assets"), total, round(total * VERCEL_FACTOR / 1000, 1), len(result.problems)])
     print(markdown_table(["words/pg", "drawings/pg", "render_ms", "segment_ms", "assets_ms", "total_ms", "vercel_est_s", "problems"], rows))

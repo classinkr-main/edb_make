@@ -181,16 +181,24 @@ def observation_from_result(case: str, result: Any, *, crops_dir: Path | None = 
     }
 
 
-def parse_in_scratch(source: Path, parse: Callable[..., Any], **kwargs: Any) -> Any:
+def parse_in_scratch(source: Path, parse: Callable[..., Any], *, max_pages: int = MAX_PAGES, **kwargs: Any) -> Any:
     """Copy the PDF into a fresh temp dir first.
 
     A .pipeline_cache next to the input would make second runs unrealistically
     fast (0.2 s recognize). Returned images are detached, so the dir can go.
+
+    ``max_pages`` defaults to the trial's own cap (``MAX_PAGES``), matching
+    every existing caller (observe.py, oracle.py, memory.py) that never
+    passes it. complexity.py's ``--pages`` sweep is the one caller that needs
+    a different cap -- e.g. a 3-page synthetic case measured while the cap is
+    4 would still parse cleanly (3 < 4), but a sweep that ever asked for more
+    pages than the trial's own cap would silently be truncated back down to
+    it without this override.
     """
     with tempfile.TemporaryDirectory(prefix="trial-bench-") as temp_dir:
         copied = Path(temp_dir) / source.name
         shutil.copyfile(source, copied)
-        return parse(copied, work_dir=Path(temp_dir) / "work", max_pages=MAX_PAGES, **kwargs)
+        return parse(copied, work_dir=Path(temp_dir) / "work", max_pages=max_pages, **kwargs)
 
 
 def percentile(values: Iterable[float], pct: float) -> float:

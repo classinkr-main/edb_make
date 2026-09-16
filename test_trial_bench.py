@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import fitz
@@ -21,6 +22,7 @@ from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common, memory
 from scripts.trial_bench import adjudicate
 from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
+from scripts.trial_bench import complexity
 from scripts.trial_bench.complexity import write_synthetic
 from scripts.trial_bench.load import summarize_wave
 from scripts.trial_bench.make_inputs import make_input
@@ -2085,6 +2087,55 @@ class TestComplexitySynthetic(unittest.TestCase):
         for previous, current in zip(all_numbers, all_numbers[1:]):
             self.assertLess(previous, current, "numbers must strictly increase across the whole document")
 
+    def test_write_synthetic_honors_an_explicit_page_count(self):
+        # docs/web-trial-load.md section 3-1 cites a sweep run at 3 pages
+        # while the trial's own cap is 4; write_synthetic must be able to
+        # produce that page count on request, not always MAX_PAGES.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = write_synthetic(Path(temp_dir) / "three.pdf", words_per_page=500, drawings_per_page=0, pages=3)
+            with fitz.open(path) as doc:
+                self.assertEqual(3, doc.page_count)
+
+
+class TestComplexityPagesFlag(unittest.TestCase):
+    def test_pages_flag_controls_both_the_synthetic_pdf_and_the_parse_cap(self):
+        # Without a --pages flag, complexity.py always wrote and parsed
+        # common.MAX_PAGES (the trial's own cap) pages -- there was no way to
+        # reproduce section 3-1's 3-page sweep once the cap moved to 4.
+        captured: dict = {}
+        real_write_synthetic = complexity.write_synthetic
+
+        def spy_write_synthetic(path, **kwargs):
+            captured["write_kwargs"] = kwargs
+            return real_write_synthetic(path, **kwargs)
+
+        def fake_parse_in_scratch(pdf, parse, **kwargs):
+            captured["parse_kwargs"] = kwargs
+            return _result()
+
+        fake_info = SimpleNamespace(max_words_per_page=0, max_drawings_per_page=0)
+        with patch.object(complexity, "write_synthetic", side_effect=spy_write_synthetic), \
+                patch.object(complexity, "parse_in_scratch", side_effect=fake_parse_in_scratch), \
+                patch.object(complexity, "inspect_pdf", return_value=fake_info) as inspect_mock:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                complexity.main(["--words", "500", "--drawings", "0", "--pages", "3"])
+
+        self.assertEqual(3, captured["write_kwargs"]["pages"])
+        self.assertEqual(3, captured["parse_kwargs"]["max_pages"])
+        self.assertEqual(3, inspect_mock.call_args.kwargs["max_pages"])
+
+    def test_pages_flag_defaults_to_the_trial_cap(self):
+        with tempfile.TemporaryDirectory():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                complexity.main(["--words", "500", "--drawings", "0"])
+        text = out.getvalue()
+        # A default-cap run must still complete and print a normal row --
+        # this pins the flag's default to common.MAX_PAGES, not some other
+        # hardcoded number, without re-deriving the whole table's numbers.
+        self.assertIn("| words/pg |", text)
+
 
 class TestMemoryBench(unittest.TestCase):
     def test_write_2xa3_uses_the_real_trial_page_count(self):
@@ -2095,6 +2146,16 @@ class TestMemoryBench(unittest.TestCase):
             path = memory.write_2xa3(Path(temp_dir) / "2xa3.pdf")
             with fitz.open(path) as doc:
                 self.assertEqual(DEFAULT_MAX_PAGES, doc.page_count)
+
+    def test_write_2xa3_honors_an_explicit_page_count(self):
+        # docs/web-trial-load.md cites a 3-page 2xa3 case (spec section 6's
+        # literal worst case) alongside the current-cap 4-page variant; both
+        # must be producible from the same generator, not just whatever
+        # DEFAULT_MAX_PAGES happens to be today.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = memory.write_2xa3(Path(temp_dir) / "2xa3_3p.pdf", pages=3)
+            with fitz.open(path) as doc:
+                self.assertEqual(3, doc.page_count)
 
     def test_run_two_overlapping_parses_reports_pages_and_peak_after_both_finish(self):
         # An ordered event log (not a bare call count) proves *when* the RSS
@@ -2185,7 +2246,7 @@ class TestMemoryBench(unittest.TestCase):
     def test_main_reports_a_failed_case_as_a_row_and_keeps_measuring_the_rest(self):
         good_payload = {"pages": 4, "rss_peak_mb": 900.0, "total_ms_a": 1, "total_ms_b": 2}
 
-        def fake_measure_case(pdf: Path) -> dict:
+        def fake_measure_case(pdf: Path, *, concurrency: int = 2) -> dict:
             if pdf.name == "bad.pdf":
                 return {"error": "boom: worker crashed"}
             return good_payload
@@ -2242,6 +2303,140 @@ class TestMemoryBench(unittest.TestCase):
         self.assertEqual(0, exit_code)
         payload = json.loads(out.getvalue().strip().splitlines()[-1])
         self.assertEqual({"pages": 1, "rss_peak_mb": 12.3, "total_ms_a": 7, "total_ms_b": 7}, payload)
+
+    def test_run_single_parse_reports_one_files_pages_and_peak(self):
+        # The single-parse counterpart of run_two_overlapping_parses, used to
+        # model TRIAL_PARSE_CONCURRENCY=1 (the shipped default) instead of
+        # TRIAL_PARSE_CONCURRENCY=2's two-at-once model.
+        with patch.object(memory, "parse_in_scratch", return_value=_result()), \
+                patch.object(memory, "max_rss_mb", return_value=99.9):
+            payload = memory.run_single_parse(Path("dummy.pdf"))
+        self.assertEqual({"pages": 1, "rss_peak_mb": 99.9, "total_ms": 7}, payload)
+
+    def test_worker_flag_with_concurrency_1_calls_run_single_parse_not_the_overlapping_pair(self):
+        with patch.object(memory, "run_single_parse", return_value={"pages": 1, "rss_peak_mb": 5.0, "total_ms": 3}) as single_mock, \
+                patch.object(memory, "run_two_overlapping_parses", side_effect=AssertionError("must not run the 2-parse path")) as pair_mock:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = memory.main(["--worker", "input.pdf", "--concurrency", "1"])
+
+        self.assertEqual(0, exit_code)
+        single_mock.assert_called_once_with(Path("input.pdf"))
+        pair_mock.assert_not_called()
+        payload = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertEqual({"pages": 1, "rss_peak_mb": 5.0, "total_ms": 3}, payload)
+
+    def test_measure_case_forwards_concurrency_to_the_worker_subprocess(self):
+        # docs/web-trial-load.md's single-vs-double-parse comparison (section
+        # 4) depends on this flag actually reaching the isolated child --
+        # measure_case defaults to 2 (unchanged behaviour) but must pass
+        # through whatever the caller asks for.
+        fake_payload = {"pages": 1, "rss_peak_mb": 1.0, "total_ms": 2}
+        fake_completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(fake_payload) + "\n", stderr="")
+        with patch.object(memory.subprocess, "run", return_value=fake_completed) as run_mock:
+            result = memory.measure_case(Path("/tmp/x.pdf"), concurrency=1)
+
+        self.assertEqual(fake_payload, result)
+        command = run_mock.call_args.args[0]
+        self.assertIn("--concurrency", command)
+        self.assertEqual("1", command[command.index("--concurrency") + 1])
+        self.assertEqual("/tmp/x.pdf", command[-1], "the pdf path must stay the last argument")
+
+    def test_synthetic_2xa3_cli_accepts_explicit_page_counts_and_names_files_accordingly(self):
+        # The doc's own reproduction command names a 3-page and a 4-page
+        # 2xa3 case in one run; the CLI must be able to produce both instead
+        # of only ever writing a single "2xa3.pdf" at whatever the trial's
+        # current cap happens to be.
+        seen_names: list[str] = []
+
+        def fake_measure_case(pdf: Path, *, concurrency: int = 2) -> dict:
+            # Checked here, not after main() returns: main()'s temp dir is
+            # deleted on the way out, so a path recorded now and stat'd later
+            # would always read as missing regardless of what wrote it.
+            self.assertTrue(pdf.is_file(), f"{pdf} must exist while measure_case runs")
+            seen_names.append(pdf.name)
+            return {"pages": 1, "rss_peak_mb": 1.0, "total_ms_a": 1, "total_ms_b": 1}
+
+        with patch.object(memory, "measure_case", side_effect=fake_measure_case):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = memory.main(["--synthetic-2xa3", "3", "4"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(["2xa3_3p.pdf", "2xa3_4p.pdf"], seen_names)
+
+    def test_synthetic_2xa3_cli_with_no_value_defaults_to_the_trial_page_cap(self):
+        seen_pages: list[int] = []
+
+        def fake_measure_case(pdf: Path, *, concurrency: int = 2) -> dict:
+            with fitz.open(pdf) as doc:
+                seen_pages.append(doc.page_count)
+            return {"pages": 1, "rss_peak_mb": 1.0, "total_ms_a": 1, "total_ms_b": 1}
+
+        with patch.object(memory, "measure_case", side_effect=fake_measure_case):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                memory.main(["--synthetic-2xa3"])
+
+        self.assertEqual([DEFAULT_MAX_PAGES], seen_pages)
+
+    def test_concurrency_1_table_has_a_single_total_ms_column(self):
+        with patch.object(memory, "measure_case", return_value={"pages": 1, "rss_peak_mb": 42.0, "total_ms": 123}):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = memory.main(["input.pdf", "--concurrency", "1"])
+        text = out.getvalue()
+        self.assertEqual(0, exit_code)
+        self.assertIn("| file | pages | rss_peak_mb | total_ms |", text)
+        self.assertIn("| input.pdf | 1 | 42.0 | 123 |", text)
+        self.assertNotIn("total_ms_a", text)
+
+    def test_summarize_repeats_reports_min_median_mean_max_and_over_threshold_count(self):
+        text = memory.summarize_repeats([1220.5, 1247.7, 1287.8, 1200.5], threshold_mb=1228.8)
+        self.assertIn("n=4", text)
+        self.assertIn("min=1200.5", text)
+        self.assertIn("max=1287.8", text)
+        self.assertIn("over_1228.8mb=2/4", text)
+
+    def test_summarize_repeats_omits_the_threshold_clause_when_none_is_given(self):
+        text = memory.summarize_repeats([10.0, 20.0], threshold_mb=None)
+        self.assertNotIn("over_", text)
+
+    def test_repeat_mode_measures_each_case_repeat_times_and_prints_a_summary_line(self):
+        payloads = iter(
+            [
+                {"pages": 4, "rss_peak_mb": 1220.0, "total_ms_a": 1, "total_ms_b": 1},
+                {"pages": 4, "rss_peak_mb": 1230.0, "total_ms_a": 1, "total_ms_b": 1},
+                {"pages": 4, "rss_peak_mb": 1287.0, "total_ms_a": 1, "total_ms_b": 1},
+            ]
+        )
+        with patch.object(memory, "measure_case", side_effect=lambda pdf, concurrency=2: next(payloads)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                exit_code = memory.main(["case.pdf", "--repeat", "3", "--rss-threshold-mb", "1228.8"])
+        text = out.getvalue()
+        self.assertEqual(0, exit_code)
+        # One row per run, each carrying its own run index -- not collapsed
+        # into a single row the way the default (--repeat 1) path is.
+        self.assertIn("| case.pdf | 1 | 4 | 1220.0 | 1 | 1 |", text)
+        self.assertIn("| case.pdf | 2 | 4 | 1230.0 | 1 | 1 |", text)
+        self.assertIn("| case.pdf | 3 | 4 | 1287.0 | 1 | 1 |", text)
+        self.assertIn("case.pdf: n=3", text)
+        self.assertIn("over_1228.8mb=2/3", text)
+
+    def test_repeat_mode_keeps_measuring_other_cases_after_one_run_fails(self):
+        def fake_measure_case(pdf: Path, *, concurrency: int = 2) -> dict:
+            if pdf.name == "bad.pdf":
+                return {"error": "boom"}
+            return {"pages": 1, "rss_peak_mb": 5.0, "total_ms_a": 1, "total_ms_b": 1}
+
+        with patch.object(memory, "measure_case", side_effect=fake_measure_case):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exit_code = memory.main(["bad.pdf", "good.pdf", "--repeat", "2"])
+        self.assertEqual(1, exit_code)
+        self.assertIn("ERROR", out.getvalue())
+        self.assertIn("good.pdf: n=2", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -215,7 +215,13 @@ class TestWorstCaseCostComputedCorrectly(unittest.TestCase):
     def _compute_worst_case(self):
         active_cpu_per_hour = 0.128
         memory_per_gb_hour = 0.0106
-        seconds_per_request = 15
+        # 28.3 s is the Vercel-estimate render time for a 4-page input that
+        # fills both TRIAL_MAX_WORDS_PER_PAGE=4500 and
+        # TRIAL_MAX_DRAWINGS_PER_PAGE=2500 at once -- the heaviest input the
+        # deployed limits actually accept (docs/web-trial-load.md §3-2,
+        # `complexity.py --words 4500 --drawings 2500 --pages 4`), not the
+        # old doc's unmeasured 15 s guess.
+        seconds_per_request = 28.3
         gb = 2
         requests_per_day = 500
         days_per_month = 30
@@ -230,7 +236,7 @@ class TestWorstCaseCostComputedCorrectly(unittest.TestCase):
 
     def test_monthly_worst_case_matches_spec_unit_prices(self):
         _, _, monthly = self._compute_worst_case()
-        self.assertAlmostEqual(9.325, monthly, places=2)
+        self.assertAlmostEqual(17.593, monthly, places=2)
 
         # Bind to the doc's own rendering of the monthly figure instead of a
         # hardcoded fallback tuple -- a fallback like "9.3" makes the check
