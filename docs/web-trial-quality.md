@@ -10,13 +10,38 @@
 |---|---|
 | `q_recall` / `q_prec` | 정답 문항 번호 중 체험판이 찾은 비율 / 체험판 문항 중 정답에 있는 비율 |
 | `p_recall` / `p_prec` | 지문 범위(예: 1~3) 기준 같은 비율 |
-| `mean_iou` / `low_iou` | 짝지은 문항의 박스 IoU 평균 / 0.8 미만 개수 (짝지은 것이 하나도 없으면 빈 칸) |
+| `mean_iou` / `low_iou` | 짝지은 문항의 박스 IoU 평균 / 0.8 미만 개수 (짝지은 것이 하나도 없으면 빈 칸). **`status`가 `truth`인 케이스도 이 박스는 사람이 확인한 것이 아니라 항상 오라클의 박스다** -- 사람이 적는 정답은 문항 번호·지문 범위 목록일 뿐 박스를 담지 않으므로, IoU는 오라클도 그 문항을 찾았을 때만 오라클 박스 대 체험판 박스로 계산한다. 오라클이 그 문항을 아예 못 찾았으면(사람 목록에만 있는 문항) 비교할 박스가 없으므로 그 문항은 `mean_iou`/`low_iou` 계산에서 빠진다 -- 0으로 세지 않는다 |
 | `missing` / `extra` | 정답에는 있는데 체험판에 없는 키 / 체험판에는 있는데 정답에 없는 키. 번호도 지문 범위도 아닌 체험판 항목(`t:<제목>` 형태의 미분류 단위)은 항상 위양성으로 `extra`에 포함되고, 집계 행에는 케이스별 개수의 합으로 나온다 |
 | `review` | "확인 필요" 배지 비율 |
-| `status` | `approved`는 Fable이 판정한 라벨 기준, `pending`은 오라클을 임시 정답으로 |
+| `status` | `truth`는 사람이 검증한 `ground_truth`(아래) 기준, `approved`는 Fable이 오라클을 기준으로 판정한 라벨, `pending`은 오라클을 임시 정답으로 -- `approved`와 `pending`은 둘 다 결국 오라클에서 나온 값이므로 독립적인 정답이 아니라 잠정치("provisional")다. 집계(`합계`) 행에 이 케이스들 중 몇 개가 `truth`이고 몇 개가 잠정치인지가 `N/M truth-backed, N/M provisional (K approved)` 형태로 나온다 |
 | `ai_evidence` | 이 케이스의 오라클 실행에서 AI 페이지 보정 결과가 로컬 기준선과 실제로 달라진 쪽수/전체 쪽수(`oracle.page_repair.pages_changed`). 블록 분류, 문항 묶음, 제목(`display_title`), 크롭 박스(`bbox_px`), 확인 필요 플래그(`review_flags`) 중 하나라도 달라지면 그 쪽은 바뀐 것으로 센다. 0쪽이면 `(NO EVIDENCE)`가 붙고, 오라클 관측값 자체가 없으면 `no records`, 그보다 오래된(열이 없는) 관측값이면 `?`로 표시된다 -- 이 셋 중 어느 쪽도 "체험판이 AI급 인식과 일치했다"는 증거가 아니다 |
 
 분모가 0인 지표(예: 정답에 지문이 하나도 없을 때의 `p_recall`)는 1.00이 아니라 빈 칸으로 나온다. 집계(`합계`) 행의 비율 열은 빈 칸을 제외한 케이스들의 평균이다.
+
+## 라벨 형식과 `truth` 상태
+
+`labels/<case>.json`은 기존 필드(`case`, `status`: `pending` | `approved`, 문항별 `items[].truth`: `trial` | `oracle` | `both` | `neither`)에 더해 선택적 `ground_truth` 객체를 가질 수 있다:
+
+```json
+{
+  "case": "...",
+  "status": "approved",
+  "ground_truth": {
+    "pages": 4,
+    "question_numbers": [1, 2, 3, "..."],
+    "passage_ranges": [[1, 3], [4, 9]],
+    "source": "누가/무엇으로 검증했는지",
+    "note": "..."
+  },
+  "items": ["..."]
+}
+```
+
+- `question_numbers`는 그 케이스에 실제로 존재하는 문항 번호 전체 목록(사람이 시험지를 직접 세어 만든 것), `passage_ranges`는 지문 범위 목록이다. 둘 다 박스 좌표는 담지 않는다.
+- 라벨 파일의 `status`가 `approved`이고 `ground_truth`가 있으면 `score.py`는 오라클의 `problems` 목록을 아예 참고하지 않고 `ground_truth`만으로 정답 키 집합(`q<번호>`, `p<시작>-<끝>`)을 만든다 -- 오라클이 어떤 문항을 찾았는지·놓쳤는지와 무관하게 사람이 적은 목록이 그대로 정답이 된다. 이때 보고서의 `status` 열은 `approved`가 아니라 `truth`로 나와, 오라클을 임시 정답으로 쓴 행과 한눈에 구분된다. `ground_truth`가 있으면 `items[].truth`(trial/oracle/both/neither) 조정은 적용되지 않는다 -- 사람이 적은 정답이 이미 최종이기 때문이다.
+- `ground_truth`가 없거나 `null`인 `approved` 라벨은 기존대로 오라클 + `items[].truth` 보정 경로를 그대로 타고 `status`도 `approved`로 남는다(이 문서와 코드 양쪽에서 하위 호환).
+- 박스 IoU(`mean_iou`/`low_iou`)는 `truth` 케이스에서도 여전히 오라클의 박스를 쓴다: 위 지표 표의 `mean_iou` 설명 참고.
+- 이 문서에 어떤 케이스의 `ground_truth` 값도 직접 채워 넣지 않는다 -- 문항 번호·지문 범위를 실제로 세어 확정하는 것은 별도 작업이다.
 
 ## 결과
 

@@ -1174,6 +1174,98 @@ class TestScore(unittest.TestCase):
         self.assertIn("no longer present", warnings[0])
         self.assertIn("t:보기 중 옳은 것은?", warnings[0])
 
+    def test_expected_from_ground_truth_overrides_the_oracle(self):
+        """A human-verified ground_truth object -- not the oracle -- decides the expected key set."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q3", 3, "3번", [(0, 0, 40, 10, 10)])])
+        # Oracle says q1, q2 -- and would, uncorrected, be scored as truth by
+        # the old pending/approved path. A human list says q1, q3 instead:
+        # q2 (oracle-only) must drop out and q3 (oracle never saw it) must
+        # appear, proving the oracle is not consulted for membership at all.
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 20, 10, 10)])])
+        labels = {
+            "case": "c",
+            "status": "approved",
+            "ground_truth": {
+                "pages": 3,
+                "question_numbers": [1, 3],
+                "passage_ranges": [],
+                "source": "manual recount",
+                "note": "",
+            },
+            "items": [],
+        }
+        expected, status = expected_from(oracle, trial, labels)
+        self.assertEqual("truth", status)
+        self.assertEqual({"q1", "q3"}, set(expected))
+        # A human question list carries no boxes of its own -- IoU scoring
+        # still needs something to compare against, so a key the oracle also
+        # reports keeps the oracle's own regions (spec: bbox IoU stays scored
+        # against the oracle boxes even on a truth-backed row).
+        self.assertEqual([(0, 0, 0, 10, 10)], [(r["page_index"], r["bbox"]["left"], r["bbox"]["top"], r["bbox"]["width"], r["bbox"]["height"]) for r in expected["q1"]["regions"]])
+        # q3 is truth-only -- the oracle never detected it, so there is no
+        # oracle box to borrow. This must not crash and must not fabricate a
+        # box: an empty regions list, not a copy of the trial's own box.
+        self.assertEqual([], expected["q3"]["regions"])
+
+    def test_expected_from_ground_truth_passage_ranges_build_passage_keys(self):
+        trial = _obs("c", [("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)])])
+        oracle = _obs("c", [])
+        labels = {
+            "case": "c", "status": "approved",
+            "ground_truth": {"pages": 4, "question_numbers": [], "passage_ranges": [[1, 3], [4, 9]], "source": "human", "note": ""},
+        }
+        expected, status = expected_from(oracle, trial, labels)
+        self.assertEqual("truth", status)
+        self.assertEqual({"p1-3", "p4-9"}, set(expected))
+
+    def test_score_case_ground_truth_question_missing_from_both_sides_is_a_recall_miss(self):
+        """A question the human list requires, that neither trial nor oracle ever found, must show up as missing -- proving expected comes from ground_truth, not from what either side detected."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])  # oracle never saw q5 either
+        labels = {"case": "c", "status": "approved", "ground_truth": {"pages": 3, "question_numbers": [1, 5], "passage_ranges": [], "source": "human", "note": ""}}
+        expected, status = expected_from(oracle, trial, labels)
+        self.assertEqual("truth", status)
+        score = score_case(trial, expected)
+        self.assertAlmostEqual(0.5, score["question_recall"])
+        self.assertEqual(["q5"], score["missing"])
+
+    def test_score_case_ground_truth_extra_trial_question_is_a_precision_miss(self):
+        """A trial detection the human list does not confirm counts against precision, even though the oracle happened to agree with the trial."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])])  # oracle agrees with the trial on q9
+        labels = {"case": "c", "status": "approved", "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "source": "human", "note": ""}}
+        expected, status = expected_from(oracle, trial, labels)
+        self.assertEqual("truth", status)
+        score = score_case(trial, expected)
+        self.assertAlmostEqual(0.5, score["question_precision"])
+        self.assertEqual(["q9"], score["extra"])
+
+    def test_score_case_a_truth_only_matched_key_does_not_corrupt_mean_iou(self):
+        """A key ground_truth confirms that the oracle never detected has no box to compare -- it must not silently count as a zero-IoU match."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q3", 3, "3번", [(0, 0, 40, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])  # oracle never saw q3
+        labels = {"case": "c", "status": "approved", "ground_truth": {"pages": 3, "question_numbers": [1, 3], "passage_ranges": [], "source": "human", "note": ""}}
+        expected, status = expected_from(oracle, trial, labels)
+        score = score_case(trial, expected)
+        self.assertEqual(1.0, score["question_recall"])
+        self.assertEqual(1.0, score["question_precision"])
+        self.assertEqual(0, score["low_iou"])
+        self.assertEqual(1.0, score["mean_iou"])  # only q1 (a real oracle box) contributes
+
+    def test_expected_from_without_ground_truth_behaves_exactly_as_before(self):
+        """A label file with no ground_truth key (or ground_truth: null) must take the pre-existing oracle/items path -- status "approved" or "pending", never "truth"."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 0, 10, 10)])])
+        no_gt = {"case": "c", "status": "approved", "items": [{"key": "q2", "truth": "neither"}, {"key": "q9", "truth": "trial"}]}
+        expected, status = expected_from(oracle, trial, no_gt)
+        self.assertEqual("approved", status)
+        self.assertEqual({"q1", "q9"}, set(expected))
+
+        null_gt = {"case": "c", "status": "approved", "ground_truth": None, "items": [{"key": "q2", "truth": "neither"}, {"key": "q9", "truth": "trial"}]}
+        expected2, status2 = expected_from(oracle, trial, null_gt)
+        self.assertEqual("approved", status2)
+        self.assertEqual({"q1", "q9"}, set(expected2))
+
     def test_render_report_has_one_row_per_case_and_an_aggregate(self):
         rows = [
             {"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": 1.0, "passage_precision": 1.0, "mean_iou": 0.95, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 1500, "oracle_ms": 9000},
@@ -1185,8 +1277,42 @@ class TestScore(unittest.TestCase):
         # A two-row fixture with different values, so a bare sum (instead of a
         # mean) or dropped low_iou/missing/extra totals would fail this: only
         # 1 of 2 rows is approved, the recall/iou columns are means (0.75,
-        # 0.75), and low_iou/missing/extra are summed (2, 1, 0).
-        self.assertIn("| 합계 | 1/2 approved | 0.75 | 1.00 | 1.00 | 1.00 | 0.75 | 2 | 0.25 | 1 | 0 |", report)
+        # 0.75), and low_iou/missing/extra are summed (2, 1, 0). Neither row
+        # carries ground truth, so the aggregate's truth-backed count is 0/2.
+        self.assertIn("| 합계 | 0/2 truth-backed, 2/2 provisional (1 approved) | 0.75 | 1.00 | 1.00 | 1.00 | 0.75 | 2 | 0.25 | 1 | 0 |", report)
+
+    def test_render_report_aggregate_counts_truth_backed_cases_separately_from_provisional(self):
+        # A "truth" row (human-verified ground_truth) must be counted apart
+        # from "approved"/"pending" rows (both still oracle-sourced, hence
+        # provisional per this task's own framing) -- not folded into the
+        # same "approved" fraction the pre-existing aggregate cell used.
+        rows = [
+            {"case": "a", "status": "truth", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
+            {"case": "b", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
+            {"case": "c", "status": "pending", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
+        ]
+        report = render_report(rows)
+        self.assertIn("| a | truth | 1.00 |", report)
+        self.assertIn("1/3 truth-backed, 2/3 provisional (1 approved)", report)
+
+    def test_render_report_footnotes_that_truth_backed_iou_still_uses_oracle_boxes(self):
+        # The task's own instruction: a human ground-truth list carries no
+        # boxes, so mean_iou/low_iou on a "truth" row are still scored
+        # against the oracle's boxes -- that must be said next to the
+        # numbers (regenerated every run), not left to silently mix the two
+        # provenances or to a doc paragraph that can go stale.
+        truth_row = {"case": "a", "status": "truth", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}
+        report = render_report([truth_row])
+        self.assertIn("still scored against the oracle", report)
+        footnote = report[report.index("still scored against the oracle") - 200 :]
+        self.assertIn("`a`", footnote)
+
+        # No truth-backed row at all -- the footnote must not appear (nothing
+        # to qualify), same "only when it applies" rule as the ai_evidence
+        # and excluded-case footnotes above.
+        pending_row = dict(truth_row, status="pending")
+        report_no_truth = render_report([pending_row])
+        self.assertNotIn("still scored against the oracle", report_no_truth)
 
     def test_render_report_leaves_undefined_ratios_as_empty_cells(self):
         rows = [{"case": "a", "status": "pending", "question_recall": None, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": None, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}]

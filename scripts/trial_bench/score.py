@@ -1,4 +1,4 @@
-"""Score trial observations against approved labels (or the oracle while pending).
+"""Score trial observations against ground truth, approved labels, or the oracle while pending.
 
 Usage:
   GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/score.py [--doc docs/web-trial-quality.md] [case ...]
@@ -114,6 +114,29 @@ def unscorable_observation_reason(obs: Any) -> str | None:
     return None
 
 
+def _expected_from_ground_truth(ground_truth: dict[str, Any], oracle: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Expected key set built from a human-verified ``ground_truth`` object, not from the oracle.
+
+    ``ground_truth`` carries question numbers and passage ranges only -- no
+    boxes -- so a key the oracle also reports keeps the oracle's own
+    ``regions`` (spec: bbox IoU stays scored against the oracle boxes even on
+    a truth-backed row, since a plain number list has none of its own). A key
+    the oracle never detected gets an empty regions list rather than a
+    fabricated box: score_case's IoU pass skips any matched key with no
+    regions instead of scoring it as a false zero-overlap match.
+    """
+    oracle_by_key = {problem["key"]: problem for problem in oracle["problems"]}
+    expected: dict[str, dict[str, Any]] = {}
+    for number in ground_truth.get("question_numbers") or []:
+        key = f"q{number}"
+        expected[key] = oracle_by_key.get(key, {"key": key, "regions": []})
+    for start, end in ground_truth.get("passage_ranges") or []:
+        lo, hi = (start, end) if start <= end else (end, start)
+        key = f"p{lo}-{hi}"
+        expected[key] = oracle_by_key.get(key, {"key": key, "regions": []})
+    return expected
+
+
 def expected_from(
     oracle: dict[str, Any],
     trial: dict[str, Any],
@@ -121,13 +144,23 @@ def expected_from(
     *,
     warnings: list[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """Ground truth per key: the oracle, corrected by approved labels (truth: trial | oracle | both | neither).
+    """Ground truth per key: a human-verified list, approved labels over the oracle, or the oracle itself while pending.
 
-    "oracle" is an explicit no-op (the oracle's own entry already stands).
-    "both" scores the key against the trial's own regions, crediting the
-    trial's detection instead of leaving it as a false positive, for a
-    disagreement judged acceptable either way. Raises ValueError only for a
-    truth value outside the four above -- a broken label file.
+    An approved label carrying a ``ground_truth`` object (question_numbers,
+    passage_ranges -- see _expected_from_ground_truth) takes full precedence:
+    the expected key set comes from that human-verified list alone, never
+    from oracle["problems"], and the status becomes "truth" so a reader can
+    tell a real-answer row from an oracle-as-provisional one at a glance. Its
+    per-item "items" truth overrides (below) do not apply on top of it --
+    once a case has real ground truth, oracle-vs-trial adjudication is moot.
+
+    Without ground_truth, the oracle is corrected by approved labels (truth:
+    trial | oracle | both | neither). "oracle" is an explicit no-op (the
+    oracle's own entry already stands). "both" scores the key against the
+    trial's own regions, crediting the trial's detection instead of leaving
+    it as a false positive, for a disagreement judged acceptable either way.
+    Raises ValueError only for a truth value outside the four above -- a
+    broken label file.
 
     A key that neither side reports any more is a *stale* label, not a broken
     one: that is what an approved "trial only" verdict becomes as soon as a
@@ -135,6 +168,8 @@ def expected_from(
     script exists for. Raising there would leave the whole run unscored, so
     the key is skipped with a warning instead.
     """
+    if labels and labels.get("status") == "approved" and labels.get("ground_truth"):
+        return _expected_from_ground_truth(labels["ground_truth"], oracle), "truth"
     expected = {problem["key"]: problem for problem in oracle["problems"]}
     if not labels or labels.get("status") != "approved":
         return expected, "pending"
@@ -197,7 +232,14 @@ def score_case(trial: dict[str, Any], expected: dict[str, dict[str, Any]]) -> di
     # silently dropped from scoring.
     others_t = set(trial_by_key) - questions_t - passages_t
     matched = (questions_t & questions_e) | (passages_t & passages_e)
-    ious = {key: regions_iou(trial_by_key[key]["regions"], expected[key]["regions"]) for key in matched}
+    # A truth-backed expected entry the oracle never detected (see
+    # _expected_from_ground_truth) carries an empty regions list -- there is
+    # no box to compare the trial's against, so that key is left out of the
+    # IoU pass entirely rather than scored as a fabricated zero-overlap miss.
+    # Every non-truth-backed expected entry (built from a real oracle or
+    # trial problem) always has at least one region, so this changes nothing
+    # for the pre-existing oracle/approved-labels path.
+    ious = {key: regions_iou(trial_by_key[key]["regions"], expected[key]["regions"]) for key in matched if expected[key].get("regions")}
     return {
         "case": trial["case"],
         "question_recall": _ratio(len(questions_t & questions_e), len(questions_e)),
@@ -259,15 +301,40 @@ def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | N
             values = [row[field] for row in rows if row[field] is not None]
             return sum(values) / len(values) if values else None
 
+        # "truth" (a human-verified ground_truth object, see expected_from)
+        # is the only status backed by an independent answer; "approved" and
+        # "pending" are both still scored against the oracle -- provisional,
+        # in this task's own framing, however carefully adjudicated -- so the
+        # aggregate counts them on the same side of the truth-backed split.
+        truth_count = sum(1 for row in rows if row["status"] == "truth")
+        approved_count = sum(1 for row in rows if row["status"] == "approved")
+        provisional_count = count - truth_count
         table_rows.append(
             [
-                "합계", f"{sum(1 for row in rows if row['status'] == 'approved')}/{count} approved",
+                "합계", f"{truth_count}/{count} truth-backed, {provisional_count}/{count} provisional ({approved_count} approved)",
                 _fmt(mean("question_recall")), _fmt(mean("question_precision")), _fmt(mean("passage_recall")),
                 _fmt(mean("passage_precision")), _fmt(mean("mean_iou")), sum(row["low_iou"] for row in rows),
                 _fmt(mean("review_rate")), sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "", "",
             ]
         )
     table = markdown_table(headers, table_rows)
+    # Same "next to the numbers, regenerated every run" reasoning as the two
+    # footnotes below: a "truth" row's q_recall/q_prec/p_recall/p_prec come
+    # from a human-verified question/passage list with no boxes of its own,
+    # so mean_iou/low_iou for it are still scored against the oracle's boxes
+    # (score_case skips the IoU pass only for a matched key the oracle never
+    # detected) -- that must be said here, not left to silently mix a
+    # human-verified count with an oracle-sourced box.
+    truth_backed_cases = [row["case"] for row in rows if row["status"] == "truth"]
+    if truth_backed_cases:
+        table += (
+            "\n\n> **"
+            + ", ".join(f"`{case}`" for case in truth_backed_cases)
+            + f": {len(truth_backed_cases)} truth-backed case(s) above.** `q_recall`/`q_prec`/`p_recall`/`p_prec` "
+            "come from a human-verified question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` "
+            "are still scored against the oracle's own boxes -- see `ground_truth` and the `docs/web-trial-quality.md` "
+            "라벨 형식 section."
+        )
     # The caveat lives next to the numbers it qualifies and is regenerated
     # every run, so it can never go stale the way a hand-written banner in
     # docs/web-trial-quality.md did (docs/web-trial-quality.md's old "AI 근거
