@@ -66,12 +66,28 @@
 | `TRIAL_DAILY_LIMIT` / `TRIAL_GLOBAL_DAILY_LIMIT` | 기본 3 / 500 | 아니오 |
 | `TRIAL_MAX_BYTES` / `TRIAL_MAX_PAGES` / `TRIAL_MAX_SOURCE_PAGES` | 기본 4000000 / 3 / 100 | 아니오 |
 | `TRIAL_PARSE_CONCURRENCY` / `TRIAL_PARSE_WAIT_SECONDS` | 기본 2 / 20 (인스턴스당) | 아니오 |
+| `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 8000 / 10000. 앞 3쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
+| `EDB_PROBLEM_ASSET_WORKERS` | 1 vCPU에서 crop 렌더 스레드 수. Task 15의 A/B 결과로 정한다 | 아니오 |
 
 **필수 6개 중 하나라도 비어 있으면 운영의 `/api/parse`는 503만 돌려준다.** 설정이 덜 된 채 배포돼도 파싱은 열리지 않는다. 환경변수를 바꾸면 재배포해야 반영된다.
+
+쪽당 내용 스트림 크기 상한(`problem_parser.py`의 `MAX_CONTENT_STREAM_RAW_BYTES_PER_PAGE` = 1 MB 압축, `MAX_CONTENT_STREAM_BYTES_PER_PAGE` = 2 MB 압축 해제)은 환경변수가 아니라 코드에 고정된 값이다. 이 상한을 넘는 쪽은 단어·도형 수를 세지 않고 바로 병적으로 취급한다.
 
 ### 2-4. 스파이크 정리
 
 Vercel 측정은 `docs/web-trial-spike-results.md`에 기록했고 `/api/spike` 코드는 제거했다. Vercel에 남아 있는 `TRIAL_SPIKE_TOKEN` 환경변수는 지운다(코드가 더는 읽지 않아 남아 있어도 동작에는 영향이 없다).
+
+확인(2026-09-16): 운영 도메인은 아직 커스텀 도메인 없이 `edb-parser-trial.vercel.app`을 쓴다. `TRIAL_HOSTNAMES` 환경변수와 Turnstile 위젯의 Hostname 모두 이 값으로 등록돼 있다.
+
+### 2-5. 프리뷰 배포 (측정용)
+
+| 설정 | 값 |
+|---|---|
+| Ignored Build Step | `case "$VERCEL_GIT_COMMIT_REF" in web-trial\|web-trial-bench) exit 1;; *) exit 0;; esac` |
+| Deployment Protection > Protection Bypass for Automation | 켜고, 비밀값(`VERCEL_AUTOMATION_BYPASS_SECRET`)은 저장소에 커밋하지 않고 워크트리의 gitignore된 `.env.local`에만 둔다 |
+| Preview 환경변수 | `TRIAL_DAILY_LIMIT=10000`, `TRIAL_GLOBAL_DAILY_LIMIT=10000` (프리뷰 한도는 인스턴스 메모리). Turnstile·Supabase 비밀은 넣지 않는다 → 봇 확인 생략, 메모리 한도 |
+
+`web-trial-bench` 브랜치를 푸시하면 프리뷰가 뜬다. 프로브는 `scripts/trial_bench/probe.py`, 동시 요청은 `scripts/trial_bench/load.py`이며 둘 다 `x-vercel-protection-bypass` 헤더를 붙인다. 운영 환경에는 우회 경로가 없다.
 
 ## 3. 배포 후 점검
 
@@ -144,6 +160,34 @@ p95가 20초를 넘으면 `TRIAL_MAX_PAGES`를 줄이거나 Function CPU를 Perf
 ### 4-4. 보존
 
 매일 00:10 KST 크론이 `trial_quota` 7일, `trial_events` 180일 지난 행을 지운다. 크론은 재시도하지 않으므로 하루 빠져도 다음 날 함께 정리된다.
+
+### 4-5. 단계별 시간 · 인스턴스 · busy 사유
+
+계측(Task 3) 이전에 쌓인 행은 `timing`이 null이라 `where timing is not null`을 빼면 백분위가 왜곡된다.
+
+```sql
+-- 단계별 p50/p95 (최근 7일, 성공만)
+select
+  percentile_cont(0.5) within group (order by (timing->>'render')::int) as render_p50,
+  percentile_cont(0.5) within group (order by (timing->>'segment')::int) as segment_p50,
+  percentile_cont(0.5) within group (order by (timing->>'assets')::int) as assets_p50,
+  percentile_cont(0.5) within group (order by (timing->>'encode')::int) as encode_p50,
+  percentile_cont(0.95) within group (order by elapsed_ms) as total_p95
+from public.trial_events
+where kind = 'parse' and status = 200 and timing is not null and created_at > now() - interval '7 days';
+
+-- 인스턴스별 건수: 1건짜리 인스턴스가 많으면 콜드 스타트가 잦다는 뜻
+select instance_id, count(*) as requests, min(created_at) as first_seen, max(created_at) as last_seen
+from public.trial_events
+where kind = 'parse' and created_at > now() - interval '7 days'
+group by instance_id order by requests desc;
+
+-- busy 사유별 건수
+select reject_detail, count(*)
+from public.trial_events
+where kind = 'parse' and reject_code = 'busy' and created_at > now() - interval '7 days'
+group by reject_detail order by 2 desc;
+```
 
 ## 5. 로컬 실행
 

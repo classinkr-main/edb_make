@@ -99,3 +99,10 @@
   - 비용 추정 갱신(스펙 §9 단가): 한 건 7초 · 2 GB에 CPU $0.00025 + 메모리 $0.00004 ≈ $0.0003. 전체 하루 상한 500건을 매일 채워도 월 $5 안쪽이다. Cold Start Prevention 대기 인스턴스가 따로 과금되는지는 확인하지 않았으니 첫 주 Usage 화면에서 본다
   - 측정이 끝났으므로 `/api/spike`와 Vercel 환경변수 `TRIAL_SPIKE_TOKEN`을 지운다
   - Performance CPU(2 vCPU · 4 GB)는 재지 않았다. 7초 대기가 이탈로 이어진다는 근거가 생기면 그때 잰다
+
+## 4. 프리뷰 프로브 (Plan 3, `scripts/trial_bench/probe.py`)
+
+- 배포:
+- 설정 변경 없음 / `EDB_PROBLEM_ASSET_WORKERS=1` 각각 측정
+
+(측정 전)
