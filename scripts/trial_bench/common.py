@@ -78,7 +78,7 @@ def _safe_title(number: int | None, title: str | None, span: list[int] | None) -
     return None
 
 
-def _crop_stem(key: str, used: set[str]) -> str:
+def crop_stem(key: str, used: set[str]) -> str:
     """Filesystem-safe, collision-free crop stem for ``key``.
 
     The counter is appended *after* the length cap, never before: an
@@ -120,7 +120,7 @@ def observation_from_result(case: str, result: Any, *, crops_dir: Path | None = 
         crop_path: Path | None = None
         if crops_dir is not None:
             crops_dir.mkdir(parents=True, exist_ok=True)
-            crop_path = crops_dir / f"{_crop_stem(key, crop_stems)}.png"
+            crop_path = crops_dir / f"{crop_stem(key, crop_stems)}.png"
             problem.image.save(crop_path)
         problems.append(
             {

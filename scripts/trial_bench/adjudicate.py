@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from scripts.trial_bench.common import BENCH_ROOT, bench_dir, load_json, markdown_table, save_json  # noqa: E402
+from scripts.trial_bench.common import BENCH_ROOT, bench_dir, crop_stem, load_json, markdown_table, save_json  # noqa: E402
 from scripts.trial_bench.score import LOW_IOU, regions_iou  # noqa: E402
 
 PANEL_MAX = (900, 1200)
@@ -78,11 +78,26 @@ def adjudicate_case(case: str, root: Path = BENCH_ROOT) -> int:
     trial = load_json(bench_dir("trial", root) / f"{case}.json")
     oracle = load_json(bench_dir("oracle", root) / f"{case}.json")
     items = disagreements(trial, oracle)
+    stems: set[str] = set()
     for item in items:
-        compose(item, bench_dir("adjudication", root) / case / f"{item['key'].replace(':', '_')}.png")
+        compose(item, bench_dir("adjudication", root) / case / f"{crop_stem(item['key'], stems)}.png")
     labels_path = bench_dir("labels", root) / f"{case}.json"
     if not labels_path.is_file():
         save_json(labels_path, labels_skeleton(case, items))
+    else:
+        # Never overwrite an existing labels file (see module docstring) --
+        # but a pending skeleton that predates a re-observed case can go
+        # stale silently otherwise, so at least say so.
+        existing = load_json(labels_path)
+        if existing.get("status") != "approved":
+            new_keys = {item["key"] for item in items}
+            existing_keys = {entry["key"] for entry in existing.get("items", [])}
+            missing = sorted(new_keys - existing_keys)
+            if missing:
+                print(
+                    f"adjudicate.py: case {case!r}: labels file is {existing.get('status')!r} and misses {missing}; delete it to regenerate",
+                    file=sys.stderr,
+                )
     return len(items)
 
 

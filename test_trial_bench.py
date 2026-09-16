@@ -11,7 +11,7 @@ from PIL import Image
 
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
-from scripts.trial_bench.adjudicate import compose, disagreements, labels_skeleton
+from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
 from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench.oracle import force_config
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
@@ -571,6 +571,75 @@ class TestAdjudicate(unittest.TestCase):
             with Image.open(out) as image:
                 self.assertEqual("RGB", image.mode)
                 self.assertGreater(image.width, 400)
+                # Both sides fall back to a 400x200 lightgray placeholder, so
+                # the canvas is exactly two panels wide (830x240) -- and each
+                # panel's centre really is the placeholder, not a blank white
+                # canvas that happens to satisfy the width/mode checks above.
+                self.assertEqual((830, 240), image.size)
+                self.assertEqual((211, 211, 211), image.getpixel((210, 130)))
+                self.assertEqual((211, 211, 211), image.getpixel((620, 130)))
+                # The header strip (y in [9, 19]) carries the "trial: q3
+                # (oracle only)" text, so it is not uniform white either --
+                # pins "two panels, side by side" rather than "some RGB file".
+                header_row = [image.getpixel((x, 15)) for x in range(11, 102)]
+                self.assertTrue(any(pixel != (255, 255, 255) for pixel in header_row))
+
+
+class TestAdjudicateCase(unittest.TestCase):
+    def test_writes_one_png_per_disagreement_and_never_overwrites_labels(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            # "t:A/B 비교" is an unnumbered fallback key (common.problem_key's
+            # "t:<title>" case) carrying a "/" that must not become a path
+            # separator in the adjudication PNG's filename.
+            trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("t:A/B 비교", None, "A/B 비교", [(0, 0, 40, 10, 10)])])
+            oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 25, 10, 10)])])
+            common.save_json(common.bench_dir("trial", root) / "c.json", trial)
+            common.save_json(common.bench_dir("oracle", root) / "c.json", oracle)
+
+            count = adjudicate_case("c", root)
+            self.assertEqual(2, count)  # q1 (iou 0.00) + the trial-only key
+
+            case_dir = common.bench_dir("adjudication", root) / "c"
+            pngs = list(case_dir.glob("*.png"))
+            self.assertEqual(2, len(pngs))
+            for png in pngs:
+                self.assertNotIn("/", png.name)
+                self.assertEqual(case_dir, png.parent)
+
+            labels_path = common.bench_dir("labels", root) / "c.json"
+            skeleton = common.load_json(labels_path)
+            self.assertEqual("pending", skeleton["status"])
+            self.assertEqual({"q1", "t:A/B 비교"}, {item["key"] for item in skeleton["items"]})
+
+            # "Existing label files are never overwritten" (module docstring):
+            # a human verdict already on disk must survive a rerun untouched.
+            approved = {"case": "c", "status": "approved", "items": [{"key": "q1", "truth": "oracle", "note": "checked"}]}
+            common.save_json(labels_path, approved)
+            adjudicate_case("c", root)
+            self.assertEqual(approved, common.load_json(labels_path))
+
+    def test_warns_but_still_keeps_a_stale_pending_skeleton(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+            common.save_json(common.bench_dir("oracle", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 25, 10, 10)])]))
+            adjudicate_case("c", root)
+            labels_path = common.bench_dir("labels", root) / "c.json"
+            stale = common.load_json(labels_path)
+            self.assertEqual("pending", stale["status"])
+
+            # Re-observing the case adds a disagreement the pending skeleton
+            # never saw; adjudicate_case must still not touch that file.
+            common.save_json(
+                common.bench_dir("trial", root) / "c.json",
+                _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 0, 10, 10)])]),
+            )
+            captured = io.StringIO()
+            with contextlib.redirect_stderr(captured):
+                adjudicate_case("c", root)
+            self.assertIn("q2", captured.getvalue())
+            self.assertEqual(stale, common.load_json(labels_path))
 
 
 if __name__ == "__main__":
