@@ -142,6 +142,16 @@ class AIFallbackConfig:
     # estimate for the forced-repair oracle path -- see
     # _repair_output_token_budget's docstring for why the estimate itself
     # (not just the hard cap) truncated real English pages.
+    #
+    # Deliberately absent from to_metadata(): this is a bench-only knob and
+    # to_metadata() is desktop-visible output (build_structured_page_json.py
+    # writes it to the run summary's "ai_fallback" and to every page's
+    # metadata["ai_config"], which structured_schema.page_to_dict serializes
+    # to disk). Exporting it would change every desktop export's metadata
+    # byte-for-byte. Nothing reads the key back out of that metadata --
+    # build_problem_board_edb._to_page_ai_config reads it from the caller's
+    # own ai_fallback_config dict (oracle.py's force_config), not from an
+    # exported page -- so the dataclass field alone is enough.
     max_output_token_cap: int | None = None
 
     @property
@@ -168,6 +178,10 @@ class AIFallbackConfig:
         return self.normalized_mode != "off"
 
     def to_metadata(self) -> dict[str, Any]:
+        # Desktop-visible, serialized-to-disk output. Its key set is pinned
+        # by test_page_repair.py's TestAIFallbackConfigMetadataSurface, so
+        # adding a key here is a deliberate change to every export's
+        # metadata, not an accident of adding a dataclass field.
         return {
             "mode": self.normalized_mode,
             "provider": self.normalized_provider,
@@ -178,7 +192,6 @@ class AIFallbackConfig:
             "timeout_ms": self.timeout_ms,
             "save_debug": self.save_debug,
             "fail_on_error": self.fail_on_error,
-            "max_output_token_cap": self.max_output_token_cap,
         }
 
 

@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import unittest
 from unittest.mock import patch
@@ -804,6 +805,79 @@ class TestRepairOutputTokenBudgetOverride(unittest.TestCase):
     def test_build_ai_fallback_config_sets_max_output_token_cap(self):
         config = build_ai_fallback_config(mode="force", max_output_token_cap=8192)
         self.assertEqual(8192, config.max_output_token_cap)
+
+
+class TestAIFallbackConfigMetadataSurface(unittest.TestCase):
+    """AIFallbackConfig.to_metadata() is desktop-visible, on-disk output, not
+    an internal dict: build_structured_page_json.py writes it into the run
+    summary's "ai_fallback" key (line 137) and into every page's
+    metadata["ai_config"] (line 1054), which structured_schema.page_to_dict
+    serializes into pages.json. So its key set is part of every desktop
+    export's bytes, and a new dataclass field must not reach it by accident
+    -- adding a key here has to fail this test first and be a deliberate
+    choice. max_output_token_cap is the concrete case: a bench-only knob
+    (scripts/trial_bench/oracle.py's force_config) that lives on the
+    dataclass and is read back only from the caller's own config dict by
+    build_problem_board_edb._to_page_ai_config, never from exported
+    metadata.
+    """
+
+    EXPECTED_KEYS = {
+        "mode",
+        "provider",
+        "model",
+        "threshold",
+        "max_regions",
+        "max_tokens",
+        "timeout_ms",
+        "save_debug",
+        "fail_on_error",
+    }
+
+    def test_default_metadata_key_set_is_exactly_the_shipped_surface(self):
+        self.assertEqual(
+            self.EXPECTED_KEYS,
+            set(page_repair.AIFallbackConfig().to_metadata()),
+        )
+
+    def test_default_metadata_values_are_the_shipped_defaults(self):
+        self.assertEqual(
+            {
+                "mode": "off",
+                "provider": "gemini",
+                "model": page_repair.DEFAULT_GEMINI_REPAIR_MODEL,
+                "threshold": 0.72,
+                "max_regions": 48,
+                "max_tokens": 4096,
+                "timeout_ms": 30000,
+                "save_debug": False,
+                "fail_on_error": False,
+            },
+            page_repair.AIFallbackConfig().to_metadata(),
+        )
+
+    def test_max_output_token_cap_never_reaches_the_exported_metadata(self):
+        # The oracle's own config must export the same key set as a desktop
+        # one: the bench knob changes request budgets, not written output.
+        oracle_like = build_ai_fallback_config(
+            mode="force", fail_on_error=True, max_tokens=8192, max_output_token_cap=8192
+        )
+        self.assertEqual(8192, oracle_like.max_output_token_cap)
+        self.assertEqual(self.EXPECTED_KEYS, set(oracle_like.to_metadata()))
+        self.assertNotIn("max_output_token_cap", oracle_like.to_metadata())
+
+    def test_every_dataclass_field_is_either_exported_or_listed_bench_only(self):
+        # Catches the reverse mistake too: a field added to the dataclass and
+        # silently left out of to_metadata() without anyone deciding it is
+        # bench-only. Exactly one field is allowed to be unexported today.
+        field_names = {field.name for field in dataclasses.fields(page_repair.AIFallbackConfig)}
+        self.assertEqual({"max_output_token_cap"}, field_names - self.EXPECTED_KEYS)
+
+    def test_exported_metadata_is_json_serializable(self):
+        # It is written to pages.json; a non-JSON value would break the
+        # export rather than merely change its bytes.
+        json.dumps(page_repair.AIFallbackConfig().to_metadata())
+        json.dumps(build_ai_fallback_config(mode="force", max_output_token_cap=8192).to_metadata())
 
 
 class TestRequestGeminiRepairSendsTheOverrideBudget(unittest.TestCase):
