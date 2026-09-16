@@ -11,7 +11,7 @@ from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common
 from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench.oracle import force_config
-from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_case
+from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
 from structured_schema import Box
 
 
@@ -328,10 +328,12 @@ class TestOracleConfig(unittest.TestCase):
         self.assertEqual("gemini-x", force_config("gemini-x")["model"])
 
 
-def _obs(case: str, problems: list[tuple[str, int | None, str, list[tuple[int, float, float, float, float]]]], total_ms: int = 100) -> dict:
+def _obs(case: str, problems: list[tuple], total_ms: int = 100) -> dict:
+    """Build a fake observation. Each problem tuple is (key, number, title, regions[, risk_flags])."""
     entries = []
     ranges = []
-    for key, number, title, regions in problems:
+    for key, number, title, regions, *rest in problems:
+        risk_flags = rest[0] if rest else []
         span = common.passage_range_from_title(title) if number is None else None
         if span:
             ranges.append(span)
@@ -339,7 +341,7 @@ def _obs(case: str, problems: list[tuple[str, int | None, str, list[tuple[int, f
             {
                 "key": key, "number": number, "title": title, "passage_range": span,
                 "regions": [{"page_index": p, "bbox": {"left": l, "top": t, "width": w, "height": h}} for p, l, t, w, h in regions],
-                "risk_flags": [], "crop": None,
+                "risk_flags": risk_flags, "crop": None,
             }
         )
     return {"case": case, "pages": 3, "source_page_count": 16, "page_sizes": [[600, 800]] * 3, "problems": entries, "passage_ranges": ranges, "timing_ms": {"total": total_ms}}
@@ -359,16 +361,37 @@ class TestScore(unittest.TestCase):
         self.assertEqual(1.0, regions_iou(b, b))
 
     def test_score_case_recall_precision_and_low_iou(self):
-        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 20, 10, 10)]), ("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)])])
+        trial = _obs(
+            "c",
+            [
+                ("q1", 1, "1번", [(0, 0, 0, 10, 10)], ["fallback_grouping"]),
+                ("q2", 2, "2번", [(0, 0, 20, 10, 10)], ["low_confidence"]),
+                ("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)]),
+            ],
+        )
         expected = {p["key"]: p for p in _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 25, 10, 10)]), ("q3", 3, "3번", [(1, 0, 0, 10, 10)]), ("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)])])["problems"]}
         score = score_case(trial, expected)
         self.assertAlmostEqual(2 / 3, score["question_recall"])
         self.assertEqual(1.0, score["question_precision"])
         self.assertEqual(1.0, score["passage_recall"])
+        self.assertEqual(1.0, score["passage_precision"])
         self.assertEqual(["q3"], score["missing"])
         self.assertEqual([], score["extra"])
         self.assertEqual(1, score["low_iou"])  # q2 overlaps by half
+        self.assertAlmostEqual(7 / 9, score["mean_iou"])  # (1.0 + 1/3 + 1.0) / 3
+        # Only q1's "fallback_grouping" is a REVIEW_WORTHY flag; q2's
+        # "low_confidence" must not trip the frozenset filter.
+        self.assertAlmostEqual(1 / 3, score["review_rate"])
         self.assertEqual(100, score["trial_ms"])
+
+    def test_score_case_counts_unnumbered_non_passage_keys_as_extra(self):
+        """common.problem_key emits "t:<title>" for a unit with no number and no passage marker."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("t:그림", None, "그림", [(0, 0, 40, 10, 10)])])
+        expected = {p["key"]: p for p in _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])["problems"]}
+        score = score_case(trial, expected)
+        self.assertEqual(1.0, score["question_recall"])
+        self.assertEqual(1.0, score["question_precision"])
+        self.assertEqual(["t:그림"], score["extra"])
 
     def test_expected_from_applies_approved_labels(self):
         trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])])
@@ -376,16 +399,83 @@ class TestScore(unittest.TestCase):
         pending, status = expected_from(oracle, trial, None)
         self.assertEqual("pending", status)
         self.assertEqual({"q1", "q2"}, set(pending))
+
+        # An un-adjudicated labels file (status still "pending") must not be
+        # applied even though it already carries items -- only the guard on
+        # `status == "approved"`, not merely a truthy labels dict, may apply them.
+        unapproved = {"case": "c", "status": "pending", "items": [{"key": "q2", "truth": "neither"}]}
+        still_pending, status = expected_from(oracle, trial, unapproved)
+        self.assertEqual("pending", status)
+        self.assertEqual({"q1", "q2"}, set(still_pending))
+
         labels = {"case": "c", "status": "approved", "items": [{"key": "q2", "truth": "neither"}, {"key": "q9", "truth": "trial"}]}
         approved, status = expected_from(oracle, trial, labels)
         self.assertEqual("approved", status)
         self.assertEqual({"q1", "q9"}, set(approved))
 
+        # truth "oracle" is an explicit no-op: the oracle's own entry stands.
+        oracle_noop = {"case": "c", "status": "approved", "items": [{"key": "q1", "truth": "oracle"}]}
+        kept, status = expected_from(oracle, trial, oracle_noop)
+        self.assertEqual({"q1", "q2"}, set(kept))
+
+        # truth "both" credits the trial's own detection (a disagreement
+        # judged acceptable either way) instead of leaving it in "extra".
+        both = {"case": "c", "status": "approved", "items": [{"key": "q9", "truth": "both"}]}
+        both_expected, status = expected_from(oracle, trial, both)
+        self.assertEqual({"q1", "q2", "q9"}, set(both_expected))
+
+    def test_expected_from_rejects_unknown_truth_or_unmatched_key(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        typo_truth = {"case": "c", "status": "approved", "items": [{"key": "q1", "truth": "orcale"}]}
+        with self.assertRaises(ValueError):
+            expected_from(oracle, trial, typo_truth)
+        unmatched_key = {"case": "c", "status": "approved", "items": [{"key": "q7", "truth": "trial"}]}
+        with self.assertRaises(ValueError):
+            expected_from(oracle, trial, unmatched_key)
+
     def test_render_report_has_one_row_per_case_and_an_aggregate(self):
-        rows = [{"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": 1.0, "passage_precision": 1.0, "mean_iou": 0.95, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 1500, "oracle_ms": 9000}]
+        rows = [
+            {"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": 1.0, "passage_precision": 1.0, "mean_iou": 0.95, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 1500, "oracle_ms": 9000},
+            {"case": "b", "status": "pending", "question_recall": 0.5, "question_precision": 1.0, "passage_recall": 1.0, "passage_precision": 1.0, "mean_iou": 0.55, "low_iou": 2, "review_rate": 0.5, "missing": ["q7"], "extra": [], "trial_ms": 2000, "oracle_ms": 8000},
+        ]
         report = render_report(rows)
         self.assertIn("| a | approved | 1.00 |", report)
-        self.assertIn("| 합계 |", report)
+        self.assertIn("| b | pending | 0.50 |", report)
+        # A two-row fixture with different values, so a bare sum (instead of a
+        # mean) or dropped low_iou/missing/extra totals would fail this: only
+        # 1 of 2 rows is approved, the recall/iou columns are means (0.75,
+        # 0.75), and low_iou/missing/extra are summed (2, 1, 0).
+        self.assertIn("| 합계 | 1/2 approved | 0.75 | 1.00 | 1.00 | 1.00 | 0.75 | 2 | 0.25 | 1 | 0 |", report)
+
+    def test_render_report_leaves_undefined_ratios_as_empty_cells(self):
+        rows = [{"case": "a", "status": "pending", "question_recall": None, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": None, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}]
+        report = render_report(rows)
+        self.assertIn("| a | pending |  | 1.00 |  |  |  | 0 |", report)
+
+
+class TestScoreAll(unittest.TestCase):
+    def test_score_all_filters_cases_skips_missing_oracle_and_carries_oracle_ms(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=111))
+            common.save_json(common.bench_dir("oracle", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=222))
+            common.save_json(common.bench_dir("labels", root) / "a.json", {"case": "a", "status": "approved", "items": []})
+            common.save_json(common.bench_dir("trial", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=333))
+            common.save_json(common.bench_dir("oracle", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=444))
+            # "c" has a trial but no oracle -- it must be skipped, not crash.
+            common.save_json(common.bench_dir("trial", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=555))
+
+            rows = score_all([], root=root)
+            by_case = {row["case"]: row for row in rows}
+            self.assertEqual({"a", "b"}, set(by_case))
+            self.assertEqual("approved", by_case["a"]["status"])
+            self.assertEqual("pending", by_case["b"]["status"])
+            self.assertEqual(111, by_case["a"]["trial_ms"])
+            self.assertEqual(222, by_case["a"]["oracle_ms"])  # from the oracle's total, not the trial's
+
+            filtered = score_all(["a"], root=root)
+            self.assertEqual(["a"], [row["case"] for row in filtered])
 
 
 if __name__ == "__main__":

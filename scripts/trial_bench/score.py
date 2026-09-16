@@ -21,6 +21,7 @@ from trial_preview import needs_review  # noqa: E402
 LOW_IOU = 0.8
 DOC_START = "<!-- corpus-table -->"
 DOC_END = "<!-- /corpus-table -->"
+ACCEPTED_TRUTHS = {"trial", "oracle", "both", "neither"}
 
 
 def _area(box: dict[str, float]) -> float:
@@ -56,22 +57,40 @@ def regions_iou(a_regions: list[dict[str, Any]], b_regions: list[dict[str, Any]]
 
 
 def expected_from(oracle: dict[str, Any], trial: dict[str, Any], labels: dict[str, Any] | None) -> tuple[dict[str, dict[str, Any]], str]:
-    """Ground truth per key: the oracle, corrected by approved labels (truth: trial | oracle | both | neither)."""
+    """Ground truth per key: the oracle, corrected by approved labels (truth: trial | oracle | both | neither).
+
+    "oracle" is an explicit no-op (the oracle's own entry already stands).
+    "both" scores the key against the trial's own regions, crediting the
+    trial's detection instead of leaving it as a false positive, for a
+    disagreement judged acceptable either way. Raises ValueError for a
+    truth value outside the four above, or for a label key that names
+    neither an oracle nor a trial problem -- both are broken label files,
+    never silently ignored.
+    """
     expected = {problem["key"]: problem for problem in oracle["problems"]}
     if not labels or labels.get("status") != "approved":
         return expected, "pending"
     trial_by_key = {problem["key"]: problem for problem in trial["problems"]}
+    oracle_by_key = {problem["key"]: problem for problem in oracle["problems"]}
+    case = labels.get("case")
     for item in labels.get("items", []):
         key, truth = item.get("key"), item.get("truth")
+        if truth not in ACCEPTED_TRUTHS:
+            raise ValueError(f"label case {case!r}: key {key!r} has unknown truth {truth!r}; expected one of {sorted(ACCEPTED_TRUTHS)}")
+        if key not in oracle_by_key and key not in trial_by_key:
+            raise ValueError(f"label case {case!r}: key {key!r} is in neither the oracle nor the trial")
         if truth == "neither":
             expected.pop(key, None)
-        elif truth == "trial" and key in trial_by_key:
+        elif truth in {"trial", "both"} and key in trial_by_key:
             expected[key] = trial_by_key[key]
+        # truth == "oracle", or "both" with no matching trial detection:
+        # keep the oracle's entry unchanged.
     return expected, "approved"
 
 
-def _ratio(numerator: int, denominator: int) -> float:
-    return numerator / denominator if denominator else 1.0
+def _ratio(numerator: int, denominator: int) -> float | None:
+    """None (rendered as an empty cell) when the metric is undefined -- never a fake perfect score."""
+    return numerator / denominator if denominator else None
 
 
 def score_case(trial: dict[str, Any], expected: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -80,6 +99,11 @@ def score_case(trial: dict[str, Any], expected: dict[str, dict[str, Any]]) -> di
     questions_e = {key for key in expected if key.startswith("q")}
     passages_t = {key for key in trial_by_key if key.startswith("p")}
     passages_e = {key for key in expected if key.startswith("p")}
+    # Neither numbered nor a passage range -- common.problem_key's "t:<title>"
+    # fallback for an unnumbered, non-passage unit. Never a legitimate
+    # detection, so it always counts as a false positive rather than being
+    # silently dropped from scoring.
+    others_t = set(trial_by_key) - questions_t - passages_t
     matched = (questions_t & questions_e) | (passages_t & passages_e)
     ious = {key: regions_iou(trial_by_key[key]["regions"], expected[key]["regions"]) for key in matched}
     return {
@@ -88,34 +112,42 @@ def score_case(trial: dict[str, Any], expected: dict[str, dict[str, Any]]) -> di
         "question_precision": _ratio(len(questions_t & questions_e), len(questions_t)),
         "passage_recall": _ratio(len(passages_t & passages_e), len(passages_e)),
         "passage_precision": _ratio(len(passages_t & passages_e), len(passages_t)),
-        "mean_iou": sum(ious.values()) / len(ious) if ious else 1.0,
+        "mean_iou": sum(ious.values()) / len(ious) if ious else None,
         "low_iou": sum(1 for value in ious.values() if value < LOW_IOU),
         "review_rate": sum(1 for problem in trial["problems"] if needs_review(problem["risk_flags"])) / max(1, len(trial_by_key)),
         "missing": sorted(questions_e - questions_t) + sorted(passages_e - passages_t),
-        "extra": sorted(questions_t - questions_e) + sorted(passages_t - passages_e),
+        "extra": sorted(questions_t - questions_e) + sorted(passages_t - passages_e) + sorted(others_t),
         "trial_ms": trial["timing_ms"].get("total"),
     }
+
+
+def _fmt(value: float | None) -> str:
+    return f"{value:.2f}" if value is not None else ""
 
 
 def render_report(rows: list[dict[str, Any]]) -> str:
     headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms"]
     table_rows = [
         [
-            row["case"], row["status"], f"{row['question_recall']:.2f}", f"{row['question_precision']:.2f}",
-            f"{row['passage_recall']:.2f}", f"{row['passage_precision']:.2f}", f"{row['mean_iou']:.2f}", row["low_iou"],
-            f"{row['review_rate']:.2f}", " ".join(row["missing"]), " ".join(row["extra"]), row["trial_ms"], row["oracle_ms"],
+            row["case"], row["status"], _fmt(row["question_recall"]), _fmt(row["question_precision"]),
+            _fmt(row["passage_recall"]), _fmt(row["passage_precision"]), _fmt(row["mean_iou"]), row["low_iou"],
+            _fmt(row["review_rate"]), " ".join(row["missing"]), " ".join(row["extra"]), row["trial_ms"], row["oracle_ms"],
         ]
         for row in rows
     ]
     if rows:
         count = len(rows)
-        mean = lambda field: sum(row[field] for row in rows) / count  # noqa: E731
+
+        def mean(field: str) -> float | None:
+            values = [row[field] for row in rows if row[field] is not None]
+            return sum(values) / len(values) if values else None
+
         table_rows.append(
             [
                 "합계", f"{sum(1 for row in rows if row['status'] == 'approved')}/{count} approved",
-                f"{mean('question_recall'):.2f}", f"{mean('question_precision'):.2f}", f"{mean('passage_recall'):.2f}",
-                f"{mean('passage_precision'):.2f}", f"{mean('mean_iou'):.2f}", sum(row["low_iou"] for row in rows),
-                f"{mean('review_rate'):.2f}", sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "",
+                _fmt(mean("question_recall")), _fmt(mean("question_precision")), _fmt(mean("passage_recall")),
+                _fmt(mean("passage_precision")), _fmt(mean("mean_iou")), sum(row["low_iou"] for row in rows),
+                _fmt(mean("review_rate")), sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "",
             ]
         )
     return markdown_table(headers, table_rows)
@@ -159,12 +191,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args(argv)
     rows = score_all(args.cases)
+    matched = {row["case"] for row in rows}
+    missing = [name for name in args.cases if name not in matched]
+    for name in missing:
+        print(f"score.py: no trial observation found for case {name!r}", file=sys.stderr)
+    if not rows:
+        print("score.py: nothing matched; leaving report.md" + (f" and {args.doc}" if args.doc else "") + " unchanged", file=sys.stderr)
+        return 1
     table = render_report(rows)
     print(table)
     (BENCH_ROOT / "report.md").write_text(table + "\n", encoding="utf-8")
+    doc_refused = False
     if args.doc:
-        update_doc(args.doc, table)
-    return 0
+        if args.cases:
+            print(
+                f"score.py: refusing to overwrite {args.doc}'s corpus table with a case-filtered subset "
+                f"({', '.join(sorted(matched))}); rerun without case names to refresh the whole table",
+                file=sys.stderr,
+            )
+            doc_refused = True
+        else:
+            update_doc(args.doc, table)
+    return 1 if (missing or doc_refused) else 0
 
 
 if __name__ == "__main__":
