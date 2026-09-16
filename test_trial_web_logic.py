@@ -149,6 +149,30 @@ class TestTrialWebLogic(unittest.TestCase):
             """
         )
 
+    def test_board_preview_helpers(self) -> None:
+        run_node(
+            """
+            const logic = require('./public/trial_logic.js');
+            assert.equal(logic.isSafeImageSource('data:image/webp;base64,AAAA'), true);
+            assert.equal(logic.isSafeImageSource('data:image/jpeg;base64,AAAA'), true);
+            assert.equal(logic.isSafeImageSource('data:image/svg+xml;base64,AAAA'), false);
+            assert.equal(logic.isSafeImageSource('https://example.com/x.png'), false);
+            assert.equal(logic.isSafeImageSource(null), false);
+            const raw = 'data:image/webp;base64,RAW';
+            const board = 'data:image/webp;base64,BOARD';
+            assert.equal(logic.hasBoardPreviews({ board_previews: true, problems: [{ preview: raw, board }] }), true);
+            assert.equal(logic.hasBoardPreviews({ board_previews: true, problems: [{ preview: raw, board: null }] }), false);
+            assert.equal(logic.hasBoardPreviews({ board_previews: false, problems: [{ preview: raw, board }] }), false);
+            assert.equal(logic.hasBoardPreviews({ problems: [] }), false);
+            assert.equal(logic.hasBoardPreviews(null), false);
+            assert.equal(logic.cardImageSource({ preview: raw, board }, 'board'), board);
+            assert.equal(logic.cardImageSource({ preview: raw, board }, 'raw'), raw);
+            assert.equal(logic.cardImageSource({ preview: raw, board: null }, 'board'), raw);
+            assert.equal(logic.cardImageSource({ preview: 'javascript:alert(1)', board: null }, 'raw'), null);
+            assert.equal(logic.cardImageSource(null, 'board'), null);
+            """
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

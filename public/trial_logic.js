@@ -195,12 +195,36 @@
     return remaining > 0 ? `오늘 ${remaining}회 남음` : "오늘 무료 체험을 모두 사용했어요";
   }
 
+  const SAFE_IMAGE_PREFIXES = ["data:image/webp;base64,", "data:image/jpeg;base64,"];
+
   function isSafeImageSource(value) {
-    return typeof value === "string" && value.startsWith("data:image/jpeg;base64,");
+    return typeof value === "string" && SAFE_IMAGE_PREFIXES.some(prefix => value.startsWith(prefix));
+  }
+
+  // The server sets board_previews only when at least one problem carries a board image;
+  // the page still checks each source so a malformed payload never reaches an <img>.
+  function hasBoardPreviews(payload) {
+    if (!payload || payload.board_previews !== true || !Array.isArray(payload.problems)) {
+      return false;
+    }
+    return payload.problems.some(problem => problem && isSafeImageSource(problem.board));
+  }
+
+  // Which image a card shows: the board cutout in "board" mode when it exists, else the raw crop.
+  function cardImageSource(problem, mode) {
+    if (!problem) {
+      return null;
+    }
+    if (mode === "board" && isSafeImageSource(problem.board)) {
+      return problem.board;
+    }
+    return isSafeImageSource(problem.preview) ? problem.preview : null;
   }
 
   return {
     FEATURES,
+    cardImageSource,
+    hasBoardPreviews,
     interpretError,
     isSafeImageSource,
     pagesBanner,
