@@ -158,6 +158,16 @@ class ParseResult:
     source_page_count: int
     parser_version: str
     timing_ms: dict[str, int]
+    # One ``ai_fallback`` metadata dict per page (see page_repair.py's
+    # _attach_ai_fallback_summary / PageModel.metadata["ai_fallback"]), in
+    # the same order as ``pages``. Always populated -- for the trial's
+    # default ai_fallback_config=None every entry is just {"status":
+    # "disabled", "attempted": False, "applied": False, ...} -- so a caller
+    # (the bench oracle) can tell whether AI page repair actually changed a
+    # page instead of merely being available. Nothing in the trial response
+    # path reads this field; it exists to make repair outcomes inspectable
+    # without re-deriving them from PageModel objects the trial never keeps.
+    page_repair: tuple[dict[str, Any], ...] = ()
 
 
 def parser_version() -> str:
@@ -226,7 +236,9 @@ def parse_problems(
 
     The trial calls this with the defaults: no OCR, no AI, no board rendering.
     The bench oracle passes ``ocr_mode="auto"`` and a forced AI repair config
-    so both sides share every downstream step and coordinate frame.
+    so both sides share every downstream step and coordinate frame -- see
+    ``ParseResult.page_repair`` for how the oracle tells whether that config
+    actually changed anything.
 
     With ``max_pages`` only the leading pages are parsed. Returned images are
     fully loaded copies, so ``work_dir`` may be deleted as soon as this returns.
@@ -254,6 +266,7 @@ def parse_problems(
         timings=timing_ms,
     )
     timing_ms["recognize"] = _elapsed_ms(recognize_started_at)
+    page_repair = tuple(dict(page.metadata.get("ai_fallback") or {}) for page in page_models)
 
     crops_started_at = time.perf_counter()
     entries = build_problem_entries(
@@ -296,4 +309,5 @@ def parse_problems(
         source_page_count=source_page_count,
         parser_version=parser_version(),
         timing_ms=timing_ms,
+        page_repair=page_repair,
     )

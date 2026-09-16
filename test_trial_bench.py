@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -19,7 +20,8 @@ from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreemen
 from scripts.trial_bench.complexity import write_synthetic
 from scripts.trial_bench.load import summarize_wave
 from scripts.trial_bench.make_inputs import make_input
-from scripts.trial_bench.oracle import force_config
+from scripts.trial_bench import oracle
+from scripts.trial_bench.oracle import force_config, oracle_case, summarize_page_repair
 from scripts.trial_bench.probe import summarize_file
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
 from structured_schema import Box
@@ -346,6 +348,165 @@ class TestOracleConfig(unittest.TestCase):
         self.assertEqual("gemini", config["provider"])
         self.assertTrue(config["fail_on_error"])
         self.assertEqual("gemini-x", force_config("gemini-x")["model"])
+
+    def test_force_config_deltas_from_the_desktop_forced_path_are_the_documented_ones(self):
+        # app_server.py's two ai_fallback="force" call sites both compute
+        # ai_config.get("timeout_ms") or 30000, and neither overrides
+        # run_problem_export's fail_on_ai_error default (False). Everything
+        # else here is set equal to force_config's own value on purpose --
+        # this pins that only the two deltas the docstring documents exist,
+        # not that force_config independently re-derives every desktop
+        # default (max_regions differs too, but is inert under mode="force"
+        # in page_repair.py's routing, so it is out of scope here).
+        desktop_forced = dict(force_config(""), timeout_ms=30000, fail_on_error=False)
+        config = force_config("")
+        deltas = {key: (desktop_forced[key], config[key]) for key in desktop_forced if desktop_forced[key] != config[key]}
+        self.assertEqual({"timeout_ms": (30000, 60000), "fail_on_error": (False, True)}, deltas)
+
+
+class TestSummarizePageRepair(unittest.TestCase):
+    def test_counts_attempted_applied_models_and_errors_from_page_metadata(self):
+        # Fake per-page ai_fallback metadata -- the shape page_repair.py's
+        # _attach_ai_fallback_summary attaches to PageModel.metadata. No
+        # network, no PageModel, no Gemini call.
+        page_repair = [
+            {"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview", "status": "applied"},
+            # A cache hit reused a previous real answer without a fresh
+            # network call -- counted separately from "attempted", matching
+            # build_run_summary/_summarize_ai_fallback_usage's own fields.
+            {"attempted": False, "cache_hit": True, "applied": True, "model_used": "gemini-3.1-pro-preview", "status": "cache_hit"},
+            {"attempted": True, "applied": False, "status": "error", "error": "HTTP 500: boom"},
+            {"attempted": False, "applied": False, "status": "disabled"},
+        ]
+        summary = summarize_page_repair(page_repair)
+        self.assertEqual(4, summary["pages_total"])
+        self.assertEqual(2, summary["pages_attempted"])
+        self.assertEqual(1, summary["pages_cache_hit"])
+        self.assertEqual(2, summary["pages_applied"])
+        self.assertEqual(["gemini-3.1-pro-preview"], summary["models_used"])
+        self.assertEqual([{"page_index": 2, "status": "error", "error": "HTTP 500: boom"}], summary["errors"])
+        self.assertFalse(summary["zero_applied"])
+        self.assertIsNone(summary["warning"])
+
+    def test_zero_applied_case_is_flagged_even_when_repair_was_attempted(self):
+        # Attempted but never changed anything -- agreement with the trial
+        # here is a silent no-op, not evidence the AI recognized anything.
+        page_repair = [
+            {"attempted": True, "applied": False, "status": "not_needed"},
+            {"attempted": False, "applied": False, "status": "disabled"},
+        ]
+        summary = summarize_page_repair(page_repair)
+        self.assertEqual(0, summary["pages_applied"])
+        self.assertTrue(summary["zero_applied"])
+        self.assertIsNotNone(summary["warning"])
+        self.assertIn("NOT evidence of AI-grade recognition", summary["warning"])
+
+    def test_a_page_that_did_change_something_is_not_flagged(self):
+        summary = summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.6-flash"}])
+        self.assertFalse(summary["zero_applied"])
+        self.assertIsNone(summary["warning"])
+
+    def test_empty_page_repair_is_not_flagged_as_a_no_op_case(self):
+        # No pages at all is a different failure mode (nothing was measured)
+        # from "measured and found nothing changed" -- don't conflate them.
+        summary = summarize_page_repair([])
+        self.assertEqual(0, summary["pages_total"])
+        self.assertFalse(summary["zero_applied"])
+        self.assertIsNone(summary["warning"])
+
+
+class TestOracleCaseRepairInstrumentation(unittest.TestCase):
+    def _fake_result(self, page_repair: list[dict]) -> ParseResult:
+        page = ParsedPage(page_id="p1", index=0, width=100, height=100, image=Image.new("RGB", (100, 100), "white"))
+        return ParseResult(
+            pages=[page],
+            problems=[],
+            source_page_count=1,
+            parser_version="dev",
+            timing_ms={"total": 5},
+            page_repair=tuple(page_repair),
+        )
+
+    def test_observation_json_carries_the_repair_counts(self):
+        fake_result = self._fake_result(
+            [{"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview", "status": "applied"}]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(oracle, "parse_problems", return_value=fake_result):
+                observation = oracle_case(pdf_path, "physics", root=root)
+            saved = json.loads((root / "oracle" / "case.json").read_text(encoding="utf-8"))
+
+        expected = {
+            "pages_total": 1,
+            "pages_attempted": 1,
+            "pages_cache_hit": 0,
+            "pages_applied": 1,
+            "models_used": ["gemini-3.1-pro-preview"],
+            "errors": [],
+            "zero_applied": False,
+            "warning": None,
+        }
+        self.assertEqual(expected, observation["oracle"]["page_repair"])
+        # What's on disk (what score.py and a human later read) must match
+        # what the function returned in-process.
+        self.assertEqual(expected, saved["oracle"]["page_repair"])
+
+    def test_a_zero_applied_case_is_flagged_in_the_saved_observation(self):
+        fake_result = self._fake_result([{"attempted": True, "applied": False, "status": "not_needed"}])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "bench"
+            pdf_path = Path(temp_dir) / "case.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4 placeholder, never read by the fake parser")
+            with patch.object(oracle, "parse_problems", return_value=fake_result):
+                observation = oracle_case(pdf_path, "physics", root=root)
+
+        self.assertTrue(observation["oracle"]["page_repair"]["zero_applied"])
+        self.assertIn("NOT evidence of AI-grade recognition", observation["oracle"]["page_repair"]["warning"])
+
+
+class TestOracleMainReporting(unittest.TestCase):
+    def test_main_prints_repair_counts_and_flags_only_the_zero_applied_case(self):
+        observations = {
+            "case-a": {
+                "problems": [{"key": "q1"}],
+                "passage_ranges": [],
+                "timing_ms": {"total": 100},
+                "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": True, "model_used": "gemini-3.1-pro-preview"}])},
+            },
+            "case-b": {
+                "problems": [{"key": "q1"}, {"key": "q2"}],
+                "passage_ranges": [],
+                "timing_ms": {"total": 200},
+                "oracle": {"page_repair": summarize_page_repair([{"attempted": True, "applied": False, "status": "not_needed"}])},
+            },
+        }
+
+        def fake_oracle_case(pdf, subject, *, ocr_mode, model):
+            return observations[pdf.stem]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            empty_root = Path(temp_dir)  # no cases.json here -- subject always resolves to "unknown"
+            with (
+                patch.dict(os.environ, {"GEMINI_API_KEY": "fake-oracle-test-key"}),
+                patch.object(oracle, "BENCH_ROOT", empty_root),
+                patch.object(oracle, "select_inputs", return_value=[Path("case-a.pdf"), Path("case-b.pdf")]),
+                patch.object(oracle, "oracle_case", side_effect=fake_oracle_case),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = oracle.main(["--runtime-dir", str(empty_root)])
+
+        self.assertEqual(0, exit_code)
+        table = out.getvalue()
+        self.assertIn("| case-a | unknown | 1 | 0 | 100 | 1/1 | 0/1 | 1/1 | gemini-3.1-pro-preview | 0 |", table)
+        self.assertIn("| case-b | unknown | 2 | 0 | 200 | 1/1 | 0/1 | 0/1 | - | 0 |", table)
+        warning_text = err.getvalue()
+        self.assertIn("case-b:", warning_text)
+        self.assertIn("NOT evidence of AI-grade recognition", warning_text)
+        self.assertNotIn("case-a:", warning_text)
 
 
 def _obs(case: str, problems: list[tuple], total_ms: int = 100) -> dict:
