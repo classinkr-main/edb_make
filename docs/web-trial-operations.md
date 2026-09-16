@@ -74,8 +74,8 @@
 | `TRIAL_MAX_BYTES` / `TRIAL_MAX_PAGES` / `TRIAL_MAX_SOURCE_PAGES` | 기본 4000000 / 4 / 100 | 아니오 |
 | `TRIAL_PARSE_CONCURRENCY` / `TRIAL_PARSE_WAIT_SECONDS` | 기본 1 / 20 (인스턴스당). 4쪽 초기 운영은 1로 시작하고 클라우드 RSS·분산 실측 후 조정 | 아니오 |
 | `TRIAL_MAX_WORDS_PER_PAGE` / `TRIAL_MAX_DRAWINGS_PER_PAGE` | 기본 4500 / 2500 (2026-09-16 복잡도 실측으로 결정, `docs/web-trial-load.md` §3). 앞 4쪽 중 한 쪽이라도 넘으면 422 `page_too_complex` | 아니오 |
-| `EDB_PREPROCESS_PAGE_WORKERS` | 페이지 렌더(`render`) 단계의 스레드 풀 상한(`preprocess.py`). 미설정 시 기본값 `min(4, 페이지 수, CPU 코어 수)`. 로컬 프로파일에서 가장 큰 단일 항목(약 0.5초, 품질·속도·과부하 설계 §2-2)이라 파싱 시간을 가장 많이 좌우하는 레버다 | 아니오 |
-| `EDB_PROBLEM_ASSET_WORKERS` | crop·asset 렌더(`assets`) 단계의 스레드 풀 상한(`build_problem_board_edb.py`). 미설정 시 기본값 `min(8, 작업 수, CPU 코어 수)`. 렌더 단계에는 영향을 주지 않는다. Task 15의 A/B 결과로 정한다 | 아니오 |
+| `EDB_PREPROCESS_PAGE_WORKERS` | 렌더(`render`) 단계 중 디스큐·마진 크롭·리사이즈 풀만의 스레드 상한(`_normalize_pdf_rendered_pages`, `preprocess.py:2753`). 래스터라이즈·PNG 저장(`render_pdf_pages`, `preprocess.py:442-478`)은 `doc.page_count`를 직렬 for 루프로 도는 코드라 이 변수의 영향을 받지 않는다. 미설정 시 기본값 `min(4, 페이지 수, CPU 코어 수)`이고, 값을 설정해도 `max(1, min(기본 상한, 설정값))`이라 이 상한보다 올릴 수는 없고 낮출 수만 있다(4쪽에서 8이나 16을 넣어도 4). 0 이하이거나 정수가 아닌 값은 조용히 기본값으로 되돌아간다. "CPU 코어 수"는 함수 컨테이너 안에서 본 `os.cpu_count()`이며 Vercel이 실제로 할당한 1 vCPU와 다를 수 있고, 코어가 1로 보이면 이 변수는 어떤 값을 넣어도 완전한 no-op이 된다 — 실제 적용된 값은 각 페이지 메타데이터의 `pdf_preprocess_page_worker_count`(`preprocess.py:2760`)로 확인한다. 로컬 실측(4쪽·200 DPI)으로는 render 단계 총 0.93초 중 이 풀이 0.09초(~10%), 직렬 래스터라이즈가 0.73초(~78%)이며 이 값을 1로 고정해도 단계는 0.93→1.10초로만 바뀐다. Vercel 웜 파싱에서 실제로 파싱 시간을 가장 크게 좌우하는 단계는 이 변수와 무관한 인식(3.7~4.1초)·crop(2.7~3.1초)이다(품질·속도·과부하 설계 §2-2, 국어 3쪽 실측) | 아니오 |
+| `EDB_PROBLEM_ASSET_WORKERS` | crop·asset 렌더(`assets`) 단계의 스레드 풀 상한(`build_problem_board_edb.py`). 미설정 시 기본값 `min(8, 작업 수, CPU 코어 수)`이고, `EDB_PREPROCESS_PAGE_WORKERS`와 같은 방식으로 값을 올려도 이 기본 상한 위로는 못 올라가며(낮추기만 가능) 0 이하·비정수 값은 조용히 기본값으로 되돌아간다. 여기서도 "CPU 코어 수"는 함수 컨테이너 안 `os.cpu_count()`이지 Vercel이 할당한 1 vCPU가 아니며, 코어가 1로 보이면 이 변수도 no-op이 된다. 렌더 단계에는 영향을 주지 않는다. Task 15의 A/B 결과로 정한다 | 아니오 |
 
 **필수 6개 중 하나라도 비어 있으면 운영의 `/api/parse`는 503만 돌려준다.** 설정이 덜 된 채 배포돼도 파싱은 열리지 않는다. 환경변수를 바꾸면 재배포해야 반영된다. 4쪽 전환 시 기존 `TRIAL_MAX_PAGES=3`이 있으면 `4`로 수정하거나 삭제한다. 배포 뒤 `/api/config`의 `max_pages: 4`와 4쪽 시험지의 전체 결과를 확인한다. 20문항은 대표 사용 예시이며 문항 수 상한이나 인식 보장이 아니다. 기존 `TRIAL_PARSE_CONCURRENCY=2`도 초기 운영에서는 `1`로 수정하거나 삭제한다. 이는 인스턴스당 제한이며 서비스 전체 동시 사용자 수가 아니다.
 
@@ -104,6 +104,8 @@ where table_schema = 'public' and table_name = 'trial_events'
 -- 네 행 모두 나와야 한다
 ```
 
+이 쿼리는 DDL이 적용됐다는 것만 증명하고, insert가 실제로 성공한다는 증거는 아니다. PostgREST는 스키마를 캐시하므로 캐시가 오래되면 위 쿼리는 네 행을 그대로 보여주는데도 새 열을 포함한 insert는 `PGRST204`로 계속 실패할 수 있다. `trial_server.py`는 이벤트 기록 실패를 `logger.warning`으로만 남기고 방문자에게는 그대로 200을 돌려주므로(`record_event`), 이 화면은 초록인데 이벤트는 전부 유실되는 상태가 가능하다 — 진짜 게이트는 아래 4번에서 새 열이 실제로 채워졌는지 보는 것이다. 캐시가 오래된 것으로 보이면 `notify pgrst, 'reload schema';`를 실행하고, Vercel 함수 로그에서 `trial event not recorded` 경고가 찍히는지 확인한다.
+
 ```bash
 DOMAIN=https://trial.example.com
 
@@ -124,9 +126,15 @@ curl -s -H "Authorization: Bearer $CRON_SECRET" $DOMAIN/api/cron/daily
 1. 텍스트 PDF(모의고사 원본)를 올려 결과·박스·카드가 보이는지, 4쪽 넘는 파일이면 "앞 4쪽까지" 배너가 뜨는지 본다.
 2. 사진(JPG)을 골라 "스캔본·사진은 프리미엄 AI 인식으로" 팝업이 뜨는지 본다.
 3. 팝업의 [프리미엄 도입 문의]가 `classin.co.kr/contact`로 열리는지 본다.
-4. Supabase에서 이벤트가 쌓였는지 본다:
+4. Supabase에서 이벤트가 쌓였는지, 그리고 새 열이 실제로 채워지는지 본다 (배포 순서가 지켜졌다는 진짜 증거는 이것이다):
    ```sql
    select kind, status, reject_code, feature, action, created_at from public.trial_events order by id desc limit 10;
+
+   select count(*) from public.trial_events
+   where timing is not null and instance_id is not null
+     and created_at > now() - interval '1 hour';
+   -- 위 1번 스모크 파싱 이후라면 1 이상이어야 한다. 0이면 PostgREST 스키마 캐시가 오래된 것이니
+   -- notify pgrst, 'reload schema'; 실행 후 다시 파싱한다
    ```
 
 ## 4. 운영
@@ -221,13 +229,13 @@ group by reject_detail order by 2 desc;
 
 ### 4-6. 비용 최악치
 
-하루 상한(`TRIAL_GLOBAL_DAILY_LIMIT` 기본 500건)을 매번 15초·2 GB로 다 채운다고 가정한 최악치(스펙 §9 단가: Active CPU 시간당 $0.128, 메모리 GB·시간당 $0.0106):
+하루 상한(`TRIAL_GLOBAL_DAILY_LIMIT` 기본 500건)을 매번 15초·2 GB로 다 채운다고 가정한, **과금 트래픽 기준** 최악치(스펙 §9 단가: Active CPU 시간당 $0.128, 메모리 GB·시간당 $0.0106):
 
 - 건당: 15 × (0.128 ÷ 3600) + 2 × (15 ÷ 3600) × 0.0106 ≈ $0.000533(CPU) + $0.0000883(메모리) ≈ **$0.00062**
 - 하루: 500 × $0.00062 ≈ **$0.31**
 - 월(30일): $0.31 × 30 ≈ **$9.33** (Vercel 함수 컴퓨트만. 정적 파일 전송·Supabase·Vercel 기본 무료 사용량은 별도)
 
-§2-3의 Spend Management 월 한도는 이 최악치보다 여유 있게 잡는다. 실제 요금은 대부분 15초보다 짧은 웜 케이스(§4-3)와 3~4쪽 실측(품질·속도·과부하 설계 §2-2)에 가까우므로 이 수치보다 낮게 나온다.
+이 500건은 `charge_and_parse`로 과금·차감되는 일반 체험판 요청만 센다. §8 박람회 시연은 `charge_and_parse`가 아니라 `parse_and_encode`를 직접 불러 이 500회·Turnstile을 건너뛰므로(§8 "시연은 IP별 3회·일반 전체 500회 차감과 Turnstile을 건너뛴다") 시연 트래픽 전체가 이 수치 밖에 있고, `unreadable_pdf`·`page_too_complex`·`busy` 같은 과금 전 거절 요청도 500회를 소모하지 않는다 — 그중 `busy`(`slot_wait`) 거절은 과금 없이도 `TRIAL_PARSE_WAIT_SECONDS`(기본 20초) 만큼 함수 실행 시간을 붙잡아 둔다. 즉 위 수치는 과금된 트래픽만의 추정치이며 프로젝트가 실제로 쓸 수 있는 컴퓨트의 상한이 아니다. §2-3의 Spend Management 월 한도는 이 최악치에 여유를 두고 그보다 높게 잡는다. 실제 요금은 대부분 15초보다 짧은 웜 케이스(§4-3)와 3~4쪽 실측(품질·속도·과부하 설계 §2-2)에 가까우므로 이 수치보다 낮게 나온다.
 
 ## 5. 로컬 실행
 
