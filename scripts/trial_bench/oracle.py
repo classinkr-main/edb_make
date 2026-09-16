@@ -139,12 +139,13 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
     rubber-stamps.
 
     Agreement with the trial on a case where ``pages_changed`` is 0 proves
-    nothing about AI-grade recognition, so that case is flagged (``zero_applied``)
-    rather than left to look identical to a case where AI repair genuinely
-    changed something. ``pages_total == 0`` is a different, louder failure --
-    the instrumentation recorded no per-page data at all -- and gets its own
-    ``no_page_records`` flag instead of being silently exempted from
-    ``zero_applied``.
+    nothing about AI-grade recognition, so that case is flagged (``zero_changed``
+    -- named for the counter it actually reads, ``pages_changed``, not for
+    ``pages_applied``) rather than left to look identical to a case where AI
+    repair genuinely changed something. ``pages_total == 0`` is a different,
+    louder failure -- the instrumentation recorded no per-page data at all --
+    and gets its own ``no_page_records`` flag instead of being silently
+    exempted from ``zero_changed``.
 
     ``errors`` alone is not enough to explain a zero-changed case: page_repair
     reports most of its no-ops through ``status`` and never sets ``error``
@@ -179,10 +180,10 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
         if error:
             errors.append({"page_index": index, "status": str(entry.get("status") or ""), "error": error})
     no_page_records = pages_total == 0
-    zero_applied = pages_total > 0 and pages_changed == 0
+    zero_changed = pages_total > 0 and pages_changed == 0
     if no_page_records:
         warning = NO_PAGE_RECORDS_WARNING
-    elif zero_applied:
+    elif zero_changed:
         warning = ZERO_CHANGED_WARNING.format(total=pages_total, applied=pages_applied, statuses=format_statuses(statuses))
     else:
         warning = None
@@ -195,10 +196,30 @@ def summarize_page_repair(page_repair: Sequence[Mapping[str, Any]]) -> dict[str,
         "models_used": sorted(models_used),
         "statuses": dict(sorted(statuses.items())),
         "errors": errors,
-        "zero_applied": zero_applied,
+        # Named for the counter it reads (pages_changed), not pages_applied --
+        # read this back with zero_changed_flag(), never this key directly,
+        # so a page_repair dict saved by an oracle.py that predates this
+        # rename (only "zero_applied") still reads correctly.
+        "zero_changed": zero_changed,
         "no_page_records": no_page_records,
         "warning": warning,
     }
+
+
+def zero_changed_flag(page_repair: Mapping[str, Any]) -> bool:
+    """The ``zero_changed`` flag from a page_repair summary dict, old or new.
+
+    A dict built by this module's current summarize_page_repair (or
+    _failed_page_repair_summary) carries "zero_changed". A dict loaded from
+    an oracle observation saved before this rename carries only the old,
+    misleadingly-named "zero_applied" key -- computed from the same
+    pages_changed == 0 condition, just called the wrong thing. Prefer the new
+    key when both are present so a freshly computed summary is never shadowed
+    by a stray legacy key.
+    """
+    if "zero_changed" in page_repair:
+        return bool(page_repair["zero_changed"])
+    return bool(page_repair.get("zero_applied", False))
 
 
 FAILURE_STATUS = "oracle_failed"
@@ -250,7 +271,7 @@ def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
         "models_used": [],
         "statuses": {FAILURE_STATUS: 1},
         "errors": [error_entry],
-        "zero_applied": False,
+        "zero_changed": False,
         "no_page_records": True,
         "status": FAILURE_STATUS,
         "gemini_truncated": bool(getattr(exc, "truncated", False)),
@@ -312,12 +333,17 @@ def main(argv: list[str] | None = None) -> int:
         try:
             observation = oracle_case(pdf, subject, ocr_mode=args.ocr_mode, model=args.model)
         except Exception as exc:
-            # A failed case must not cost the run its whole table: oracle_case
-            # has already saved this case's own failure observation to disk,
-            # and the cases that already succeeded are still worth printing
-            # and pasting into docs, so keep going instead of dying here.
+            # A failed case must not cost the run its whole table: the cases
+            # that already succeeded are still worth printing and pasting
+            # into docs, so keep going instead of dying here. This does NOT
+            # mean oracle_case has necessarily saved a failure record to
+            # disk: its own try/except wraps only the parse_in_scratch call,
+            # so an exception raised after parsing (building the observation,
+            # or the save_json call) propagates straight out here with no
+            # record under FAILURE_DIR at all -- this warning may be the only
+            # trace of it.
             failed_cases.append(pdf.stem)
-            warnings.append((pdf.stem, f"oracle_case raised before any page was parsed -- {exc}"))
+            warnings.append((pdf.stem, f"oracle_case raised for this case -- {exc}"))
             rows.append([pdf.stem, subject, "-", "-", "-", "-", "-", "ERROR", "-", "-", 1])
             continue
         page_repair = observation["oracle"]["page_repair"]
@@ -337,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
                 # This is the real change signal (page_repair.py's
                 # summary["changed"]), not the "applied" (validated-and-written)
                 # count that repair_applied shows next to it.
-                f"{changed} (NO AI EVIDENCE)" if (page_repair["zero_applied"] or page_repair["no_page_records"]) else changed,
+                f"{changed} (NO AI EVIDENCE)" if (zero_changed_flag(page_repair) or page_repair["no_page_records"]) else changed,
                 f"{page_repair['pages_applied']}/{page_repair['pages_total']}",
                 ", ".join(page_repair["models_used"]) or "-",
                 len(page_repair["errors"]),

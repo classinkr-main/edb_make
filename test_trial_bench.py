@@ -19,6 +19,7 @@ from page_repair import build_ai_fallback_config, repair_page_model
 from preprocess import PreparedPage
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from scripts.trial_bench import common, memory
+from scripts.trial_bench import adjudicate
 from scripts.trial_bench.adjudicate import adjudicate_case, compose, disagreements, labels_skeleton
 from scripts.trial_bench.complexity import write_synthetic
 from scripts.trial_bench.load import summarize_wave
@@ -26,6 +27,7 @@ from scripts.trial_bench.make_inputs import make_input
 from scripts.trial_bench import oracle
 from scripts.trial_bench.oracle import force_config, oracle_case, summarize_page_repair
 from scripts.trial_bench.probe import summarize_file
+from scripts.trial_bench import score
 from scripts.trial_bench.score import bbox_iou, expected_from, regions_iou, render_report, score_all, score_case
 from structured_schema import BlockType, Box, ContentBlock, PageModel, Subject
 from trial_input import DEFAULT_MAX_PAGES
@@ -610,7 +612,7 @@ class TestSummarizePageRepair(unittest.TestCase):
         self.assertEqual(["gemini-3.1-pro-preview"], summary["models_used"])
         self.assertEqual([{"page_index": 3, "status": "error", "error": "HTTP 500: boom"}], summary["errors"])
         self.assertEqual({"applied": 2, "cache_hit": 1, "disabled": 1, "error": 1}, summary["statuses"])
-        self.assertFalse(summary["zero_applied"])
+        self.assertFalse(summary["zero_changed"])
         self.assertFalse(summary["no_page_records"])
         self.assertIsNone(summary["warning"])
 
@@ -626,7 +628,7 @@ class TestSummarizePageRepair(unittest.TestCase):
         summary = summarize_page_repair(page_repair)
         self.assertEqual(1, summary["pages_applied"])
         self.assertEqual(0, summary["pages_changed"])
-        self.assertTrue(summary["zero_applied"])
+        self.assertTrue(summary["zero_changed"])
         self.assertFalse(summary["no_page_records"])
         self.assertIsNotNone(summary["warning"])
         self.assertIn("NOT evidence of AI-grade recognition", summary["warning"])
@@ -654,11 +656,11 @@ class TestSummarizePageRepair(unittest.TestCase):
 
     def test_a_page_that_actually_changed_something_is_not_flagged(self):
         summary = summarize_page_repair([{"attempted": True, "applied": True, "changed": True, "model_used": "gemini-3.6-flash"}])
-        self.assertFalse(summary["zero_applied"])
+        self.assertFalse(summary["zero_changed"])
         self.assertFalse(summary["no_page_records"])
         self.assertIsNone(summary["warning"])
 
-    def test_empty_page_repair_is_flagged_as_no_page_records_not_zero_applied(self):
+    def test_empty_page_repair_is_flagged_as_no_page_records_not_zero_changed(self):
         # No pages at all is a different, louder failure mode (the
         # instrumentation recorded nothing -- a renamed/missing
         # ParseResult.page_repair field, or a build_pages branch that never
@@ -667,10 +669,35 @@ class TestSummarizePageRepair(unittest.TestCase):
         # instrumentation's own failure mode read as a clean 0/0 row.
         summary = summarize_page_repair([])
         self.assertEqual(0, summary["pages_total"])
-        self.assertFalse(summary["zero_applied"])
+        self.assertFalse(summary["zero_changed"])
         self.assertTrue(summary["no_page_records"])
         self.assertIsNotNone(summary["warning"])
         self.assertIn("did not run", summary["warning"])
+
+    def test_summarize_page_repair_writes_zero_changed_not_the_old_zero_applied_name(self):
+        # zero_changed is computed from pages_changed, not pages_applied --
+        # the old "zero_applied" name inverted that. A fresh summary must
+        # never carry the old key at all, so nothing can read it by accident.
+        summary = summarize_page_repair([{"attempted": True, "applied": True, "changed": False, "status": "applied"}])
+        self.assertNotIn("zero_applied", summary)
+
+
+class TestZeroChangedFlag(unittest.TestCase):
+    def test_reads_the_current_key(self):
+        self.assertTrue(oracle.zero_changed_flag({"zero_changed": True, "zero_applied": False}))
+        self.assertFalse(oracle.zero_changed_flag({"zero_changed": False}))
+
+    def test_falls_back_to_the_legacy_key_for_an_older_observation_file(self):
+        # An oracle observation saved before the zero_applied -> zero_changed
+        # rename has only the old key, computed with the exact same
+        # (pages_total > 0 and pages_changed == 0) condition -- just named
+        # for the wrong counter. Re-scoring or re-adjudicating that file must
+        # not require re-running the (paid, network) oracle.
+        self.assertTrue(oracle.zero_changed_flag({"zero_applied": True}))
+        self.assertFalse(oracle.zero_changed_flag({"zero_applied": False}))
+
+    def test_missing_both_keys_defaults_to_false(self):
+        self.assertFalse(oracle.zero_changed_flag({}))
 
 
 class TestOracleCaseRepairInstrumentation(unittest.TestCase):
@@ -706,7 +733,7 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
             "models_used": ["gemini-3.1-pro-preview"],
             "statuses": {"applied": 1},
             "errors": [],
-            "zero_applied": False,
+            "zero_changed": False,
             "no_page_records": False,
             "warning": None,
         }
@@ -726,7 +753,7 @@ class TestOracleCaseRepairInstrumentation(unittest.TestCase):
             with patch.object(oracle, "parse_problems", return_value=fake_result):
                 observation = oracle_case(pdf_path, "physics", root=root)
 
-        self.assertTrue(observation["oracle"]["page_repair"]["zero_applied"])
+        self.assertTrue(observation["oracle"]["page_repair"]["zero_changed"])
         self.assertIn("NOT evidence of AI-grade recognition", observation["oracle"]["page_repair"]["warning"])
 
     def test_oracle_case_forwards_ocr_mode_and_forced_ai_config_to_the_parser(self):
@@ -1159,6 +1186,26 @@ class TestScore(unittest.TestCase):
         self.assertIn("| a | approved | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 100 | 200 | ? |", report)
         self.assertNotIn("no evidence of a real change", report)
 
+    def test_render_report_adds_a_footnote_naming_excluded_cases_and_why(self):
+        # This is the fix for both English bench cases vanishing with no
+        # trace: an excluded case must appear inside the same generated
+        # block score.py writes into docs/web-trial-quality.md, not only in
+        # a warning that the next --doc run can't see.
+        rows = [{"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}]
+        excluded = [
+            {"case": "english_2020suneung_go3_20191107", "reason": "no oracle observation found"},
+            {"case": "english_go2_hakpyeong_20260324", "reason": "Gemini response JSON decode failed: Unterminated string"},
+        ]
+        report = render_report(rows, excluded)
+        self.assertIn("2 case(s) excluded from this report", report)
+        self.assertIn("`english_2020suneung_go3_20191107` (no oracle observation found)", report)
+        self.assertIn("`english_go2_hakpyeong_20260324` (Gemini response JSON decode failed: Unterminated string)", report)
+
+    def test_render_report_has_no_excluded_footnote_when_nothing_was_excluded(self):
+        rows = [{"case": "a", "status": "approved", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}]
+        self.assertNotIn("excluded from this report", render_report(rows))
+        self.assertNotIn("excluded from this report", render_report(rows, []))
+
 
 class TestScoreAll(unittest.TestCase):
     def test_score_all_filters_cases_skips_missing_oracle_and_carries_oracle_ms(self):
@@ -1169,12 +1216,21 @@ class TestScoreAll(unittest.TestCase):
             common.save_json(common.bench_dir("labels", root) / "a.json", {"case": "a", "status": "approved", "items": []})
             common.save_json(common.bench_dir("trial", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=333))
             common.save_json(common.bench_dir("oracle", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=444))
-            # "c" has a trial but no oracle -- it must be skipped, not crash.
+            # "c" has a trial but no oracle -- it must be skipped, not crash,
+            # but it must not vanish silently either: a bare `continue` here
+            # is exactly how both English bench cases disappeared from the
+            # generated corpus table with no row, no warning and no footnote
+            # to explain why.
             common.save_json(common.bench_dir("trial", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=555))
 
-            rows = score_all([], root=root)
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                rows = score_all([], root=root, excluded=excluded)
             by_case = {row["case"]: row for row in rows}
             self.assertEqual({"a", "b"}, set(by_case))
+            self.assertEqual([{"case": "c", "reason": "no oracle observation found"}], excluded)
+            self.assertIn("case 'c'", captured.getvalue())
+            self.assertIn("no oracle observation found", captured.getvalue())
             self.assertEqual("approved", by_case["a"]["status"])
             self.assertEqual("pending", by_case["b"]["status"])
             self.assertEqual(111, by_case["a"]["trial_ms"])
@@ -1219,13 +1275,17 @@ class TestScoreAll(unittest.TestCase):
             )
 
             warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
             with contextlib.redirect_stderr(io.StringIO()):
-                rows = score_all([], root=root, warnings=warnings)
+                rows = score_all([], root=root, warnings=warnings, excluded=excluded)
 
         self.assertEqual(["b"], [row["case"] for row in rows])
         self.assertEqual(1, len(warnings))
         self.assertIn("not a scorable oracle observation", warnings[0])
         self.assertIn("Gemini exploded", warnings[0])
+        # Same fact, structured for the report footnote instead of scraped
+        # out of the warning text.
+        self.assertEqual([{"case": "a", "reason": "Gemini exploded"}], excluded)
 
     def test_score_all_still_scores_a_case_whose_label_key_went_stale(self):
         """The before/after workflow: the fixed parser no longer emits an approved "trial only" key."""
@@ -1245,6 +1305,29 @@ class TestScoreAll(unittest.TestCase):
             self.assertEqual(1.0, rows[0]["question_recall"])
             self.assertEqual(1, len(warnings))
             self.assertIn("no longer present", warnings[0])
+
+
+class TestScoreMainReporting(unittest.TestCase):
+    def test_main_reports_the_real_reason_a_named_case_has_no_row(self):
+        # main() used to compute its "no trial observation found" message
+        # from the same `matched` set that score_all's oracle guard also
+        # removes a case from -- so a case with a trial file but an
+        # unscorable oracle observation got the wrong, misleading reason.
+        def fake_score_all(cases, excluded=None):
+            if excluded is not None:
+                excluded.append({"case": "bad-oracle", "reason": "Gemini exploded"})
+            return []
+
+        with patch.object(score, "score_all", side_effect=fake_score_all):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                exit_code = score.main(["bad-oracle", "never-observed"])
+
+        self.assertEqual(1, exit_code)
+        output = err.getvalue()
+        self.assertIn("case 'bad-oracle' was excluded from the report: Gemini exploded", output)
+        self.assertIn("no trial observation found for case 'never-observed'", output)
+        self.assertNotIn("no trial observation found for case 'bad-oracle'", output)
 
 
 class TestAdjudicate(unittest.TestCase):
@@ -1335,6 +1418,71 @@ class TestAdjudicateCase(unittest.TestCase):
                 adjudicate_case("c", root)
             self.assertIn("q2", captured.getvalue())
             self.assertEqual(stale, common.load_json(labels_path))
+
+    def test_skips_an_unscorable_oracle_observation_instead_of_aborting(self):
+        # adjudicate_case used to read oracle["problems"] with no guard at
+        # all: a truncated or failure-shaped oracle record (the exact shape
+        # oracle_case saves under FAILURE_DIR, or leaves behind on an
+        # interrupted run) raised KeyError here and would abort the whole
+        # `for oracle_path in ...` loop in main(), costing every other case
+        # its row too -- the same failure mode score.py's score_all already
+        # guards against.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+            common.save_json(
+                common.bench_dir("oracle", root) / "a.json",
+                {"case": "a", "error": "Gemini exploded", "oracle": {"page_repair": oracle._failed_page_repair_summary(RuntimeError("Gemini exploded"))}},
+            )
+
+            warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                count = adjudicate_case("a", root, warnings=warnings, excluded=excluded)
+
+        self.assertIsNone(count)
+        self.assertEqual(1, len(warnings))
+        self.assertIn("case 'a'", warnings[0])
+        self.assertIn("not scorable", warnings[0])
+        self.assertIn("Gemini exploded", warnings[0])
+        self.assertEqual([{"case": "a", "reason": "Gemini exploded"}], excluded)
+        # No PNGs, no labels skeleton -- nothing that would misrepresent this
+        # case as having zero disagreements.
+        self.assertFalse((common.bench_dir("adjudication", root) / "a").exists())
+        self.assertFalse((common.bench_dir("labels", root) / "a.json").exists())
+
+
+class TestAdjudicateMain(unittest.TestCase):
+    def test_continues_past_an_excluded_case_and_footnotes_the_report(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for case in ("a", "b"):
+                common.save_json(common.bench_dir("trial", root) / f"{case}.json", {})
+                common.save_json(common.bench_dir("oracle", root) / f"{case}.json", {})
+
+            def fake_adjudicate_case(case, root=None, **kwargs):
+                excluded = kwargs.get("excluded")
+                if case == "a":
+                    if excluded is not None:
+                        excluded.append({"case": "a", "reason": "Gemini exploded"})
+                    return None
+                return 3
+
+            with (
+                patch.object(adjudicate, "bench_dir", lambda name: common.bench_dir(name, root)),
+                patch.object(adjudicate, "adjudicate_case", side_effect=fake_adjudicate_case),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = adjudicate.main([])
+
+        self.assertEqual(0, exit_code)
+        report = out.getvalue()
+        table_only, _, footnote = report.partition("\n\n")
+        self.assertIn("| b | 3 |", table_only)
+        self.assertNotIn("| a |", table_only)
+        self.assertIn("1 case(s) excluded", footnote)
+        self.assertIn("`a` (Gemini exploded)", footnote)
 
 
 class TestProbeSummaries(unittest.TestCase):
@@ -1437,6 +1585,55 @@ class TestMemoryBench(unittest.TestCase):
         self.assertIn("--worker", command)
         self.assertEqual("/tmp/x.pdf", command[-1])
         self.assertTrue(run_mock.call_args.kwargs.get("check"))
+
+    def test_measure_case_returns_an_error_dict_instead_of_raising_when_the_child_fails(self):
+        # A failed child used to re-raise CalledProcessError straight out of
+        # measure_case, into main()'s bare `for pdf in pdfs` loop -- one bad
+        # case would abort the whole run and discard every row already
+        # measured before it, printing no table at all.
+        failure = subprocess.CalledProcessError(returncode=1, cmd=["x"], output="", stderr="boom: worker crashed")
+        with patch.object(memory.subprocess, "run", side_effect=failure):
+            result = memory.measure_case(Path("/tmp/bad.pdf"))
+        self.assertIn("error", result)
+        self.assertIn("boom: worker crashed", result["error"])
+
+    def test_measure_case_returns_an_error_dict_when_the_child_exits_0_with_no_output(self):
+        # A second, distinct failure mode from the CalledProcessError above:
+        # the child exits 0 but prints nothing, so
+        # proc.stdout.strip().splitlines()[-1] used to raise IndexError
+        # instead of CalledProcessError -- an unhandled exception either way.
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        with patch.object(memory.subprocess, "run", return_value=completed):
+            result = memory.measure_case(Path("/tmp/empty.pdf"))
+        self.assertIn("error", result)
+
+    def test_measure_case_returns_an_error_dict_when_the_last_line_is_not_json(self):
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="not json\n", stderr="")
+        with patch.object(memory.subprocess, "run", return_value=completed):
+            result = memory.measure_case(Path("/tmp/garbled.pdf"))
+        self.assertIn("error", result)
+
+    def test_main_reports_a_failed_case_as_a_row_and_keeps_measuring_the_rest(self):
+        good_payload = {"pages": 4, "rss_peak_mb": 900.0, "total_ms_a": 1, "total_ms_b": 2}
+
+        def fake_measure_case(pdf: Path) -> dict:
+            if pdf.name == "bad.pdf":
+                return {"error": "boom: worker crashed"}
+            return good_payload
+
+        with patch.object(memory, "measure_case", side_effect=fake_measure_case):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                exit_code = memory.main(["bad.pdf", "good.pdf"])
+
+        self.assertEqual(1, exit_code)
+        text = out.getvalue()
+        # good.pdf's row must survive being measured after the failed case,
+        # not be discarded along with it.
+        self.assertIn("| good.pdf | 4 | 900.0 | 1 | 2 |", text)
+        self.assertIn("bad.pdf", text)
+        self.assertIn("ERROR", text)
+        self.assertIn("boom: worker crashed", err.getvalue())
 
     def test_main_reports_each_rows_own_isolated_peak_not_a_running_maximum(self):
         # A smaller later file reporting a *smaller* peak than an earlier,

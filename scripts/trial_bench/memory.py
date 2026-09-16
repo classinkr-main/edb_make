@@ -75,14 +75,29 @@ def measure_case(pdf: Path) -> dict:
     Re-invoking this same script with --worker is the isolation boundary: the
     child starts a brand new process, so its ru_maxrss can only reflect this
     one file's two overlapping parses, never an earlier case's peak.
+
+    Returns ``{"error": message}`` instead of raising when the child fails,
+    or exits 0 with no output at all: main() runs this once per file in a
+    plain loop with no try/except of its own, so an exception raised here
+    used to discard every row already measured before it and print no table.
+    A failed case must cost only its own row.
     """
     command = [sys.executable, str(SCRIPT_PATH), "--worker", str(pdf)]
     try:
         proc = subprocess.run(command, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as exc:
         print(exc.stderr, file=sys.stderr)
-        raise
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+        return {"error": (exc.stderr or "").strip() or f"worker exited {exc.returncode}"}
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        # The child exited 0 but printed nothing -- e.g. a --worker code path
+        # that returns before its own json.dumps print. Indexing the last
+        # line unconditionally used to raise IndexError here instead.
+        return {"error": "worker exited 0 but printed no output"}
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        return {"error": f"worker output was not valid JSON ({exc}): {lines[-1]!r}"}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -97,12 +112,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     rows = []
+    failed = False
     with tempfile.TemporaryDirectory(prefix="trial-memory-") as temp_dir:
         pdfs = list(args.pdfs)
         if args.synthetic_2xa3:
             pdfs.append(write_2xa3(Path(temp_dir) / "2xa3.pdf"))
         for pdf in pdfs:
             result = measure_case(pdf)
+            if "error" in result:
+                # A failed case reports as its own row -- not a silently
+                # dropped one, and not an exception that would discard every
+                # row already measured before it.
+                print(f"memory.py: {pdf.name}: {result['error']}", file=sys.stderr)
+                rows.append([pdf.name, "ERROR", "-", "-", "-"])
+                failed = True
+                continue
             rows.append([pdf.name, result["pages"], result["rss_peak_mb"], result["total_ms_a"], result["total_ms_b"]])
     print(markdown_table(["file", "pages", "rss_peak_mb", "total_ms_a", "total_ms_b"], rows))
     print(
@@ -110,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         "rss_peak_mb is that single file's own peak RSS for two overlapping parses, measured in a "
         "fresh child process per row, so it cannot inherit an earlier row's peak."
     )
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -86,6 +86,23 @@ def _warn(message: str, sink: list[str] | None) -> None:
         sink.append(message)
 
 
+def unscorable_oracle_reason(oracle: Any) -> str | None:
+    """None when ``oracle`` is a scorable oracle observation; otherwise why not.
+
+    Shared by score.py's score_all and adjudicate.py's adjudicate_case so a
+    truncated, failure-shaped, or missing-fields observation is recognized
+    and reported the same way by both: one KeyError deep in either script's
+    per-case loop -- expected_from/disagreements both index
+    oracle["problems"], and score_all also reads oracle["timing_ms"] -- used
+    to abort every *other* case's row along with the bad one.
+    """
+    if not isinstance(oracle, dict):
+        return "not a JSON object"
+    if "problems" not in oracle or "timing_ms" not in oracle or oracle.get("error"):
+        return str(oracle.get("error") or "no problems/timing_ms")
+    return None
+
+
 def expected_from(
     oracle: dict[str, Any],
     trial: dict[str, Any],
@@ -209,7 +226,7 @@ def _keys_cell(keys: list[str]) -> str:
     return " ".join(rendered)
 
 
-def render_report(rows: list[dict[str, Any]]) -> str:
+def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | None = None) -> str:
     headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms", "ai_evidence"]
     table_rows = [
         [
@@ -256,10 +273,41 @@ def render_report(rows: list[dict[str, Any]]) -> str:
             "trial's own local baseline, not confirmation by AI-grade recognition -- see "
             "`ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh."
         )
+    # Same "next to the numbers, regenerated every run" reasoning as the
+    # zero-evidence caveat above, for a case with no row at all: naming it
+    # here (case and reason) is what stops it vanishing the way both English
+    # bench cases once did, leaving only hand-written prose that the next
+    # --doc run couldn't refresh.
+    if excluded:
+        table += (
+            f"\n\n> **{len(excluded)} case(s) excluded from this report because their oracle "
+            "observation could not be scored: "
+            + ", ".join(f"`{item['case']}` ({item['reason']})" for item in excluded)
+            + ".** Rerun scripts/trial_bench/oracle.py for these cases, then rerun score.py to include them."
+        )
     return table
 
 
-def score_all(cases: list[str], root: Path = BENCH_ROOT, warnings: list[str] | None = None) -> list[dict[str, Any]]:
+def score_all(
+    cases: list[str],
+    root: Path = BENCH_ROOT,
+    warnings: list[str] | None = None,
+    excluded: list[dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Score every trial observation under ``root`` against its oracle.
+
+    A case with a trial observation but no scorable oracle one -- the oracle
+    was never run for it, or its run failed or was interrupted mid-write --
+    must cost only its own row, never the whole loop: expected_from indexes
+    oracle["problems"] and the row build indexes oracle["timing_ms"], so
+    letting either raise here would abort scoring for every other case too --
+    no report.md, no doc table. Such a case is still *reported*, not
+    silently dropped: warned about on stderr, and when ``excluded`` is given,
+    appended to it as ``{"case": ..., "reason": ...}`` so a caller
+    (render_report's footnote, main()'s per-case message) can say which case
+    is missing and why, instead of leaving that to hand-written prose the
+    next run can't refresh.
+    """
     rows = []
     for trial_path in sorted(bench_dir("trial", root).glob("*.json")):
         case = trial_path.stem
@@ -267,21 +315,18 @@ def score_all(cases: list[str], root: Path = BENCH_ROOT, warnings: list[str] | N
             continue
         oracle_path = bench_dir("oracle", root) / f"{case}.json"
         if not oracle_path.is_file():
+            reason = "no oracle observation found"
+            _warn(f"score.py: case {case!r}: {reason} ({oracle_path}); skipping this case", warnings)
+            if excluded is not None:
+                excluded.append({"case": case, "reason": reason})
             continue
         labels_path = bench_dir("labels", root) / f"{case}.json"
         trial, oracle = load_json(trial_path), load_json(oracle_path)
-        # An unscorable observation must cost this case its row, not the whole
-        # run: expected_from indexes oracle["problems"] and the row build
-        # indexes oracle["timing_ms"], so a truncated or failure-shaped record
-        # left here by an interrupted oracle run would raise KeyError and
-        # abort the loop for every other case too -- no report.md, no doc
-        # table. Skipping matches what a missing observation already does.
-        if not isinstance(oracle, dict) or "problems" not in oracle or "timing_ms" not in oracle or oracle.get("error"):
-            if not isinstance(oracle, dict):
-                reason = "not a JSON object"
-            else:
-                reason = str(oracle.get("error") or "no problems/timing_ms")
+        reason = unscorable_oracle_reason(oracle)
+        if reason is not None:
             _warn(f"score.py: case {case!r}: {oracle_path} is not a scorable oracle observation ({reason}); skipping this case", warnings)
+            if excluded is not None:
+                excluded.append({"case": case, "reason": reason})
             continue
         labels = load_json(labels_path) if labels_path.is_file() else None
         expected, status = expected_from(oracle, trial, labels, warnings=warnings)
@@ -311,15 +356,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--doc", type=Path, default=None, help="markdown file whose corpus-table block is replaced")
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args(argv)
-    rows = score_all(args.cases)
+    excluded: list[dict[str, str]] = []
+    rows = score_all(args.cases, excluded=excluded)
     matched = {row["case"] for row in rows}
+    excluded_reasons = {item["case"]: item["reason"] for item in excluded}
     missing = [name for name in args.cases if name not in matched]
     for name in missing:
-        print(f"score.py: no trial observation found for case {name!r}", file=sys.stderr)
+        # A named case can be missing from `rows` for two different reasons
+        # -- computing this message from `matched` alone (as before) reported
+        # "no trial observation found" even for a case that has one, when its
+        # oracle observation was what score_all actually excluded it for.
+        if name in excluded_reasons:
+            print(f"score.py: case {name!r} was excluded from the report: {excluded_reasons[name]}", file=sys.stderr)
+        else:
+            print(f"score.py: no trial observation found for case {name!r}", file=sys.stderr)
     if not rows:
         print("score.py: nothing matched; leaving report.md" + (f" and {args.doc}" if args.doc else "") + " unchanged", file=sys.stderr)
         return 1
-    table = render_report(rows)
+    table = render_report(rows, excluded)
     print(table)
     (BENCH_ROOT / "report.md").write_text(table + "\n", encoding="utf-8")
     doc_refused = False

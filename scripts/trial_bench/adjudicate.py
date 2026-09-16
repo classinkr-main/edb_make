@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.trial_bench.common import BENCH_ROOT, bench_dir, crop_stem, load_json, markdown_table, save_json  # noqa: E402
-from scripts.trial_bench.score import LOW_IOU, regions_iou  # noqa: E402
+from scripts.trial_bench.score import LOW_IOU, _warn, regions_iou, unscorable_oracle_reason  # noqa: E402
 
 PANEL_MAX = (900, 1200)
 
@@ -74,9 +74,33 @@ def compose(item: dict[str, Any], out_path: Path) -> None:
     canvas.save(out_path)
 
 
-def adjudicate_case(case: str, root: Path = BENCH_ROOT) -> int:
+def adjudicate_case(
+    case: str,
+    root: Path = BENCH_ROOT,
+    *,
+    warnings: list[str] | None = None,
+    excluded: list[dict[str, str]] | None = None,
+) -> int | None:
+    """Render every trial/oracle disagreement for ``case`` and (re)write its labels skeleton.
+
+    Returns ``None`` -- instead of raising -- when the oracle observation on
+    disk cannot be scored (score.py's own guard, shared via
+    unscorable_oracle_reason): this function indexes oracle["problems"] via
+    disagreements() with nothing to stop a truncated or failure-shaped
+    record from raising KeyError, which used to abort main()'s whole
+    ``for oracle_path in ...`` loop and cost every other case its row too.
+    The case is still reported, not silently dropped: warned about on
+    stderr, and when ``excluded`` is given, appended to it as
+    ``{"case": ..., "reason": ...}`` for main()'s own footnote.
+    """
     trial = load_json(bench_dir("trial", root) / f"{case}.json")
     oracle = load_json(bench_dir("oracle", root) / f"{case}.json")
+    reason = unscorable_oracle_reason(oracle)
+    if reason is not None:
+        _warn(f"adjudicate.py: case {case!r}: oracle observation is not scorable ({reason}); skipping this case", warnings)
+        if excluded is not None:
+            excluded.append({"case": case, "reason": reason})
+        return None
     items = disagreements(trial, oracle)
     stems: set[str] = set()
     for item in items:
@@ -106,14 +130,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("cases", nargs="*")
     args = parser.parse_args(argv)
     rows = []
+    excluded: list[dict[str, str]] = []
     for oracle_path in sorted(bench_dir("oracle").glob("*.json")):
         case = oracle_path.stem
         if args.cases and case not in args.cases:
             continue
         if not (bench_dir("trial") / f"{case}.json").is_file():
             continue
-        rows.append([case, adjudicate_case(case)])
-    print(markdown_table(["case", "disagreements"], rows))
+        count = adjudicate_case(case, excluded=excluded)
+        if count is None:
+            continue
+        rows.append([case, count])
+    table = markdown_table(["case", "disagreements"], rows)
+    # Same reasoning as score.py's render_report footnote: an excluded case
+    # must appear inside the generated output, named with why, instead of
+    # only in a stderr warning nothing else preserves.
+    if excluded:
+        table += (
+            f"\n\n> **{len(excluded)} case(s) excluded from this report because their oracle "
+            "observation could not be scored: "
+            + ", ".join(f"`{item['case']}` ({item['reason']})" for item in excluded)
+            + ".** Rerun scripts/trial_bench/oracle.py for these cases, then rerun adjudicate.py to include them."
+        )
+    print(table)
     return 0
 
 
