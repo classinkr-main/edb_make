@@ -1176,12 +1176,18 @@ class TestScore(unittest.TestCase):
 
     def test_expected_from_ground_truth_overrides_the_oracle(self):
         """A human-verified ground_truth object -- not the oracle -- decides the expected key set."""
+        # q1's trial box (width 10) deliberately differs from its oracle box
+        # (width 20) below: an identical fixture on both sides cannot tell a
+        # correct "expected always carries the oracle's box" implementation
+        # apart from a buggy one that leaks the trial's own box in instead --
+        # see the mean_iou assertion at the end, which would silently read
+        # 1.0 (a trial-vs-itself tautology) instead of 0.5 if that happened.
         trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q3", 3, "3번", [(0, 0, 40, 10, 10)])])
         # Oracle says q1, q2 -- and would, uncorrected, be scored as truth by
         # the old pending/approved path. A human list says q1, q3 instead:
         # q2 (oracle-only) must drop out and q3 (oracle never saw it) must
         # appear, proving the oracle is not consulted for membership at all.
-        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 20, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 20, 10)]), ("q2", 2, "2번", [(0, 0, 20, 10, 10)])])
         labels = {
             "case": "c",
             "status": "approved",
@@ -1192,7 +1198,10 @@ class TestScore(unittest.TestCase):
                 "source": "manual recount",
                 "note": "",
             },
-            "items": [],
+            # An item-level verdict that would (wrongly) drop q1 and (wrongly)
+            # add q7 if it were applied on top of ground_truth -- it must not
+            # be: once real ground truth exists, items[] adjudication is moot.
+            "items": [{"key": "q1", "truth": "neither"}, {"key": "q7", "truth": "trial"}],
         }
         expected, status = expected_from(oracle, trial, labels)
         self.assertEqual("truth", status)
@@ -1200,19 +1209,25 @@ class TestScore(unittest.TestCase):
         # A human question list carries no boxes of its own -- IoU scoring
         # still needs something to compare against, so a key the oracle also
         # reports keeps the oracle's own regions (spec: bbox IoU stays scored
-        # against the oracle boxes even on a truth-backed row).
-        self.assertEqual([(0, 0, 0, 10, 10)], [(r["page_index"], r["bbox"]["left"], r["bbox"]["top"], r["bbox"]["width"], r["bbox"]["height"]) for r in expected["q1"]["regions"]])
+        # against the oracle boxes even on a truth-backed row) -- never the
+        # trial's, which is why this box's width (20) differs from the
+        # trial's own q1 box (10) above.
+        self.assertEqual([(0, 0, 0, 20, 10)], [(r["page_index"], r["bbox"]["left"], r["bbox"]["top"], r["bbox"]["width"], r["bbox"]["height"]) for r in expected["q1"]["regions"]])
         # q3 is truth-only -- the oracle never detected it, so there is no
         # oracle box to borrow. This must not crash and must not fabricate a
         # box: an empty regions list, not a copy of the trial's own box.
         self.assertEqual([], expected["q3"]["regions"])
+        # The central claim this whole feature makes: mean_iou on a truth
+        # row is trial-vs-ORACLE (0.5 for these two differently-sized boxes),
+        # never trial-vs-itself (which would silently read 1.0).
+        self.assertAlmostEqual(0.5, score_case(trial, expected)["mean_iou"])
 
     def test_expected_from_ground_truth_passage_ranges_build_passage_keys(self):
         trial = _obs("c", [("p1-3", None, "지문 1~3", [(0, 0, 40, 10, 10)])])
-        oracle = _obs("c", [])
+        oracle = _obs("c", [])  # _obs defaults to pages=3
         labels = {
             "case": "c", "status": "approved",
-            "ground_truth": {"pages": 4, "question_numbers": [], "passage_ranges": [[1, 3], [4, 9]], "source": "human", "note": ""},
+            "ground_truth": {"pages": 3, "question_numbers": [], "passage_ranges": [[1, 3], [4, 9]], "source": "human", "note": ""},
         }
         expected, status = expected_from(oracle, trial, labels)
         self.assertEqual("truth", status)
@@ -1265,6 +1280,101 @@ class TestScore(unittest.TestCase):
         expected2, status2 = expected_from(oracle, trial, null_gt)
         self.assertEqual("approved", status2)
         self.assertEqual({"q1", "q9"}, set(expected2))
+
+    def test_expected_from_warns_and_ignores_ground_truth_left_under_status_pending(self):
+        """The most likely next action -- a human filling in ground_truth on one of the 13 existing
+        "pending" label files without also flipping status -- must not silently reinstate the
+        tautology this feature exists to kill: an oracle-scored "pending" row that happens to
+        equal a ground_truth nobody actually consulted."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 0, 10, 10)]), ("q3", 3, "3번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q2", 2, "2번", [(0, 0, 0, 10, 10)]), ("q3", 3, "3번", [(0, 0, 0, 10, 10)])])
+        still_pending = {"case": "c", "status": "pending", "ground_truth": {"pages": 3, "question_numbers": [1, 2, 3], "passage_ranges": [], "source": "human", "note": ""}}
+        warnings: list[str] = []
+        with contextlib.redirect_stderr(io.StringIO()) as captured:
+            expected, status = expected_from(oracle, trial, still_pending, warnings=warnings)
+        self.assertEqual("pending", status)  # not "truth" -- ground_truth must not be consulted
+        self.assertEqual({"q1", "q2", "q3"}, set(expected))  # the oracle's own set, unaffected
+        self.assertEqual(1, len(warnings))
+        self.assertIn("case 'c'", warnings[0])
+        self.assertIn("status is 'pending'", warnings[0])
+        self.assertIn("ignoring", warnings[0])
+        self.assertIn("case 'c'", captured.getvalue())  # printed to stderr, not only collected
+
+        # The value the report prints for a real answer, and therefore the
+        # natural one for a human to copy back into the label by hand, must
+        # be accepted exactly like "approved" -- not silently ignored too.
+        as_truth = dict(still_pending, status="truth")
+        with contextlib.redirect_stderr(io.StringIO()):
+            expected2, status2 = expected_from(oracle, trial, as_truth)
+        self.assertEqual("truth", status2)
+        self.assertEqual({"q1", "q2", "q3"}, set(expected2))
+
+    def test_expected_from_falls_back_to_the_oracle_for_a_half_filled_ground_truth_stub(self):
+        """{"source": ..., "note": "WIP"} is truthy but has no question_numbers/passage_ranges -- a
+        likely in-progress state while a label is being written by hand. It must not produce an
+        empty expected set stamped "truth" (every real trial detection then dumped into `extra`)."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        stub = {"case": "c", "status": "approved", "ground_truth": {"source": "me", "note": "WIP"}}
+        warnings: list[str] = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            expected, status = expected_from(oracle, trial, stub, warnings=warnings)
+        self.assertNotEqual("truth", status)
+        self.assertEqual("approved", status)  # falls through to the oracle/items path, status "approved"
+        self.assertEqual({"q1"}, set(expected))  # the oracle's own set -- not an empty expected set
+        self.assertEqual(1, len(warnings))
+        self.assertIn("no question_numbers or passage_ranges", warnings[0])
+
+        # An explicit {} is exactly as empty as the stub above -- it must not
+        # inconsistently fall back to "approved" while stopping short of "truth"
+        # for some other reason; both take the identical fallback path.
+        empty = {"case": "c", "status": "approved", "ground_truth": {}}
+        with contextlib.redirect_stderr(io.StringIO()):
+            expected3, status3 = expected_from(oracle, trial, empty)
+        self.assertEqual("approved", status3)
+        self.assertEqual({"q1"}, set(expected3))
+
+    def test_expected_from_ground_truth_rejects_a_non_dict_shape(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        as_list = {"case": "c", "status": "approved", "ground_truth": [1, 2, 3]}
+        with self.assertRaises(ValueError) as ctx:
+            expected_from(oracle, trial, as_list)
+        self.assertIn("case 'c'", str(ctx.exception))
+        self.assertIn("ground_truth", str(ctx.exception))
+
+    def test_expected_from_ground_truth_rejects_a_malformed_passage_range(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        bad_range = {"case": "c", "status": "approved", "ground_truth": {"question_numbers": [], "passage_ranges": [[1, 3], [4]]}}
+        with self.assertRaises(ValueError) as ctx:
+            expected_from(oracle, trial, bad_range)
+        message = str(ctx.exception)
+        self.assertIn("case 'c'", message)  # names the case, unlike the pre-fix bare unpack error
+        self.assertIn("[4]", message)
+
+    def test_expected_from_ground_truth_warns_when_pages_mismatch_the_trial_input(self):
+        """ground_truth.pages must count the trimmed trial input (~/edb-trial-bench/inputs/<case>.pdf),
+        not the full source exam -- a mismatch usually means someone counted the wrong PDF."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])  # _obs defaults to pages=3
+        labels = {"case": "c", "status": "approved", "ground_truth": {"pages": 40, "question_numbers": [1], "passage_ranges": [], "source": "human", "note": ""}}
+        warnings: list[str] = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            expected, status = expected_from(oracle, trial, labels, warnings=warnings)
+        self.assertEqual("truth", status)  # the mismatch warns; it does not block scoring
+        self.assertEqual({"q1"}, set(expected))
+        self.assertEqual(1, len(warnings))
+        self.assertIn("case 'c'", warnings[0])
+        self.assertIn("40", warnings[0])
+        self.assertIn("3", warnings[0])
+
+        # A matching page count raises no warning at all.
+        matching = dict(labels, ground_truth=dict(labels["ground_truth"], pages=3))
+        warnings2: list[str] = []
+        expected2, status2 = expected_from(oracle, trial, matching, warnings=warnings2)
+        self.assertEqual("truth", status2)
+        self.assertEqual([], warnings2)
 
     def test_render_report_has_one_row_per_case_and_an_aggregate(self):
         rows = [
@@ -1566,6 +1676,48 @@ class TestScoreAll(unittest.TestCase):
             self.assertEqual(1.0, rows[0]["question_recall"])
             self.assertEqual(1, len(warnings))
             self.assertIn("no longer present", warnings[0])
+
+    def test_score_all_scores_a_ground_truth_label_end_to_end(self):
+        """Every other ground_truth test calls expected_from/score_case directly -- nothing exercises
+        a label file on disk carrying ground_truth through score_all into a rendered report, the only
+        path that actually produces report.md and the doc table."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            # q1's oracle box (width 20) deliberately differs from the trial's
+            # own q1 box (width 10) so mean_iou below can only read 0.5 if
+            # expected["q1"]["regions"] really came from the oracle.
+            common.save_json(
+                common.bench_dir("trial", root) / "c.json",
+                _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)]), ("q9", 9, "9번", [(0, 0, 0, 10, 10)])], total_ms=100),
+            )
+            common.save_json(
+                common.bench_dir("oracle", root) / "c.json",
+                _obs("c", [("q1", 1, "1번", [(0, 0, 0, 20, 10)]), ("q2", 2, "2번", [(0, 0, 0, 10, 10)])], total_ms=200),
+            )
+            common.save_json(
+                common.bench_dir("labels", root) / "c.json",
+                {
+                    "case": "c",
+                    "status": "approved",
+                    "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "source": "human", "note": ""},
+                    "items": [],
+                },
+            )
+            rows = score_all([], root=root)
+        self.assertEqual(["c"], [row["case"] for row in rows])
+        row = rows[0]
+        # A human list of {1} decides membership -- q2 (oracle-only) never
+        # appears as missing, and q9 (trial-only, oracle agreed with it) is
+        # still a false positive because ground_truth does not confirm it.
+        self.assertEqual("truth", row["status"])
+        self.assertEqual([], row["missing"])
+        self.assertEqual(["q9"], row["extra"])
+        self.assertAlmostEqual(0.5, row["mean_iou"])  # trial-vs-oracle q1 box, not trial-vs-itself
+
+        report = render_report(rows)
+        self.assertIn("| c | truth |", report)
+        self.assertIn("1/1 truth-backed", report)
+        self.assertIn("truth-backed case(s)", report)  # the ground_truth-boxes-are-the-oracle's footnote
 
 
 class TestScoreMainReporting(unittest.TestCase):

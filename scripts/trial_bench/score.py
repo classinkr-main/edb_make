@@ -114,7 +114,13 @@ def unscorable_observation_reason(obs: Any) -> str | None:
     return None
 
 
-def _expected_from_ground_truth(ground_truth: dict[str, Any], oracle: dict[str, Any]) -> dict[str, dict[str, Any]]:
+def _expected_from_ground_truth(
+    case: str,
+    ground_truth: dict[str, Any],
+    oracle: dict[str, Any],
+    *,
+    warnings: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Expected key set built from a human-verified ``ground_truth`` object, not from the oracle.
 
     ``ground_truth`` carries question numbers and passage ranges only -- no
@@ -124,13 +130,48 @@ def _expected_from_ground_truth(ground_truth: dict[str, Any], oracle: dict[str, 
     the oracle never detected gets an empty regions list rather than a
     fabricated box: score_case's IoU pass skips any matched key with no
     regions instead of scoring it as a false zero-overlap match.
+
+    Raises ``ValueError`` -- naming ``case``, in the same style as
+    ``expected_from``'s own ``items[]`` truth-value check -- for a shape too
+    broken to score at all: ``ground_truth`` that is not an object, or a
+    ``passage_ranges`` entry that is not a two-element ``[start, end]`` pair.
+    A malformed shape must abort loudly and name the file, the same way a
+    broken ``items[]`` entry already does, rather than raising a bare
+    ``ValueError``/``AttributeError`` deep in a dict-comprehension that names
+    neither.
+
+    An empty result (no usable ``question_numbers`` or ``passage_ranges``) is
+    returned as ``{}`` rather than raised: the caller falls back to the
+    oracle path for that, because a half-filled stub (``{"source": ...}``
+    with nothing counted yet) is a normal, recoverable, in-progress label,
+    not a broken file -- and must never be scored as if it were a real
+    answer with an empty expected set.
     """
+    if not isinstance(ground_truth, dict):
+        raise ValueError(f"label case {case!r}: ground_truth is a {type(ground_truth).__name__}, not an object")
+    # ``pages`` is the trimmed trial input's own page count
+    # (~/edb-trial-bench/inputs/<case>.pdf, MAX_PAGES leading pages) -- the
+    # same input both the trial and the oracle parsed -- never the full
+    # source exam. A human counting from the wrong PDF is the likely failure
+    # mode this guards, so a mismatch is worth a warning even though the
+    # count itself is otherwise unused.
+    declared_pages, observed_pages = ground_truth.get("pages"), oracle.get("pages")
+    if declared_pages is not None and observed_pages is not None and declared_pages != observed_pages:
+        _warn(
+            f"score.py: case {case!r}: ground_truth.pages ({declared_pages}) does not match the trial "
+            f"input's own page count ({observed_pages}); question_numbers/passage_ranges must be counted "
+            f"from ~/edb-trial-bench/inputs/{case}.pdf (the trimmed trial input), not the full source exam",
+            warnings,
+        )
     oracle_by_key = {problem["key"]: problem for problem in oracle["problems"]}
     expected: dict[str, dict[str, Any]] = {}
     for number in ground_truth.get("question_numbers") or []:
         key = f"q{number}"
         expected[key] = oracle_by_key.get(key, {"key": key, "regions": []})
-    for start, end in ground_truth.get("passage_ranges") or []:
+    for entry in ground_truth.get("passage_ranges") or []:
+        if not (isinstance(entry, (list, tuple)) and len(entry) == 2):
+            raise ValueError(f"label case {case!r}: ground_truth.passage_ranges entry {entry!r} is not a [start, end] pair")
+        start, end = entry
         lo, hi = (start, end) if start <= end else (end, start)
         key = f"p{lo}-{hi}"
         expected[key] = oracle_by_key.get(key, {"key": key, "regions": []})
@@ -146,13 +187,31 @@ def expected_from(
 ) -> tuple[dict[str, dict[str, Any]], str]:
     """Ground truth per key: a human-verified list, approved labels over the oracle, or the oracle itself while pending.
 
-    An approved label carrying a ``ground_truth`` object (question_numbers,
-    passage_ranges -- see _expected_from_ground_truth) takes full precedence:
-    the expected key set comes from that human-verified list alone, never
-    from oracle["problems"], and the status becomes "truth" so a reader can
-    tell a real-answer row from an oracle-as-provisional one at a glance. Its
-    per-item "items" truth overrides (below) do not apply on top of it --
-    once a case has real ground truth, oracle-vs-trial adjudication is moot.
+    A label carrying a truthy ``ground_truth`` object (question_numbers,
+    passage_ranges -- see _expected_from_ground_truth) takes full precedence
+    over the oracle, but only when ``status`` is "approved" or its alias
+    "truth" (the value this function itself returns, and so the natural one
+    for a human to copy back into the label): the expected key set comes
+    from that human-verified list alone, never from oracle["problems"], and
+    the status becomes "truth" so a reader can tell a real-answer row from
+    an oracle-as-provisional one at a glance. Its per-item "items" truth
+    overrides (below) do not apply on top of it -- once a case has real
+    ground truth, oracle-vs-trial adjudication is moot.
+
+    A ``ground_truth`` present under any other status (typically "pending",
+    what adjudicate.py writes and every existing label file on disk
+    currently carries) is *not* silently ignored: this warns on stderr and
+    in ``warnings``, naming the case and the status, then falls through to
+    the oracle-scored path below -- so a human filling in ``ground_truth``
+    without also flipping ``status`` gets told, instead of unknowingly
+    getting a "pending" row that is quietly compared against itself.
+    Likewise a ``ground_truth`` with an approved/truth status but with no
+    usable question_numbers or passage_ranges (a half-filled stub such as
+    ``{"source": ..., "note": "WIP"}``) warns and falls through rather than
+    claiming status "truth" for an empty expected set. Only a shape too
+    broken to interpret at all -- not a dict, or a malformed passage range
+    entry -- raises ValueError (see _expected_from_ground_truth), the same
+    way a broken ``items[]`` entry does below.
 
     Without ground_truth, the oracle is corrected by approved labels (truth:
     trial | oracle | both | neither). "oracle" is an explicit no-op (the
@@ -168,14 +227,30 @@ def expected_from(
     script exists for. Raising there would leave the whole run unscored, so
     the key is skipped with a warning instead.
     """
-    if labels and labels.get("status") == "approved" and labels.get("ground_truth"):
-        return _expected_from_ground_truth(labels["ground_truth"], oracle), "truth"
+    case = labels.get("case") if labels else None
+    ground_truth = labels.get("ground_truth") if labels else None
+    status = labels.get("status") if labels else None
+    if ground_truth:
+        if status not in {"approved", "truth"}:
+            _warn(
+                f"score.py: case {case!r}: ground_truth present but status is {status!r}; "
+                "ignoring it and scoring against the oracle",
+                warnings,
+            )
+        else:
+            truth_expected = _expected_from_ground_truth(case, ground_truth, oracle, warnings=warnings)
+            if truth_expected:
+                return truth_expected, "truth"
+            _warn(
+                f"score.py: case {case!r}: ground_truth has no question_numbers or passage_ranges; "
+                "ignoring it and scoring against the oracle",
+                warnings,
+            )
     expected = {problem["key"]: problem for problem in oracle["problems"]}
     if not labels or labels.get("status") != "approved":
         return expected, "pending"
     trial_by_key = {problem["key"]: problem for problem in trial["problems"]}
     oracle_by_key = {problem["key"]: problem for problem in oracle["problems"]}
-    case = labels.get("case")
     for item in labels.get("items", []):
         key, truth = item.get("key"), item.get("truth")
         if truth not in ACCEPTED_TRUTHS:

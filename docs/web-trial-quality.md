@@ -37,9 +37,12 @@
 }
 ```
 
-- `question_numbers`는 그 케이스에 실제로 존재하는 문항 번호 전체 목록(사람이 시험지를 직접 세어 만든 것), `passage_ranges`는 지문 범위 목록이다. 둘 다 박스 좌표는 담지 않는다.
-- 라벨 파일의 `status`가 `approved`이고 `ground_truth`가 있으면 `score.py`는 오라클의 `problems` 목록을 아예 참고하지 않고 `ground_truth`만으로 정답 키 집합(`q<번호>`, `p<시작>-<끝>`)을 만든다 -- 오라클이 어떤 문항을 찾았는지·놓쳤는지와 무관하게 사람이 적은 목록이 그대로 정답이 된다. 이때 보고서의 `status` 열은 `approved`가 아니라 `truth`로 나와, 오라클을 임시 정답으로 쓴 행과 한눈에 구분된다. `ground_truth`가 있으면 `items[].truth`(trial/oracle/both/neither) 조정은 적용되지 않는다 -- 사람이 적은 정답이 이미 최종이기 때문이다.
-- `ground_truth`가 없거나 `null`인 `approved` 라벨은 기존대로 오라클 + `items[].truth` 보정 경로를 그대로 타고 `status`도 `approved`로 남는다(이 문서와 코드 양쪽에서 하위 호환).
+- `question_numbers`는 **트리밍된 체험판 입력** `~/edb-trial-bench/inputs/<case>.pdf`(`make_inputs.py`가 원본 시험지 앞 `MAX_PAGES`쪽만 잘라낸 파일)에 실제로 존재하는 문항 번호 전체 목록(사람이 그 트리밍된 PDF를 직접 세어 만든 것)이다. **원본 시험지 전체를 기준으로 세면 안 된다** -- 그러면 트리밍으로 잘려나간 뒤쪽 문항까지 포함되어, 체험판이 놓친 적도 없는 문항들이 순전히 인위적인 대량 recall 미스로 보고된다. `passage_ranges`는 같은 트리밍된 입력 기준 지문 범위 목록이다. 둘 다 박스 좌표는 담지 않는다.
+- `pages`는 그 트리밍된 입력의 페이지 수(관측값의 `pages`/`source_page_count`와 같은 값)다. 이 값은 실제로 검사된다: `score.py`가 라벨의 `pages`를 오라클 관측값의 `pages`와 비교해, 다르면(전형적으로 원본 시험지 전체를 기준으로 세었을 때) `case`와 두 값을 모두 명시한 경고를 stderr와 리포트 실행 로그에 남긴다 -- 스코어링을 막지는 않지만, 문항 번호를 잘못된 PDF에서 세었을 가능성을 알려준다.
+- 라벨 파일의 `status`가 `approved`이거나 `truth`(리포트가 실제로 찍는 값이자, 사람이 그대로 라벨에 복사해 넣기 쉬운 값 -- 둘 다 동일하게 받아들여진다)이고 `ground_truth`에 `question_numbers`나 `passage_ranges` 중 하나라도 실제 값이 있으면 `score.py`는 오라클의 `problems` 목록을 아예 참고하지 않고 `ground_truth`만으로 정답 키 집합(`q<번호>`, `p<시작>-<끝>`)을 만든다 -- 오라클이 어떤 문항을 찾았는지·놓쳤는지와 무관하게 사람이 적은 목록이 그대로 정답이 된다. 이때 보고서의 `status` 열은 `truth`로 나와, 오라클을 임시 정답으로 쓴 행과 한눈에 구분된다. `ground_truth`가 있으면 `items[].truth`(trial/oracle/both/neither) 조정은 적용되지 않는다 -- 사람이 적은 정답이 이미 최종이기 때문이다.
+- `ground_truth`가 truthy인데 `status`가 `approved`/`truth`가 아니면(예: 라벨을 아직 `pending`에 둔 채 `ground_truth`만 먼저 채워 넣은 경우) `score.py`는 그 값을 조용히 무시하지 않는다 -- `case`와 실제 `status`를 명시한 경고를 내고 기존 오라클 채점 경로로 넘어간다(그 라벨은 `pending`/`approved`로 그대로 채점됨). 마찬가지로 `ground_truth`는 있지만 `question_numbers`도 `passage_ranges`도 비어 있는 반쯤 채운 상태(예: `{"source": "...", "note": "WIP"}`만 있는 경우)도 `status: truth`로 격상시키지 않는다 -- 경고를 내고 같은 오라클 경로로 넘어간다.
+- `ground_truth`가 객체가 아니거나(예: 배열) `passage_ranges`의 원소가 `[시작, 끝]` 두 값짜리 쌍이 아니면 `score.py`는 `case`를 명시한 `ValueError`로 즉시 멈춘다 -- `items[]`의 알 수 없는 `truth` 값과 같은 처리다.
+- `ground_truth`가 없거나 `null`인 라벨은 기존대로 오라클 + `items[].truth` 보정 경로를 그대로 타고 `status`도 `approved`/`pending`으로 남는다(이 문서와 코드 양쪽에서 하위 호환).
 - 박스 IoU(`mean_iou`/`low_iou`)는 `truth` 케이스에서도 여전히 오라클의 박스를 쓴다: 위 지표 표의 `mean_iou` 설명 참고.
 - 이 문서에 어떤 케이스의 `ground_truth` 값도 직접 채워 넣지 않는다 -- 문항 번호·지문 범위를 실제로 세어 확정하는 것은 별도 작업이다.
 
@@ -50,7 +53,7 @@
 > 참고: 아래 표는 오라클에 `ai_evidence` 열(AI 페이지 보정 결과가 로컬 기준선과 실제로 달라진 쪽수)이 추가되기 전에 측정한 스냅샷이라 그 열이 비어 있다. `scripts/trial_bench/score.py`를 다시 돌리면 각 행에 `ai_evidence` 값이 채워지고, 근거가 없는 케이스가 있으면 표 아래에 각주가 자동으로 붙는다.
 
 <!-- corpus-table -->
-측정일 2026-09-16 · 라벨 없는 케이스는 오라클을 임시 정답으로 채점(pending)
+측정일 2026-09-17 · 라벨 없는 케이스는 오라클을 임시 정답으로 채점(pending)
 
 | case | status | q_recall | q_prec | p_recall | p_prec | mean_iou | low_iou | review | missing | extra | trial_ms | oracle_ms | ai_evidence |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -59,15 +62,17 @@
 | 2026학년도-9월-모평-국어-언어와매체 | pending | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1267 | 8267 | 0/3 (NO EVIDENCE) |
 | 2026학년도-수능-국어-언어와매체-홀수형 | pending | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1369 | 8386 | 0/3 (NO EVIDENCE) |
 | earth_input | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1219 | 6711 | 0/3 (NO EVIDENCE) |
+| english_2020suneung_go3_20191107 | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1316 | 43832 | 0/4 (NO EVIDENCE) |
+| english_go2_hakpyeong_20260324 | pending | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1301 | 20263 | 0/4 (NO EVIDENCE) |
 | math_2026suneung_9wolmopyeong_20250903 | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 739 | 11783 | 0/4 (NO EVIDENCE) |
 | math_go3_hakpyeong_20240328 | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 636 | 10122 | 0/4 (NO EVIDENCE) |
 | physics_input | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1170 | 7385 | 0/3 (NO EVIDENCE) |
 | social_saengwoon_2020suneung_20191015 | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1335 | 16030 | 0/4 (NO EVIDENCE) |
 | social_saengwoon_2025suneung_9wolmopyeong_20240904 | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1507 | 16190 | 0/4 (NO EVIDENCE) |
 | 전자기_교재문제 | pending | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 865 | 10065 | 0/3 (NO EVIDENCE) |
-| 합계 | 0/11 approved | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 | 0 | 0 |  |  |  |
+| 합계 | 0/13 truth-backed, 13/13 provisional (0 approved) | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 | 0 | 0 |  |  |  |
 
-> **AI page repair produced no evidence of a real change for 11 of 11 case(s): `01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`.** On those cases the forced-AI oracle's block types, problem grouping, titles, crop boxes and review flags all came out identical to what the local baseline produced on its own, so those rows' scores show agreement with the trial's own local baseline, not confirmation by AI-grade recognition -- see `ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh.
+> **AI page repair produced no evidence of a real change for 13 of 13 case(s): `01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`.** On those cases the forced-AI oracle's block types, problem grouping, titles, crop boxes and review flags all came out identical to what the local baseline produced on its own, so those rows' scores show agreement with the trial's own local baseline, not confirmation by AI-grade recognition -- see `ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh.
 <!-- /corpus-table -->
 
 ## 2026-09-16: 코퍼스 확장과 오라클 수리 횟수 (헤드라인: 수리 0건)
