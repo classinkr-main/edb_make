@@ -69,7 +69,7 @@
         <h2>문항을 찾는 중이에요</h2>
         <p class="muted" id="processing-file"></p>
       </div>
-      <p class="muted">보통 10~20초 걸려요<span aria-hidden="true"> · <span id="processing-elapsed">0초</span></span></p>
+      <p class="muted">보통 15~30초 걸려요<span aria-hidden="true"> · <span id="processing-elapsed">0초</span></span></p>
     </section>
 
     <section class="view view--result" id="view-result" aria-labelledby="result-title" hidden>
@@ -94,7 +94,16 @@
 
       <div class="result-body" id="result-body">
         <div class="pages" id="pages" aria-label="페이지 미리보기"></div>
-        <ol class="problems" id="problems" aria-label="찾은 문항"></ol>
+        <div class="problems-panel">
+          <div class="problems-head">
+            <span class="problems-head__label">찾은 문항</span>
+            <div class="preview-toggle" id="preview-toggle" role="group" aria-label="문항 보기 방식" hidden>
+              <button type="button" data-mode="raw" aria-pressed="true">원본</button>
+              <button type="button" data-mode="board" aria-pressed="false">칠판용</button>
+            </div>
+          </div>
+          <ol class="problems" id="problems" aria-label="찾은 문항"></ol>
+        </div>
       </div>
 
       <div class="result-foot">

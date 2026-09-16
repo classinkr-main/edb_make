@@ -343,12 +343,46 @@ h2 { margin: 0; font-size: var(--text-2xl); letter-spacing: -0.01em; }
 .region:hover,
 .region.is-active { background: rgba(47, 111, 237, .16); border-color: var(--accent); }
 
-.problems {
+.problems-panel {
   position: sticky;
   top: 16px;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   max-height: calc(100vh - 32px);
+}
+
+.problems-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; }
+
+.problems-head__label { color: var(--ink-2); font-size: var(--text-sm); font-weight: 700; }
+
+.preview-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.preview-toggle button {
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: calc(var(--radius) - 2px);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--motion-base), color var(--motion-base);
+}
+
+.preview-toggle button[aria-pressed="true"] { background: var(--accent); color: var(--on-ink); }
+
+.problems {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
   margin: 0;
   padding: 0;
   overflow: auto;
@@ -387,6 +421,9 @@ h2 { margin: 0; font-size: var(--text-2xl); letter-spacing: -0.01em; }
   border-radius: var(--radius-sm);
   background: #fff;
 }
+
+/* Board mode: the chalk cutout is already flattened onto charcoal; match the frame to it. */
+.problem-card--board img { background: #181c20; border-color: #181c20; }
 
 .problem-card__ai { margin-top: 8px; font-size: var(--text-sm); }
 
@@ -439,7 +476,8 @@ h2 { margin: 0; font-size: var(--text-2xl); letter-spacing: -0.01em; }
 @media (max-width: 760px) {
   .page { padding-block: 20px 32px; }
   .result-body { grid-template-columns: minmax(0, 1fr); }
-  .problems { position: static; max-height: none; overflow: visible; }
+  .problems-panel { position: static; max-height: none; }
+  .problems { overflow: visible; }
   .result-foot .text-button--accent { margin-left: 0; }
 }
 

@@ -174,5 +174,29 @@ class TestTrialWebLogic(unittest.TestCase):
         )
 
 
+class TestTrialPageMarkup(unittest.TestCase):
+    PAGES = ("public/index.html", "public/demo/index.html")
+
+    def test_both_pages_have_the_preview_toggle_and_the_new_wait_copy(self) -> None:
+        for relative in self.PAGES:
+            html = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+            with self.subTest(page=relative):
+                self.assertIn('id="preview-toggle"', html)
+                self.assertIn('data-mode="raw" aria-pressed="true"', html)
+                self.assertIn('data-mode="board" aria-pressed="false"', html)
+                self.assertIn('class="problems-panel"', html)
+                self.assertIn("보통 15~30초 걸려요", html)
+                self.assertNotIn("10~20초", html)
+
+    def test_app_script_switches_cards_through_the_shared_logic(self) -> None:
+        script = (PROJECT_ROOT / "public/app.js").read_text(encoding="utf-8")
+        self.assertIn("logic.cardImageSource(", script)
+        self.assertIn("logic.hasBoardPreviews(", script)
+        self.assertIn('"problem-card--board"', script)
+        css = (PROJECT_ROOT / "public/style.css").read_text(encoding="utf-8")
+        self.assertIn(".problem-card--board img", css)
+        self.assertIn('.preview-toggle button[aria-pressed="true"]', css)
+
+
 if __name__ == "__main__":
     unittest.main()

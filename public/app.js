@@ -16,6 +16,7 @@
     configReady: null,
     lastPayload: null,
     popupContext: {},
+    previewMode: "raw",
   };
 
   const $ = id => document.getElementById(id);
@@ -134,6 +135,7 @@
           state.lastPayload = null;
           $("pages").replaceChildren();
           $("problems").replaceChildren();
+          $("preview-toggle").hidden = true;
           $("file-input").value = "";
           if ($("premium-dialog").open) $("premium-dialog").close();
           showView("upload");
@@ -312,6 +314,46 @@
     }
   }
 
+  function isBoardSource(problem, source) {
+    return state.previewMode === "board" && source !== null && source === problem.board;
+  }
+
+  function syncPreviewToggle(payload) {
+    const toggle = $("preview-toggle");
+    const available = logic.hasBoardPreviews(payload);
+    if (!available) {
+      state.previewMode = "raw";
+    }
+    toggle.hidden = !available;
+    for (const button of toggle.querySelectorAll("[data-mode]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.mode === state.previewMode));
+    }
+  }
+
+  function setPreviewMode(mode) {
+    if ((mode !== "raw" && mode !== "board") || mode === state.previewMode) {
+      return;
+    }
+    state.previewMode = mode;
+    const payload = state.lastPayload;
+    if (payload) {
+      const byId = new Map(payload.problems.map(problem => [problem.problem_id, problem]));
+      for (const item of $("problems").querySelectorAll(".problem-card")) {
+        const problem = byId.get(item.dataset.problemId);
+        const image = item.querySelector("img");
+        if (!problem || !image) {
+          continue;
+        }
+        const source = logic.cardImageSource(problem, state.previewMode);
+        if (source) {
+          image.src = source;
+        }
+        item.classList.toggle("problem-card--board", isBoardSource(problem, source));
+      }
+    }
+    syncPreviewToggle(payload);
+  }
+
   function renderProblems(payload) {
     const list = $("problems");
     list.replaceChildren();
@@ -335,13 +377,15 @@
       }
       item.appendChild(head);
 
-      if (logic.isSafeImageSource(problem.preview)) {
+      const source = logic.cardImageSource(problem, state.previewMode);
+      if (source) {
         const image = document.createElement("img");
-        image.src = problem.preview;
+        image.src = source;
         image.alt = `${logic.problemLabel(problem)} 미리보기`;
         image.loading = "lazy";
         item.appendChild(image);
       }
+      item.classList.toggle("problem-card--board", isBoardSource(problem, source));
 
       if (problem.needs_review) {
         const ai = document.createElement("button");
@@ -391,6 +435,7 @@
     const empty = payload.problems.length === 0;
     $("empty-result").hidden = !empty;
     $("result-body").hidden = empty;
+    syncPreviewToggle(payload);
     renderPages(payload);
     renderProblems(payload);
     showView("result");
@@ -434,6 +479,12 @@
       }
     });
 
+    $("preview-toggle").addEventListener("click", event => {
+      const button = event.target.closest("[data-mode]");
+      if (button) {
+        setPreviewMode(button.dataset.mode);
+      }
+    });
     $("pages-banner").addEventListener("click", () => openPremium("limit_pages", state.popupContext));
     $("premium-inquiry").addEventListener("click", event => sendEvent(event.currentTarget.dataset.feature || "ai", "inquiry"));
     $("retry-button").addEventListener("click", () => {
