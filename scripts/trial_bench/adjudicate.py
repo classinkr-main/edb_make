@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from scripts.trial_bench.common import BENCH_ROOT, bench_dir, crop_stem, load_json, markdown_table, save_json  # noqa: E402
-from scripts.trial_bench.score import LOW_IOU, _warn, regions_iou, unscorable_oracle_reason  # noqa: E402
+from scripts.trial_bench.score import LOW_IOU, _warn, regions_iou, unscorable_observation_reason  # noqa: E402
 
 PANEL_MAX = (900, 1200)
 
@@ -85,24 +85,33 @@ def adjudicate_case(
     """Render every trial/oracle disagreement for ``case`` and (re)write its labels skeleton.
 
     Returns ``None`` -- instead of raising -- when the trial or oracle
-    observation on disk cannot be read or scored. A truncated or
-    failure-shaped record (score.py's own guard, shared via
-    unscorable_oracle_reason) makes disagreements() raise KeyError by
-    indexing oracle["problems"] with nothing to stop it; a genuinely
-    half-written file (an observation run killed mid common.save_json)
-    makes the load itself raise JSONDecodeError, before
-    unscorable_oracle_reason ever sees a parsed object. Either one used to
-    abort main()'s whole ``for oracle_path in ...`` loop and cost every
-    other case its row too. The case is still reported, not silently
-    dropped: warned about on stderr, and when ``excluded`` is given,
-    appended to it as ``{"case": ..., "reason": ...}`` for main()'s own
-    footnote.
+    observation on disk cannot be read or scored. Both sides get both
+    guards, because disagreements() indexes trial["problems"] and
+    oracle["problems"] alike and observe.py can die mid-run exactly like
+    oracle.py can. A failure-shaped or missing-fields record (score.py's own
+    guard, shared via unscorable_observation_reason) makes disagreements()
+    raise KeyError with nothing to stop it; a genuinely half-written file
+    (an observation run killed mid common.save_json) makes the load itself
+    raise JSONDecodeError, before unscorable_observation_reason ever sees a
+    parsed object. Any of them used to abort main()'s whole ``for
+    oracle_path in ...`` loop and cost every other case its row too. The
+    case is still reported, not silently dropped: warned about on stderr,
+    and when ``excluded`` is given, appended to it as ``{"case": ...,
+    "reason": ...}`` -- the reason naming which side was bad -- for main()'s
+    own footnote.
     """
     try:
         trial = load_json(bench_dir("trial", root) / f"{case}.json")
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
         reason = f"unreadable trial observation ({exc})"
         _warn(f"adjudicate.py: case {case!r}: {reason}; skipping this case", warnings)
+        if excluded is not None:
+            excluded.append({"case": case, "reason": reason})
+        return None
+    trial_reason = unscorable_observation_reason(trial)
+    if trial_reason is not None:
+        reason = f"unscorable trial observation ({trial_reason})"
+        _warn(f"adjudicate.py: case {case!r}: trial observation is not scorable ({trial_reason}); skipping this case", warnings)
         if excluded is not None:
             excluded.append({"case": case, "reason": reason})
         return None
@@ -114,7 +123,7 @@ def adjudicate_case(
         if excluded is not None:
             excluded.append({"case": case, "reason": reason})
         return None
-    reason = unscorable_oracle_reason(oracle)
+    reason = unscorable_observation_reason(oracle)
     if reason is not None:
         _warn(f"adjudicate.py: case {case!r}: oracle observation is not scorable ({reason}); skipping this case", warnings)
         if excluded is not None:
@@ -166,10 +175,11 @@ def main(argv: list[str] | None = None) -> int:
     # only in a stderr warning nothing else preserves.
     if excluded:
         table += (
-            f"\n\n> **{len(excluded)} case(s) excluded from this report because their oracle "
-            "observation could not be scored: "
+            f"\n\n> **{len(excluded)} case(s) excluded from this report because an observation "
+            "could not be scored: "
             + ", ".join(f"`{item['case']}` ({item['reason']})" for item in excluded)
-            + ".** Rerun scripts/trial_bench/oracle.py for these cases, then rerun adjudicate.py to include them."
+            + ".** Rerun scripts/trial_bench/observe.py or scripts/trial_bench/oracle.py for these "
+            "cases -- whichever side the reason names -- then rerun adjudicate.py to include them."
         )
     print(table)
     return 0

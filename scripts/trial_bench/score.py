@@ -87,20 +87,30 @@ def _warn(message: str, sink: list[str] | None) -> None:
         sink.append(message)
 
 
-def unscorable_oracle_reason(oracle: Any) -> str | None:
-    """None when ``oracle`` is a scorable oracle observation; otherwise why not.
+def unscorable_observation_reason(obs: Any) -> str | None:
+    """None when ``obs`` is a scorable observation; otherwise why not.
 
-    Shared by score.py's score_all and adjudicate.py's adjudicate_case so a
-    truncated, failure-shaped, or missing-fields observation is recognized
-    and reported the same way by both: one KeyError deep in either script's
-    per-case loop -- expected_from/disagreements both index
-    oracle["problems"], and score_all also reads oracle["timing_ms"] -- used
-    to abort every *other* case's row along with the bad one.
+    Applied to *both* sides -- trial and oracle -- by score.py's score_all
+    and adjudicate.py's adjudicate_case, so a truncated, failure-shaped, or
+    missing-fields observation is recognized and reported the same way
+    wherever it sits: one KeyError deep in either script's per-case loop --
+    expected_from/disagreements/score_case all index ``["problems"]`` and
+    score_all also reads ``["timing_ms"]``, on whichever side is broken --
+    used to abort every *other* case's row along with the bad one.
+
+    The two required fields are the observation contract
+    (common.observation_from_result always writes both), so anything missing
+    either one is a failure record or a foreign file rather than an
+    observation. That is judged the same way regardless of which fields a
+    particular consumer happens to index -- adjudicate.py never reads
+    timing_ms -- so that score.py and adjudicate.py cannot disagree about
+    which cases are scorable; they must not, because adjudicate.py produces
+    the labels score.py then consumes.
     """
-    if not isinstance(oracle, dict):
+    if not isinstance(obs, dict):
         return "not a JSON object"
-    if "problems" not in oracle or "timing_ms" not in oracle or oracle.get("error"):
-        return str(oracle.get("error") or "no problems/timing_ms")
+    if "problems" not in obs or "timing_ms" not in obs or obs.get("error"):
+        return str(obs.get("error") or "no problems/timing_ms")
     return None
 
 
@@ -281,10 +291,11 @@ def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | N
     # --doc run couldn't refresh.
     if excluded:
         table += (
-            f"\n\n> **{len(excluded)} case(s) excluded from this report because their oracle "
-            "observation could not be scored: "
+            f"\n\n> **{len(excluded)} case(s) excluded from this report because an observation "
+            "could not be scored: "
             + ", ".join(f"`{item['case']}` ({item['reason']})" for item in excluded)
-            + ".** Rerun scripts/trial_bench/oracle.py for these cases, then rerun score.py to include them."
+            + ".** Rerun scripts/trial_bench/observe.py or scripts/trial_bench/oracle.py for these "
+            "cases -- whichever side the reason names -- then rerun score.py to include them."
         )
     return table
 
@@ -297,25 +308,28 @@ def score_all(
 ) -> list[dict[str, Any]]:
     """Score every trial observation under ``root`` against its oracle.
 
-    A case with a trial observation but no scorable oracle one -- the oracle
-    was never run for it, or its run failed or was interrupted mid-write --
-    must cost only its own row, never the whole loop: expected_from indexes
-    oracle["problems"] and the row build indexes oracle["timing_ms"], so
-    letting either raise here would abort scoring for every other case too --
-    no report.md, no doc table. Such a case is still *reported*, not
-    silently dropped: warned about on stderr, and when ``excluded`` is given,
-    appended to it as ``{"case": ..., "reason": ...}`` so a caller
-    (render_report's footnote, main()'s per-case message) can say which case
-    is missing and why, instead of leaving that to hand-written prose the
-    next run can't refresh.
+    A case whose trial *or* oracle observation is missing or unscorable --
+    never run, or a run that failed or was interrupted mid-write -- must
+    cost only its own row, never the whole loop: expected_from and
+    score_case index ``["problems"]`` and the row build indexes
+    ``["timing_ms"]``, on both sides, so letting any of those raise here
+    would abort scoring for every other case too -- no report.md, no doc
+    table. Neither side is the privileged one: observe.py can die mid-run
+    exactly like oracle.py can. Such a case is still *reported*, not
+    silently dropped: warned about on stderr, and when ``excluded`` is
+    given, appended to it as ``{"case": ..., "reason": ...}`` -- the reason
+    naming which side was bad -- so a caller (render_report's footnote,
+    main()'s per-case message) can say which case is missing and why,
+    instead of leaving that to hand-written prose the next run can't
+    refresh.
 
-    "Interrupted mid-write" is not just a hypothetical mentioned above: an
-    oracle run killed while common.save_json was writing leaves a half
-    JSON file on disk, and load_json's json.loads raises JSONDecodeError on
-    it *before* unscorable_oracle_reason ever sees a parsed object -- so
-    that guard alone cannot catch it. The load itself is wrapped here for
-    the same reason unscorable_oracle_reason exists: one unreadable file
-    must cost only its own row.
+    "Interrupted mid-write" is not just a hypothetical mentioned above: a
+    run killed while common.save_json was writing leaves a half JSON file on
+    disk, and load_json's json.loads raises JSONDecodeError on it *before*
+    unscorable_observation_reason ever sees a parsed object -- so that guard
+    alone cannot catch it. Each load is wrapped here for the same reason
+    unscorable_observation_reason exists: one unreadable file must cost only
+    its own row.
     """
     rows = []
     for trial_path in sorted(bench_dir("trial", root).glob("*.json")):
@@ -330,7 +344,21 @@ def score_all(
                 excluded.append({"case": case, "reason": reason})
             continue
         labels_path = bench_dir("labels", root) / f"{case}.json"
-        trial = load_json(trial_path)
+        try:
+            trial = load_json(trial_path)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            reason = f"unreadable trial observation ({exc})"
+            _warn(f"score.py: case {case!r}: {trial_path}: {reason}; skipping this case", warnings)
+            if excluded is not None:
+                excluded.append({"case": case, "reason": reason})
+            continue
+        trial_reason = unscorable_observation_reason(trial)
+        if trial_reason is not None:
+            reason = f"unscorable trial observation ({trial_reason})"
+            _warn(f"score.py: case {case!r}: {trial_path} is not a scorable trial observation ({trial_reason}); skipping this case", warnings)
+            if excluded is not None:
+                excluded.append({"case": case, "reason": reason})
+            continue
         try:
             oracle = load_json(oracle_path)
         except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
@@ -339,7 +367,7 @@ def score_all(
             if excluded is not None:
                 excluded.append({"case": case, "reason": reason})
             continue
-        reason = unscorable_oracle_reason(oracle)
+        reason = unscorable_observation_reason(oracle)
         if reason is not None:
             _warn(f"score.py: case {case!r}: {oracle_path} is not a scorable oracle observation ({reason}); skipping this case", warnings)
             if excluded is not None:

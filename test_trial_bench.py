@@ -1364,6 +1364,64 @@ class TestScoreAll(unittest.TestCase):
         self.assertEqual("a", excluded[0]["case"])
         self.assertIn("unreadable oracle observation", excluded[0]["reason"])
 
+    def test_score_all_skips_a_half_written_trial_file_instead_of_aborting_the_run(self):
+        # The oracle side is not the privileged one. observe.py can be killed
+        # mid common.save_json exactly like oracle.py can, and the trial load
+        # was the one load in this loop left outside a try/except -- so a
+        # single truncated trial/<case>.json still took the whole run down
+        # with it: no report.md, no doc table, every good case's row lost.
+        # "a" sorts before "b", so the good row is only produced if the loop
+        # really continues past the bad case rather than merely surviving it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for case in ("a", "b"):
+                common.save_json(common.bench_dir("oracle", root) / f"{case}.json", _obs(case, [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            common.save_json(common.bench_dir("trial", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            (common.bench_dir("trial", root) / "a.json").write_text('{"case": "a", "pro', encoding="utf-8")
+
+            warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                rows = score_all([], root=root, warnings=warnings, excluded=excluded)
+
+        self.assertEqual(["b"], [row["case"] for row in rows])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("unreadable trial observation", warnings[0])
+        self.assertEqual(1, len(excluded))
+        self.assertEqual("a", excluded[0]["case"])
+        # The reason reaches the report footnote, which tells the operator
+        # which script to rerun -- so it must name the side that is actually
+        # broken. Blaming the oracle here would send them to oracle.py for a
+        # file observe.py wrote.
+        self.assertIn("unreadable trial observation", excluded[0]["reason"])
+        self.assertNotIn("oracle", excluded[0]["reason"])
+
+    def test_score_all_skips_a_failure_shaped_trial_observation_instead_of_aborting_the_run(self):
+        # Readable JSON, unscorable shape: {"case", "error"} with no
+        # "problems" and no "timing_ms" -- what a failed or hand-edited
+        # observe run leaves behind. It parses, so wrapping the load cannot
+        # catch it; score_case then raises KeyError 'problems' and costs
+        # every *other* case its row. Same guard as the oracle side, applied
+        # to the trial side.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for case in ("a", "b"):
+                common.save_json(common.bench_dir("oracle", root) / f"{case}.json", _obs(case, [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            common.save_json(common.bench_dir("trial", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("trial", root) / "a.json", {"case": "a", "error": "observe crashed"})
+
+            warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                rows = score_all([], root=root, warnings=warnings, excluded=excluded)
+
+        self.assertEqual(["b"], [row["case"] for row in rows])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("not a scorable trial observation", warnings[0])
+        self.assertIn("observe crashed", warnings[0])
+        self.assertIn("case 'a'", captured.getvalue())
+        self.assertEqual([{"case": "a", "reason": "unscorable trial observation (observe crashed)"}], excluded)
+
     def test_score_all_still_scores_a_case_whose_label_key_went_stale(self):
         """The before/after workflow: the fixed parser no longer emits an approved "trial only" key."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1423,6 +1481,14 @@ class TestScoreMainReporting(unittest.TestCase):
             # score_all's other exclusion path, alongside the unscorable/
             # unreadable one covered elsewhere.
             common.save_json(common.bench_dir("trial", root) / "orphan.json", _obs("orphan", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            # "broken" is the trial-side exclusion: a truncated trial
+            # observation used to raise JSONDecodeError straight out of
+            # main(), so there was no report.md, no doc table and no row for
+            # "good" either. Proving that here, rather than only at
+            # score_all level, is what pins the claim that one bad case can
+            # no longer destroy a bench run.
+            common.save_json(common.bench_dir("oracle", root) / "broken.json", _obs("broken", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            (common.bench_dir("trial", root) / "broken.json").write_text('{"case": "broken", "pro', encoding="utf-8")
             tmp_doc = root / "doc.md"
 
             with (
@@ -1436,14 +1502,16 @@ class TestScoreMainReporting(unittest.TestCase):
             self.assertEqual(0, exit_code)
             report_text = (root / "report.md").read_text(encoding="utf-8")
             self.assertIn("| good |", report_text)
-            self.assertIn("1 case(s) excluded from this report", report_text)
+            self.assertIn("2 case(s) excluded from this report", report_text)
             self.assertIn("`orphan`", report_text)
+            self.assertIn("`broken` (unreadable trial observation", report_text)
 
             doc_text = tmp_doc.read_text(encoding="utf-8")
             block = doc_text.split(score.DOC_START, 1)[1].split(score.DOC_END, 1)[0]
             self.assertIn("| good |", block)
-            self.assertIn("1 case(s) excluded from this report", block)
+            self.assertIn("2 case(s) excluded from this report", block)
             self.assertIn("`orphan`", block)
+            self.assertIn("`broken` (unreadable trial observation", block)
 
 
 class TestAdjudicate(unittest.TestCase):
@@ -1564,6 +1632,59 @@ class TestAdjudicateCase(unittest.TestCase):
         self.assertEqual([{"case": "a", "reason": "Gemini exploded"}], excluded)
         # No PNGs, no labels skeleton -- nothing that would misrepresent this
         # case as having zero disagreements.
+        self.assertFalse((common.bench_dir("adjudication", root) / "a").exists())
+        self.assertFalse((common.bench_dir("labels", root) / "a.json").exists())
+
+    def test_skips_a_failure_shaped_trial_observation_instead_of_aborting(self):
+        # adjudicate_case's docstring promises None "when the trial or oracle
+        # observation on disk cannot be read or scored", but only the oracle
+        # was ever shape-checked: a readable trial observation with no
+        # "problems" (a failed observe run's record) reached disagreements(),
+        # which indexes trial["problems"] just as blindly as oracle's, and
+        # the KeyError aborted main()'s whole loop -- costing every other
+        # case its row, the exact failure mode the oracle guard exists to
+        # prevent.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "a.json", {"case": "a", "error": "observe crashed"})
+            common.save_json(common.bench_dir("oracle", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+
+            warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()) as captured:
+                count = adjudicate_case("a", root, warnings=warnings, excluded=excluded)
+
+        self.assertIsNone(count)
+        self.assertEqual(1, len(warnings))
+        self.assertIn("case 'a'", warnings[0])
+        self.assertIn("trial observation is not scorable", warnings[0])
+        self.assertIn("observe crashed", warnings[0])
+        self.assertIn("case 'a'", captured.getvalue())
+        self.assertEqual([{"case": "a", "reason": "unscorable trial observation (observe crashed)"}], excluded)
+        self.assertFalse((common.bench_dir("adjudication", root) / "a").exists())
+        self.assertFalse((common.bench_dir("labels", root) / "a.json").exists())
+
+    def test_skips_a_half_written_trial_file_instead_of_aborting(self):
+        # The other half of the same docstring promise: a trial observation
+        # from a run killed mid common.save_json is truncated, so load_json
+        # raises JSONDecodeError before any shape guard can see an object.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (common.bench_dir("trial", root) / "a.json").write_text('{"case": "a", "pro', encoding="utf-8")
+            common.save_json(common.bench_dir("oracle", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+
+            warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                count = adjudicate_case("a", root, warnings=warnings, excluded=excluded)
+
+        self.assertIsNone(count)
+        self.assertEqual(1, len(warnings))
+        self.assertIn("unreadable trial observation", warnings[0])
+        self.assertEqual(1, len(excluded))
+        self.assertEqual("a", excluded[0]["case"])
+        self.assertIn("unreadable trial observation", excluded[0]["reason"])
+        self.assertNotIn("oracle", excluded[0]["reason"])
         self.assertFalse((common.bench_dir("adjudication", root) / "a").exists())
         self.assertFalse((common.bench_dir("labels", root) / "a.json").exists())
 
