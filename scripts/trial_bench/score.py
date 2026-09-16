@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -307,6 +308,14 @@ def score_all(
     (render_report's footnote, main()'s per-case message) can say which case
     is missing and why, instead of leaving that to hand-written prose the
     next run can't refresh.
+
+    "Interrupted mid-write" is not just a hypothetical mentioned above: an
+    oracle run killed while common.save_json was writing leaves a half
+    JSON file on disk, and load_json's json.loads raises JSONDecodeError on
+    it *before* unscorable_oracle_reason ever sees a parsed object -- so
+    that guard alone cannot catch it. The load itself is wrapped here for
+    the same reason unscorable_oracle_reason exists: one unreadable file
+    must cost only its own row.
     """
     rows = []
     for trial_path in sorted(bench_dir("trial", root).glob("*.json")):
@@ -321,7 +330,15 @@ def score_all(
                 excluded.append({"case": case, "reason": reason})
             continue
         labels_path = bench_dir("labels", root) / f"{case}.json"
-        trial, oracle = load_json(trial_path), load_json(oracle_path)
+        trial = load_json(trial_path)
+        try:
+            oracle = load_json(oracle_path)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            reason = f"unreadable oracle observation ({exc})"
+            _warn(f"score.py: case {case!r}: {oracle_path} is not a scorable oracle observation ({reason}); skipping this case", warnings)
+            if excluded is not None:
+                excluded.append({"case": case, "reason": reason})
+            continue
         reason = unscorable_oracle_reason(oracle)
         if reason is not None:
             _warn(f"score.py: case {case!r}: {oracle_path} is not a scorable oracle observation ({reason}); skipping this case", warnings)

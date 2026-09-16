@@ -45,8 +45,32 @@ def load_json(path: Path) -> Any:
 
 
 def save_json(path: Path, data: Any) -> None:
+    """Write ``data`` to ``path`` as JSON, atomically.
+
+    A plain ``path.write_text`` leaves a half-written file behind if the
+    process is killed or crashes partway through the write (an interrupted
+    oracle run is exactly this) -- and a reader (json.loads, via load_json)
+    then raises JSONDecodeError, not a missing-file error, so callers must
+    treat that the same as "this case's data is unreadable", never as "this
+    case has no data yet". Writing the full text to a temp file in the same
+    directory first and then renaming it into place means a reader only
+    ever observes the previous complete file or the new complete file --
+    os.replace is a single atomic filesystem operation on both POSIX and
+    Windows, so there is no window where a half file is visible on disk.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
+    text = json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.remove(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def passage_range_from_title(title: str | None) -> list[int] | None:

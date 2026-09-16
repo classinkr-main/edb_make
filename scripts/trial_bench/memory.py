@@ -95,9 +95,18 @@ def measure_case(pdf: Path) -> dict:
         # line unconditionally used to raise IndexError here instead.
         return {"error": "worker exited 0 but printed no output"}
     try:
-        return json.loads(lines[-1])
+        data = json.loads(lines[-1])
     except json.JSONDecodeError as exc:
         return {"error": f"worker output was not valid JSON ({exc}): {lines[-1]!r}"}
+    if not isinstance(data, dict):
+        # json.loads succeeds for any JSON value, not just objects -- a
+        # worker line of "null", "5", "\"done\"" or "[1, 2]" all parse
+        # cleanly. main()'s `"error" in result` and `result["pages"]` both
+        # assume a dict; anything else raises TypeError there instead of
+        # being reported as this one case's row, discarding every row
+        # already measured before it.
+        return {"error": f"worker output was not a JSON object: {lines[-1]!r}"}
+    return data
 
 
 def main(argv: list[str] | None = None) -> int:

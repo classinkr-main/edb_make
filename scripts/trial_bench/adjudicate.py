@@ -11,6 +11,7 @@ Existing label files are never overwritten.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -83,18 +84,36 @@ def adjudicate_case(
 ) -> int | None:
     """Render every trial/oracle disagreement for ``case`` and (re)write its labels skeleton.
 
-    Returns ``None`` -- instead of raising -- when the oracle observation on
-    disk cannot be scored (score.py's own guard, shared via
-    unscorable_oracle_reason): this function indexes oracle["problems"] via
-    disagreements() with nothing to stop a truncated or failure-shaped
-    record from raising KeyError, which used to abort main()'s whole
-    ``for oracle_path in ...`` loop and cost every other case its row too.
-    The case is still reported, not silently dropped: warned about on
-    stderr, and when ``excluded`` is given, appended to it as
-    ``{"case": ..., "reason": ...}`` for main()'s own footnote.
+    Returns ``None`` -- instead of raising -- when the trial or oracle
+    observation on disk cannot be read or scored. A truncated or
+    failure-shaped record (score.py's own guard, shared via
+    unscorable_oracle_reason) makes disagreements() raise KeyError by
+    indexing oracle["problems"] with nothing to stop it; a genuinely
+    half-written file (an observation run killed mid common.save_json)
+    makes the load itself raise JSONDecodeError, before
+    unscorable_oracle_reason ever sees a parsed object. Either one used to
+    abort main()'s whole ``for oracle_path in ...`` loop and cost every
+    other case its row too. The case is still reported, not silently
+    dropped: warned about on stderr, and when ``excluded`` is given,
+    appended to it as ``{"case": ..., "reason": ...}`` for main()'s own
+    footnote.
     """
-    trial = load_json(bench_dir("trial", root) / f"{case}.json")
-    oracle = load_json(bench_dir("oracle", root) / f"{case}.json")
+    try:
+        trial = load_json(bench_dir("trial", root) / f"{case}.json")
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        reason = f"unreadable trial observation ({exc})"
+        _warn(f"adjudicate.py: case {case!r}: {reason}; skipping this case", warnings)
+        if excluded is not None:
+            excluded.append({"case": case, "reason": reason})
+        return None
+    try:
+        oracle = load_json(bench_dir("oracle", root) / f"{case}.json")
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        reason = f"unreadable oracle observation ({exc})"
+        _warn(f"adjudicate.py: case {case!r}: {reason}; skipping this case", warnings)
+        if excluded is not None:
+            excluded.append({"case": case, "reason": reason})
+        return None
     reason = unscorable_oracle_reason(oracle)
     if reason is not None:
         _warn(f"adjudicate.py: case {case!r}: oracle observation is not scorable ({reason}); skipping this case", warnings)

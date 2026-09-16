@@ -275,7 +275,7 @@ def _failed_page_repair_summary(exc: Exception) -> dict[str, Any]:
         "no_page_records": True,
         "status": FAILURE_STATUS,
         "gemini_truncated": bool(getattr(exc, "truncated", False)),
-        "warning": f"oracle_case raised before any page was parsed -- {exc}",
+        "warning": f"oracle_case raised while parsing this case -- {exc}",
     }
 
 

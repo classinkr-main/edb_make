@@ -84,6 +84,39 @@ class TestCommon(unittest.TestCase):
         self.assertEqual("2026학년도_수능_국어", common.case_id(Path("/x/2026학년도 수능 국어.pdf")))
         self.assertEqual("01_물리학Ⅰ_문제지", common.case_id(Path("01 물리학Ⅰ_문제지.pdf")))
 
+    def test_save_json_never_leaves_a_partial_file_behind_on_a_crash_mid_write(self):
+        # A plain path.write_text used to leave a half-written file on disk
+        # if the process died partway through -- and a reader (load_json's
+        # json.loads) then raises JSONDecodeError on it, indistinguishable
+        # from "this case's data is corrupt". Proven structurally, not with
+        # a real kill signal: force the write itself to raise partway
+        # through and assert the previous complete file survives untouched,
+        # with no stray temp file left beside it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "case.json"
+            common.save_json(target, {"before": True})
+
+            class _BoomHandle:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc_info):
+                    return False
+
+                def write(self, text):
+                    raise RuntimeError("simulated crash mid-write")
+
+            with patch("os.fdopen", return_value=_BoomHandle()):
+                with self.assertRaises(RuntimeError):
+                    common.save_json(target, {"after": "half-written garbage"})
+
+            # The previous complete file must still be there, untouched --
+            # never replaced by a half-written one.
+            self.assertEqual({"before": True}, common.load_json(target))
+            # No stray temp file left behind either.
+            leftovers = [p.name for p in Path(temp_dir).iterdir() if p.name != "case.json"]
+            self.assertEqual([], leftovers)
+
     def test_observation_has_numbers_boxes_and_no_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             observation = common.observation_from_result("case", _result(), crops_dir=Path(temp_dir) / "crops")
@@ -457,6 +490,18 @@ class TestFailedPageRepairSummaryDiagnostics(unittest.TestCase):
 
         self.assertFalse(summary["gemini_truncated"])
         self.assertNotIn("gemini_diagnostics", summary["errors"][0])
+
+    def test_warning_does_not_claim_no_pages_were_parsed(self):
+        # This summary's "warning" is saved to oracle_failures/<case>.json
+        # and read back by operators, so it must not claim more than it
+        # knows: a Gemini failure during page repair can happen well after
+        # that page's blocks were already built (a live case's diagnostics
+        # recorded block_count=11), so "before any page was parsed" is
+        # false, not just imprecise.
+        summary = oracle._failed_page_repair_summary(RuntimeError("boom"))
+
+        self.assertEqual("oracle_case raised while parsing this case -- boom", summary["warning"])
+        self.assertNotIn("before any page was parsed", summary["warning"])
 
 
 class _EmptyCache:
@@ -987,7 +1032,10 @@ class TestOracleMainReporting(unittest.TestCase):
         self.assertIn("| case-a |", report)
         self.assertIn("| case-b |", report)
         self.assertIn("ERROR", report)
-        self.assertIn("Gemini exploded", err.getvalue())
+        # This handler's own message must not claim the narrower, and here
+        # false, "before any page was parsed" -- that phrasing belongs only
+        # to a case where oracle_case truly never got past parsing.
+        self.assertIn("oracle_case raised for this case -- Gemini exploded", err.getvalue())
 
 
 def _obs(case: str, problems: list[tuple], total_ms: int = 100) -> dict:
@@ -1287,6 +1335,35 @@ class TestScoreAll(unittest.TestCase):
         # out of the warning text.
         self.assertEqual([{"case": "a", "reason": "Gemini exploded"}], excluded)
 
+    def test_score_all_skips_a_half_written_oracle_file_instead_of_aborting_the_run(self):
+        # A run interrupted mid-write (killed process, OOM) can leave a
+        # genuinely truncated oracle/<case>.json on disk -- not the
+        # failure-shaped {"error": ...} record the test above covers, but a
+        # file json.loads cannot even parse. unscorable_oracle_reason cannot
+        # catch this: it only inspects an already-parsed object, and
+        # load_json raises JSONDecodeError before that object ever exists.
+        # One unreadable file must still cost only its own row.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for case in ("a", "b"):
+                common.save_json(common.bench_dir("trial", root) / f"{case}.json", _obs(case, [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("oracle", root) / "b.json", _obs("b", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            # Half of a JSON object -- exactly what a write killed partway
+            # through the old, non-atomic common.save_json would leave.
+            (common.bench_dir("oracle", root) / "a.json").write_text('{"case": "a", "pro', encoding="utf-8")
+
+            warnings: list[str] = []
+            excluded: list[dict[str, str]] = []
+            with contextlib.redirect_stderr(io.StringIO()):
+                rows = score_all([], root=root, warnings=warnings, excluded=excluded)
+
+        self.assertEqual(["b"], [row["case"] for row in rows])
+        self.assertEqual(1, len(warnings))
+        self.assertIn("unreadable oracle observation", warnings[0])
+        self.assertEqual(1, len(excluded))
+        self.assertEqual("a", excluded[0]["case"])
+        self.assertIn("unreadable oracle observation", excluded[0]["reason"])
+
     def test_score_all_still_scores_a_case_whose_label_key_went_stale(self):
         """The before/after workflow: the fixed parser no longer emits an approved "trial only" key."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1328,6 +1405,45 @@ class TestScoreMainReporting(unittest.TestCase):
         self.assertIn("case 'bad-oracle' was excluded from the report: Gemini exploded", output)
         self.assertIn("no trial observation found for case 'never-observed'", output)
         self.assertNotIn("no trial observation found for case 'bad-oracle'", output)
+
+    def test_main_writes_report_and_doc_with_the_excluded_footnote_end_to_end(self):
+        # The test above stubs score_all to return [], so main() returns at
+        # the `if not rows:` early exit and never reaches
+        # `render_report(rows, excluded)`, the report.md write, or
+        # update_doc -- so nothing proved the excluded footnote (this task's
+        # actual goal: making an excluded case appear inside the generated
+        # block) ever survives that whole path into a real doc file. A
+        # mutant that dropped the `excluded` argument there would still pass
+        # every other test in this suite.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "good.json", _obs("good", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("oracle", root) / "good.json", _obs("good", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            # "orphan" has a trial observation but no oracle one at all --
+            # score_all's other exclusion path, alongside the unscorable/
+            # unreadable one covered elsewhere.
+            common.save_json(common.bench_dir("trial", root) / "orphan.json", _obs("orphan", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            tmp_doc = root / "doc.md"
+
+            with (
+                patch.object(score, "bench_dir", lambda name, _root=None: common.bench_dir(name, root)),
+                patch.object(score, "BENCH_ROOT", root),
+            ):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = score.main(["--doc", str(tmp_doc)])
+
+            self.assertEqual(0, exit_code)
+            report_text = (root / "report.md").read_text(encoding="utf-8")
+            self.assertIn("| good |", report_text)
+            self.assertIn("1 case(s) excluded from this report", report_text)
+            self.assertIn("`orphan`", report_text)
+
+            doc_text = tmp_doc.read_text(encoding="utf-8")
+            block = doc_text.split(score.DOC_START, 1)[1].split(score.DOC_END, 1)[0]
+            self.assertIn("| good |", block)
+            self.assertIn("1 case(s) excluded from this report", block)
+            self.assertIn("`orphan`", block)
 
 
 class TestAdjudicate(unittest.TestCase):
@@ -1484,6 +1600,44 @@ class TestAdjudicateMain(unittest.TestCase):
         self.assertIn("1 case(s) excluded", footnote)
         self.assertIn("`a` (Gemini exploded)", footnote)
 
+    def test_continues_past_an_excluded_case_end_to_end_with_the_real_adjudicate_case(self):
+        # The test above mocks adjudicate_case outright, so main()'s
+        # `adjudicate_case(case, excluded=excluded)` keyword wiring
+        # (adjudicate.py) is never actually exercised against real files.
+        # Here the real adjudicate_case runs on temp trial/oracle files, so
+        # the excluded footnote is proven end to end, not just against a
+        # hand-built fake.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+            common.save_json(common.bench_dir("oracle", root) / "a.json", _obs("a", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+            common.save_json(common.bench_dir("trial", root) / "bad.json", _obs("bad", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])]))
+            common.save_json(
+                common.bench_dir("oracle", root) / "bad.json",
+                {"case": "bad", "error": "Gemini exploded", "oracle": {"page_repair": oracle._failed_page_repair_summary(RuntimeError("Gemini exploded"))}},
+            )
+
+            # Ignores whatever `root` value the real adjudicate_case's own
+            # default parameter resolves to, and redirects every call --
+            # main()'s single-arg ones and adjudicate_case's two-arg ones
+            # alike -- to this test's temp root.
+            with patch.object(adjudicate, "bench_dir", lambda name, _root=None: common.bench_dir(name, root)):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    exit_code = adjudicate.main([])
+
+        self.assertEqual(0, exit_code)
+        report = out.getvalue()
+        table_only, _, footnote = report.partition("\n\n")
+        self.assertIn("| a | 0 |", table_only)
+        self.assertNotIn("| bad |", table_only)
+        self.assertIn("1 case(s) excluded", footnote)
+        self.assertIn("`bad` (Gemini exploded)", footnote)
+        # No PNGs or labels skeleton were produced for the excluded case --
+        # it must not look like a case with zero disagreements.
+        self.assertFalse((common.bench_dir("adjudication", root) / "bad").exists())
+        self.assertFalse((common.bench_dir("labels", root) / "bad.json").exists())
+
 
 class TestProbeSummaries(unittest.TestCase):
     def test_summarize_file_treats_second_call_onward_as_warm(self):
@@ -1612,6 +1766,22 @@ class TestMemoryBench(unittest.TestCase):
         with patch.object(memory.subprocess, "run", return_value=completed):
             result = memory.measure_case(Path("/tmp/garbled.pdf"))
         self.assertIn("error", result)
+
+    def test_measure_case_returns_an_error_dict_when_worker_output_is_not_a_json_object(self):
+        # json.loads succeeds for any JSON value, not just an object: a
+        # worker's last stdout line of "null", "5", a bare string, or a
+        # list all parse cleanly. main()'s own `"error" in result` and
+        # `result["pages"]` both assume a dict -- anything else raised
+        # TypeError there instead of being reported as this one case's
+        # failed row, which used to discard every row already measured
+        # before it.
+        for stdout_line in ("null", "5", '"done"', "[1, 2]"):
+            with self.subTest(stdout_line=stdout_line):
+                completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout_line + "\n", stderr="")
+                with patch.object(memory.subprocess, "run", return_value=completed):
+                    result = memory.measure_case(Path("/tmp/x.pdf"))
+                self.assertIsInstance(result, dict)
+                self.assertIn("error", result)
 
     def test_main_reports_a_failed_case_as_a_row_and_keeps_measuring_the_rest(self):
         good_payload = {"pages": 4, "rss_peak_mb": 900.0, "total_ms_a": 1, "total_ms_b": 2}
