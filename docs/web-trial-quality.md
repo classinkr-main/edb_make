@@ -130,6 +130,110 @@
 2. **없는 문항 생성 (수정 전 4건, 이제 0건)** -- `english_go2_hakpyeong_20260324` 4쪽 28번 문항의 `Library of Things` 안내문 상자 안에 `How It Works` 번호 목록 `1.` `2.` `3.` `4.`가 들어 있는데, 체험판이 이 네 줄을 최상위 문항으로 승격시켰다(4쪽 실제 문항은 25~28번뿐인데 1~4번 키가 다시 생겨 `q1#2`~`q4#2`로 충돌 회피됐었다). 오류 지점은 **한 곳**(안내문 목록 하나)이지만 위양성 키는 4개였다. 수정 전 이 케이스의 `q_prec`는 28/32 = 0.88이었고 `q_recall`은 1.00이었다 -- 놓친 문항은 없고 없는 문항을 만든 쪽이었다. 위 갱신 안내대로 답지 마커 신호를 추가한 뒤에는 이 네 줄이 28번 문항의 크롭으로 흡수되어 더는 별도 문항이 되지 않고, 이 케이스의 `q_prec`도 1.00이다.
 3. **쪽 넘김 병합 0건**은 구조적으로 확인했다: 215개 단위 중 `regions`가 두 쪽 이상에 걸친 것이 하나도 없다(`{r['page_index'] for r in p['regions']}`의 크기가 전부 1).
 
+### "확인 필요" 배지가 실제 오류를 예측하는가
+
+위 절이 기록한 5건(수정 전)이 이 질문의 유일한 실제 데이터다: **당시 체험판은 5건 모두에 "확인 필요" 배지를 달지 않았다.** `scripts/trial_bench/risk_flag_predictivity.py`가 이 질문을 반복 측정 가능하게 만든다 -- 코퍼스의 모든 트리밍 단위(`~/edb-trial-bench/trial/*.json`)에 대해 그 단위의 `risk_flags`와 그 단위가 라벨 정답 기준 실제 오류인지(`score.py`의 `extra`와 같은 정의)를 짝지어, `trial_preview.REVIEW_WORTHY_FLAGS`가 지금 무시하는 플래그(특히 `passage_cross_page_merge_check`)를 포함한 플래그별 오탐/누락표를 만든다. 정답 목록에는 있지만 체험판이 아예 단위를 만들지 않은 키(`score.py`의 `missing`)는 따로 센다 -- 존재하지 않는 단위에는 어떤 플래그도 붙을 수 없기 때문이다.
+
+**현재 코퍼스(13개 케이스, 216단위)에는 알려진 실제 오류가 0건이다** -- 위 절의 5건이 모두 고쳐졌기 때문이다. 그래서 아래 표의 모든 `recall`은 빈 칸이다(잡아야 할 실제 오류가 없음). 그래도 두 가지는 지금 측정할 수 있다: `REVIEW_WORTHY_FLAGS`에 들어 있는 4개 플래그(`fallback_grouping`/`merged_problem_block`/`marker_conflicts`/`hwp_oversegmentation`)는 이 코퍼스 216단위 중 단 하나에도 붙지 않았고(발생 0건), `REVIEW_WORTHY_FLAGS`가 무시하는 `passage_cross_page_merge_check`는 216단위 중 21개(국어 3개 케이스에서만, 케이스당 7개)에 붙어 있는데 그 21개는 지금 전부 정답과 일치하는 정상 단위다 -- 즉 지금 이 플래그를 배지에 추가하면 리뷰율이 0.00에서 21/216 = 0.10으로 오르고, 그 10%는 전부 오탐이 된다.
+
+갱신: `GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/risk_flag_predictivity.py --doc docs/web-trial-quality.md`
+
+<!-- risk-flag-table -->
+측정일 2026-09-17
+
+| predictor | in badge today | tp | fp | fn | tn | precision | recall |
+|---|---|---|---|---|---|---|---|
+| fallback_grouping | yes | 0 | 0 | 0 | 216 |  |  |
+| hwp_oversegmentation | yes | 0 | 0 | 0 | 216 |  |  |
+| marker_conflicts | yes | 0 | 0 | 0 | 216 |  |  |
+| merged_problem_block | yes | 0 | 0 | 0 | 216 |  |  |
+| passage_cross_page_merge_check | no | 0 | 21 | 0 | 195 | 0.00 |  |
+| 현재 배지 (needs_review) | -- | 0 | 0 | 0 | 216 |  |  |
+| 아무 risk_flag나 (any) | -- | 0 | 21 | 0 | 195 | 0.00 |  |
+
+> **단위 216개 중 실제 오류 0개, 플래그를 달 단위 자체가 없는 오류(정답에는 있으나 체험판이 아예 만들지 않은 키) 0개 -- 합쳐서 이 코퍼스가 아는 실제 오류는 총 0건이다.** `fn`은 단위가 존재하는 오류만 센다: 없는 단위에는 어떤 risk_flag도(현재도, 가상의 어떤 조합도) 붙을 수 없기 때문이다.
+<!-- /risk-flag-table -->
+
+#### 수정 전 5건에서 재구성한 측정 (역사적, 재현 가능)
+
+현재 코퍼스에 실제 오류가 0건이라는 사실만으로는 "배지가 오류를 잡을 수 있는가"에 답할 수 없다 -- 이 코퍼스가 지금까지 찾아낸 실제 오류는 위 5건이 전부이고, 그 5건은 이미 고쳐졌다. 그 5건 당시 각 단위의 `risk_flags`가 무엇이었는지는 지금의 `~/edb-trial-bench/trial/*.json`에는 남아 있지 않다(고쳐진 뒤 다시 관측했으므로). 그래서 수정 전 커밋으로 파서만 되돌려 그 5건을 다시 만들어냈다 -- 코드를 되돌린 것이 아니라(현재 작업 트리는 전혀 건드리지 않는다), 별도 디렉터리에 그 커밋의 코드를 풀어 완전히 격리된 `sys.path`로 실행한 것이다. 아래 명령은 오늘도 그대로 다시 실행하면 같은 결과를 낸다:
+
+```
+# 0) 준비.
+mkdir -p /tmp/old-snapshot /tmp/hist-root/trial /tmp/hist-root/oracle /tmp/hist-root/labels
+
+# 1) 두 수정(1ccece1, 25a06e4, 54d58c0, 7bcf1bb) 바로 전 커밋 -- segment.py는
+#    9c7e171(이 5건을 처음 기록한 커밋)과 바이트 단위로 동일하다.
+git archive aeba954 | tar -x -C /tmp/old-snapshot
+
+# 2) 그 스냅샷 자신의 sys.path 안에서만 파서를 실행하는 드라이버를 그 스냅샷
+#    안에 써넣는다 -- 현재 작업 트리 경로를 섞으면
+#    problem_parser.parse_problems의 지연 임포트(`from build_problem_board_edb
+#    import ...`)가 고쳐진 현재 코드를 끌어와 버그가 재현되지 않는다.
+#    observation_from_result도 같은 스냅샷의 scripts/trial_bench/common.py에서
+#    가져온다.
+cat > /tmp/old-snapshot/_build_historical_trial.py <<'PYEOF'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from problem_parser import parse_problems
+from scripts.trial_bench.common import BENCH_ROOT, bench_dir, save_json, observation_from_result
+REAL_BENCH_INPUTS = Path.home() / "edb-trial-bench" / "inputs"
+for case in ["english_go2_hakpyeong_20260324", "english_2020suneung_go3_20191107"]:
+    pdf = REAL_BENCH_INPUTS / f"{case}.pdf"
+    work_dir = BENCH_ROOT / "_work" / case
+    work_dir.mkdir(parents=True, exist_ok=True)
+    result = parse_problems(pdf, work_dir=work_dir, max_pages=4)
+    observation = observation_from_result(case, result)
+    save_json(bench_dir("trial", BENCH_ROOT) / f"{case}.json", observation)
+    print(case, "problems:", len(observation["problems"]), "keys:", [p["key"] for p in observation["problems"]])
+PYEOF
+TRIAL_BENCH_ROOT=/tmp/hist-root GEMINI_API_KEY= .venv/bin/python /tmp/old-snapshot/_build_historical_trial.py
+
+# 3) oracle·labels는 현재(수정 후) 파일을 그대로 재사용한다 -- expected_from은
+#    이 값들을 truth-목록 키의 박스 보강과 쪽수 경고에만 쓰고, 어느 쪽도 이
+#    측정(플래그 vs 실제 오류)에 영향을 주지 않는다.
+cp ~/edb-trial-bench/oracle/english_go2_hakpyeong_20260324.json ~/edb-trial-bench/oracle/english_2020suneung_go3_20191107.json /tmp/hist-root/oracle/
+cp ~/edb-trial-bench/labels/english_go2_hakpyeong_20260324.json ~/edb-trial-bench/labels/english_2020suneung_go3_20191107.json /tmp/hist-root/labels/
+
+# 4) 이 저장소에 커밋된 스크립트로 채점한다 -- 임시 코드가 아니라
+#    scripts/trial_bench/risk_flag_predictivity.py 그 자체가 만든 표다.
+TRIAL_BENCH_ROOT=/tmp/hist-root GEMINI_API_KEY= .venv/bin/python scripts/trial_bench/risk_flag_predictivity.py \
+    english_go2_hakpyeong_20260324 english_2020suneung_go3_20191107
+```
+
+결과 (2026-09-17 측정, `score.py`를 같은 `TRIAL_BENCH_ROOT`로 돌려 `missing p16-17` / `extra q1#2 q2#2 q3#2 q4#2`가 여전히 재현됨을 먼저 확인했다):
+
+| predictor | in badge today | tp | fp | fn | tn | precision | recall |
+|---|---|---|---|---|---|---|---|
+| fallback_grouping | yes | 0 | 0 | 4 | 57 |  | 0.00 |
+| hwp_oversegmentation | yes | 0 | 0 | 4 | 57 |  | 0.00 |
+| marker_conflicts | yes | 0 | 0 | 4 | 57 |  | 0.00 |
+| merged_problem_block | yes | 0 | 0 | 4 | 57 |  | 0.00 |
+| 현재 배지 (needs_review) | -- | 0 | 0 | 4 | 57 |  | 0.00 |
+| 아무 risk_flag나 (any) | -- | 0 | 0 | 4 | 57 |  | 0.00 |
+
+> 단위 61개 중 실제 오류 4개(수정 전 `q1#2`~`q4#2`), 플래그를 달 단위 자체가 없는 오류 1개(수정 전 `p16-17` 자체가 존재하지 않았다) -- 합쳐서 이 두 케이스가 아는 실제 오류는 총 5건. `passage_cross_page_merge_check`는 이 두 영어 케이스 어디에도 한 번도 나타나지 않았다(0/61) -- 위 코퍼스 전체 표의 21건은 전부 국어 케이스에서 나온 것이다.
+
+**결론: 지금 계산되는 risk_flag 중 어느 것도(배지 안에 있든, `passage_cross_page_merge_check`처럼 배지 밖에 있든) 이 5건 중 단 하나도 잡지 못했을 것이다 -- recall 0/5, 모든 predictor에서 동일.** 이것은 "신호는 있는데 배지 목록에서 빠졌다"는 이야기가 아니다: 기존 플래그들의 의미 영역(페이지 헤더 중복, 마커 충돌, HWP 과분할, 페이지 넘김 지문 병합)이 실제로 발생한 결함 두 종류(안내문 상자 안 들여쓴 번호 목록이 최상위 문항으로 승격된 것, 본문 없는 대괄호 지문 헤더가 앞 문항 답지 스캔에 흡수된 것)와 아예 무관하다. `passage_cross_page_merge_check`를 배지에 추가해도 이 5건에 대해서는 recall이 그대로 0이고, 대신 위 "현재 코퍼스" 표대로 코퍼스 리뷰율만 0.00 → 0.10으로 오른다(오탐 21건, 실제로 잡는 오류 0건) -- 그래서 `REVIEW_WORTHY_FLAGS`는 바꾸지 않는다.
+
+**5건(그리고 지금의 0건)은 어떤 방향으로도 결론을 낼 만한 표본이 아니다.** 0/5라는 관측 하나로는 "이 신호는 전혀 도움이 안 된다"와 "이 신호가 오류의 절반을 잡는다"조차 구분할 수 없다 -- 0/5의 Wilson 95% 신뢰구간은 [0%, 43%]다(아래 명령으로 계산, 재현 가능):
+```
+.venv/bin/python -c "
+import math
+def wilson(successes, n, z=1.96):
+    phat = successes / n
+    denom = 1 + z**2/n
+    center = (phat + z**2/(2*n)) / denom
+    halfwidth = (z * math.sqrt(phat*(1-phat)/n + z**2/(4*n**2))) / denom
+    return center - halfwidth, center + halfwidth
+print(wilson(0, 5))       # 0/5 -> (약 0%, 약 43%)
+print(wilson(10, 20))     # recall 절반짜리 신호와 구분하려면 대략 몇 건이 필요한지
+print(wilson(50, 100))
+"
+```
+'전혀 안 잡음'과 '절반은 잡음'을 구분할 수 있는 정도(반너비 ±20%p 안팎)만 되려도 확인된 실제 오류가 최소 20~25건은 있어야 하고(`n=20`일 때 반너비 0.20), 배지 교체를 정당화할 만큼 좁은 추정(반너비 ±10%p)을 얻으려면 대략 100건이 필요하다(`n=100`일 때 반너비 0.096). 이 코퍼스가 13개 케이스·219개 단위를 만드는 동안 실제로 찾아낸 오류는 5건뿐이고 그나마 5개 과목 중 1개(영어, 2케이스)에 몰려 있었다 -- 같은 비율로 20~25건을 유기적으로 모으려면 케이스 수를 대략 4~5배(60~70케이스 안팎)로 늘려야 하고, 100건을 모으려면 그보다 한 자릿수 더 큰 코퍼스이거나 오류를 의도적으로 주입한 별도 픽스처가 필요하다. **그래서 이 절의 정직한 답은 "배지를 이렇게 바꿔야 한다"가 아니라 "지금 가진 5건으로는 어느 플래그 조합도 정당화도 반박도 할 수 없다"이고, `REVIEW_WORTHY_FLAGS`는 바꾸지 않았다.**
+
 ### 오라클이 기여한 것과 하지 않은 것
 
 - **기여한 것: 없다.** `adjudicate.py`는 13개 케이스 전부 disagreement **0건**을 보고했고(`~/edb-trial-bench/adjudication/` 디렉터리 자체가 만들어지지 않는다), 따라서 확인용 판정 이미지도 0장이다. 그럴 수밖에 없는 것이, 오라클 관측값은 13개 케이스 전부 키 집합도 박스도 체험판과 동일하기 때문이다.
