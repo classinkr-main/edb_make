@@ -1446,7 +1446,17 @@ class TestScore(unittest.TestCase):
         # 1 of 2 rows is approved, the recall/iou columns are means (0.75,
         # 0.75), and low_iou/missing/extra are summed (2, 1, 0). Neither row
         # carries ground truth, so the aggregate's truth-backed count is 0/2.
-        self.assertIn("| 합계 | 0/2 truth-backed, 2/2 provisional (1 approved) | 0.75 | 1.00 | 1.00 | 1.00 | 0.75 | 2 | 0.25 | 1 | 0 |", report)
+        self.assertIn("| 합계 | 0/2 truth-backed, 2/2 provisional (1 approved) | 0.75 | 1.00 | 1.00 | 1.00 | 0.75 | 2 | 0.25 | 1 | 0 |  |  |  |  |", report)
+        # The aggregate row's own line must carry exactly as many "|" as the
+        # header -- score.py appends 4 trailing blank cells (trial_ms,
+        # oracle_ms, ai_evidence, verified_by) after the "extra" sum; a
+        # mutant dropping one would still satisfy the assertIn above (which
+        # stops at "extra") while common.markdown_table (no padding) would
+        # emit a short, misaligned row.
+        header_line, aggregate_line = report.splitlines()[0], next(
+            line for line in report.splitlines() if line.startswith("| 합계 |")
+        )
+        self.assertEqual(header_line.count("|"), aggregate_line.count("|"))
 
     def test_render_report_aggregate_counts_truth_backed_cases_separately_from_provisional(self):
         # A "truth" row (an independently read ground_truth) must be counted apart
@@ -1530,8 +1540,15 @@ class TestScore(unittest.TestCase):
             {"case": "d", "status": "pending", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
         ]
         report = render_report(rows)
-        self.assertIn("verified_by", report.splitlines()[0])
         lines = report.splitlines()
+        self.assertIn("verified_by", lines[0])
+        # Pin the header's last column to verified_by specifically -- not
+        # just present somewhere in the header line -- so that swapping
+        # "ai_evidence"/"verified_by" in the headers list without moving the
+        # corresponding cells (which would silently mislabel the last
+        # column) fails here instead of slipping through.
+        header_cells = [cell.strip() for cell in lines[0].strip("|").split("|")]
+        self.assertEqual("verified_by", header_cells[-1])
         self.assertTrue(any(line.startswith("| a |") and line.rstrip().endswith("| model |") for line in lines), report)
         self.assertTrue(any(line.startswith("| b |") and line.rstrip().endswith("| human |") for line in lines), report)
         self.assertTrue(any(line.startswith("| d |") and line.rstrip().endswith("|  |") for line in lines), report)
