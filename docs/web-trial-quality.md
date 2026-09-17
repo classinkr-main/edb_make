@@ -62,24 +62,28 @@
 
 | case | status | q_recall | q_prec | p_recall | p_prec | mean_iou | low_iou | review | missing | extra | trial_ms | oracle_ms | ai_evidence | verified_by |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 01_물리학Ⅰ_문제지 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1227 | 7971 | 0/3 (NO EVIDENCE) | model |
-| 2025학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1400 | 12856 | 0/3 (NO EVIDENCE) | model |
-| 2026학년도-9월-모평-국어-언어와매체 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1262 | 8267 | 0/3 (NO EVIDENCE) | model |
-| 2026학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1360 | 8386 | 0/3 (NO EVIDENCE) | model |
-| earth_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1213 | 6711 | 0/3 (NO EVIDENCE) | model |
-| english_2020suneung_go3_20191107 | truth | 1.00 | 1.00 | 0.00 |  | 1.00 | 0 | 0.00 | p16-17 |  | 1307 | 43832 | 0/4 (NO EVIDENCE) | model |
-| english_go2_hakpyeong_20260324 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1302 | 15796 | 0/4 (NO EVIDENCE) | model |
-| math_2026suneung_9wolmopyeong_20250903 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 740 | 11783 | 0/4 (NO EVIDENCE) | model |
-| math_go3_hakpyeong_20240328 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 633 | 10122 | 0/4 (NO EVIDENCE) | model |
-| physics_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1165 | 7385 | 0/3 (NO EVIDENCE) | model |
-| social_saengwoon_2020suneung_20191015 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1330 | 16030 | 0/4 (NO EVIDENCE) | model |
-| social_saengwoon_2025suneung_9wolmopyeong_20240904 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1508 | 16190 | 0/4 (NO EVIDENCE) | model |
-| 전자기_교재문제 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 858 | 10065 | 0/3 (NO EVIDENCE) | model |
-| 합계 | 13/13 truth-backed, 0/13 provisional (0 approved) | 1.00 | 1.00 | 0.80 | 1.00 | 1.00 | 0 | 0.00 | 1 | 0 |  |  |  |  |
+| 01_물리학Ⅰ_문제지 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 931 | 7971 | 0/3 (NO EVIDENCE) | model |
+| 2025학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1078 | 12856 | 0/3 (NO EVIDENCE) | model |
+| 2026학년도-9월-모평-국어-언어와매체 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 943 | 8267 | 0/3 (NO EVIDENCE) | model |
+| 2026학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1045 | 8386 | 0/3 (NO EVIDENCE) | model |
+| chemistry_2025suneung | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1147 | 13197 | 0/4 (NO EVIDENCE) | model |
+| earth_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 933 | 6711 | 0/3 (NO EVIDENCE) | model |
+| em_textbook_edited_quartz | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 876 | 12033 | 0/4 (NO EVIDENCE) | model |
+| english_2020suneung_go3_20191107 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 928 | 43832 | 0/4 (NO EVIDENCE) | model |
+| english_go2_hakpyeong_20260324 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 913 | 15796 | 0/4 (NO EVIDENCE) | model |
+| korean_2025suneung_distiller | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1314 | 11612 | 0/4 (NO EVIDENCE) | model |
+| korean_go2_hakpyeong_20260326_hwp | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1087 | 12014 | 0/4 (NO EVIDENCE) | model |
+| math_2026suneung_9wolmopyeong_20250903 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 458 | 11783 | 0/4 (NO EVIDENCE) | model |
+| math_go3_hakpyeong_20240328 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 359 | 10122 | 0/4 (NO EVIDENCE) | model |
+| physics_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 884 | 7385 | 0/3 (NO EVIDENCE) | model |
+| social_saengwoon_2020suneung_20191015 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 918 | 16030 | 0/4 (NO EVIDENCE) | model |
+| social_saengwoon_2025suneung_9wolmopyeong_20240904 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1098 | 16190 | 0/4 (NO EVIDENCE) | model |
+| 전자기_교재문제 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 700 | 10065 | 0/3 (NO EVIDENCE) | model |
+| 합계 | 17/17 truth-backed, 0/17 provisional (0 approved) | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 | 0 | 0 |  |  |  |  |
 
-> **`01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`: 13 truth-backed case(s) above.** `q_recall`/`q_prec`/`p_recall`/`p_prec` come from an independently read question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` are still scored against the oracle's own boxes -- see `ground_truth`, `verified_by`, and the `docs/web-trial-quality.md` 라벨 형식 section.
+> **`01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `chemistry_2025suneung`, `earth_input`, `em_textbook_edited_quartz`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `korean_2025suneung_distiller`, `korean_go2_hakpyeong_20260326_hwp`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`: 17 truth-backed case(s) above.** `q_recall`/`q_prec`/`p_recall`/`p_prec` come from an independently read question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` are still scored against the oracle's own boxes -- see `ground_truth`, `verified_by`, and the `docs/web-trial-quality.md` 라벨 형식 section.
 
-> **AI page repair produced no evidence of a real change for 13 of 13 case(s): `01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`.** On those cases the forced-AI oracle's block types, problem grouping, titles, crop boxes and review flags all came out identical to what the local baseline produced on its own, so those rows' scores show agreement with the trial's own local baseline, not confirmation by AI-grade recognition -- see `ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh.
+> **AI page repair produced no evidence of a real change for 17 of 17 case(s): `01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `chemistry_2025suneung`, `earth_input`, `em_textbook_edited_quartz`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `korean_2025suneung_distiller`, `korean_go2_hakpyeong_20260326_hwp`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`.** On those cases the forced-AI oracle's block types, problem grouping, titles, crop boxes and review flags all came out identical to what the local baseline produced on its own, so those rows' scores show agreement with the trial's own local baseline, not confirmation by AI-grade recognition -- see `ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh.
 <!-- /corpus-table -->
 
 ### 게이트 판정 (설계 §3 "정확성")
@@ -215,3 +219,19 @@
   - `--attempts N` -- 응답 하나가 `_validate_repair_payload`를 통과할 때까지 다시 시도하고, 매 시도의 status를 출력하면서 전부 관측값(`oracle.attempts`)에 남긴다. `run_control`은 검증에 성공한 **첫** 시도에서 멈추고 그 시도의 관측값을 저장하며, 예산을 다 써도 하나도 통과하지 못하면 마지막 시도의 관측값을 저장한다(`test_retries_until_a_response_validates_and_saves_that_attempt` / `test_spends_the_whole_budget_then_saves_the_last_attempt`). 시도마다 Gemini 호출이 새로 나가므로 유료다. 예외(=`fail_on_error=True`가 올리는 전송·파싱 실패)는 재시도하지 않고 기존대로 `oracle_failures/`에 기록하고 그대로 올린다.
   - **검증을 통과한 원시 페이로드 저장** -- `control_force_config`가 `oracle.force_config` 위에 `save_debug=True` 하나만 더 켜서 page_repair의 `_maybe_write_debug_artifacts`가 `{summary, repair_payload}`를 쓰게 하고, `_parse_control`이 임시 파스 디렉터리가 지워지기 **전에** 그것을 거둬 `oracle.repair_payloads`에 넣는다(`test_saves_the_raw_validated_payload_before_the_scratch_dir_is_deleted`가 그 수명 관계를 고정한다). 이제 "모델이 어떤 제목을 어느 블록에 보냈나"를 새 유료 호출 없이 확인할 수 있다 -- 위 항목의 payload 분석이 그 첫 사례다. `invalid_response`로 거부된 응답은 `_maybe_write_debug_artifacts`에 닿기 전에 반환되므로 페이로드가 남지 않는다(남는 것은 그 페이지의 `status`/`error`뿐). `save_debug`는 코퍼스 오라클(`oracle.force_config`)에는 넣지 않았다: 그 아티팩트에는 시험지 원문이 그대로 들어간다.
 - **이 저장 기능보다 앞선 관측값에는 페이로드가 없다**: 2026-09-17 00:50의 `math_go3_hakpyeong_20240328-p1-image-only.json`에는 `oracle.repair_payloads`가 없고, 그 실행의 `titles_changed=5`가 어떤 제목에서 나왔는지는 되살릴 수 없다. 위 카운터 표는 그 관측값 그대로이고, 지금 다시 만들려면 실제 `GEMINI_API_KEY`가 등록된 `--runtime-dir`로 위 재현 명령을 다시 돌려야 하며 카운터는 또 달라질 수 있다.
+
+## 2026-09-17 추가: 코퍼스 17건으로 확장 (제작 도구·재출력 경로 다양화)
+
+- **추가한 4건**(전부 이 기계에 이미 있던 실제 파일이며 `~/edb-trial-bench/sources/`에 깨끗한 이름으로 복사한 뒤 `make_inputs.py`로 앞 4쪽을 잘랐다):
+
+  | case | subject | 원본 | 왜 넣었나 |
+  |---|---|---|---|
+  | `korean_go2_hakpyeong_20260326_hwp` | korean | 2026학년도 3월 고2 학평 국어, 16쪽 | 코퍼스에 없던 **HWP 제작 PDF**(producer `PDF 2022 12.0.0.535`). 4쪽 끝에서 `[11~13]` 지문 묶음이 잘려 12·13번이 5쪽에 있는 케이스 |
+  | `korean_2025suneung_distiller` | korean | 2025학년도 수능 국어 홀수형, Acrobat Distiller 원본 20쪽 | 기존 케이스 `2025학년도-수능-국어-언어와매체-홀수형`(pypdf 재저장본, 3쪽 컷)과 같은 시험지의 **다른 제작 경로**, 4쪽 컷 |
+  | `chemistry_2025suneung` | science | 2026학년도 수능 화학 I 4쪽 발췌 (파일명은 25수능) | 과학탐구 과목 추가(물리·지구과학 외 화학), 표·오비탈 그림이 많은 2단 |
+  | `em_textbook_edited_quartz` | science | 전자기 교재 연습 문제 4쪽, macOS Quartz PDFContext 재출력 | 기존 `전자기_교재문제`(Hancom PDF 21쪽)와 같은 책의 **Quartz 재출력본** — 재출력이 텍스트 층 순서를 바꾸는지 확인 |
+
+- **정답(`ground_truth`)**: 4건 모두 잘린 입력을 110 DPI PNG로 렌더링해 Claude(Fable 5.1)가 직접 읽었다(`verified_by: model`, 사람 서명 없음). 문항 번호·지문 범위는 라벨 파일에만 둔다.
+- **결과**: 위 표대로 4건 모두 `q_recall`·`q_prec` 1.00, 국어 2건은 `p_recall`·`p_prec` 1.00, 확인 필요 0, `adjudicate.py` 불일치 0건. 합계 행은 **17/17 truth-backed**. 오라클은 4건 16쪽 전부 `repair_changed = 0`(기존 13건과 같은 "NO EVIDENCE")이라 이번에도 박스 IoU는 미측정 상태 그대로다.
+- **이 확장이 말해 주는 것**: HWP 제작본·Distiller 원본·Quartz 재출력본·화학 시험지에서도 파서가 깨지지 않았다. 수능형 시험지 안에서는 더 이상 실패 입력을 찾기 어렵다는 뜻이며, 다음 실패는 학원 자체 제작(한글·워드) 시험지나 OCR 텍스트 층이 얹힌 스캔본에서 찾아야 한다.
+- **같은 날 체험판에 붙은 "이어짐" 표시**(`docs/superpowers/specs/2026-09-17-web-trial-page-cut-continuation-design.md`): 위 국어 2건처럼 4쪽 끝에서 잘린 지문 묶음은 응답 `problems[].continuation`으로 표시되며, 채점에는 영향이 없다(관측 JSON은 `parse_problems` 결과만 담는다).
