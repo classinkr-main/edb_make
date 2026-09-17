@@ -15,8 +15,10 @@ from preprocess import prepare_source_pages
 from segment import (
     PDF_CHOICE_MARKERS,
     _build_pdf_passage_range_blocks,
+    _extract_pdf_passage_range,
     _indented_nested_enumeration_marker_ids,
     _looks_like_pdf_page_header_text_line,
+    _trim_pdf_problem_bottom_to_last_choice,
     segment_page,
 )
 from structured_schema import Box, Subject
@@ -1963,19 +1965,125 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         docs/web-trial-quality.md records the project convention: a bracketed
         range header is recorded as a passage unit whether or not the material
         it governs is printed on the page (a listening script is not). The
-        geometry here is the one from ``english_2020suneung_go3_20191107``
-        page 2 of the trial bench, scaled to a 600x1000 page: the header sits
-        just under question 15's last choice line and just above question 16's
-        marker. At that spacing the header's own fragment is shorter than 2% of
-        the page height and the header line is inside the choice list's
-        continuation gap, so the header used to produce no passage block at all
-        and to be cropped into question 15 instead -- while the sister paper
-        ``english_go2_hakpyeong_20260324``, whose header is a few pixels
-        further from its question 16, produced the passage correctly.
+        geometry here is the measured one from
+        ``english_2020suneung_go3_20191107`` page 2 of the trial bench (a
+        1881x2766 page): the header sits just under question 15's last choice
+        line and just above question 16's marker. At that spacing the header's
+        own fragment is only 50.0px tall against the page-relative minimum of
+        55.3px (2% of the 2766px page height -- the fixed 40.0px floor is not
+        what is active at this page size), and the header line is inside the
+        choice list's continuation gap, so the header used to produce no
+        passage block at all and to be cropped into question 15 instead --
+        while the sister paper ``english_go2_hakpyeong_20260324``, whose
+        header is a few pixels further from its question 16 (56.1px against a
+        55.5px threshold), produced the passage correctly without the fix
+        below.
 
         The ink is drawn in latin script because PIL's default font carries no
         Hangul glyphs; the text layer shape the detector keys on (a bracketed
         range plus a shared-material cue) is the same in both languages.
+        """
+        image = Image.new("RGB", (1881, 2766), "white")
+        draw = ImageDraw.Draw(image)
+        choice_line = "    ".join(PDF_CHOICE_MARKERS)
+        header_text = "[16 ~ 17] Listen to the following and answer the questions."
+        draw.text((60, 1850), "15. previous question stem", fill=(20, 20, 20))
+        draw.text((90, 1900), choice_line, fill=(20, 20, 20))
+        draw.text((60, 1973), header_text, fill=(20, 20, 20))
+        draw.text((60, 2031), "16. main topic question", fill=(20, 20, 20))
+        draw.text((60, 2400), "17. not mentioned question", fill=(20, 20, 20))
+
+        class Source:
+            def __init__(self, source_image):
+                self.image = source_image
+                self.metadata = {
+                    "source_type": "pdf",
+                    "pdf_problem_markers": [
+                        {
+                            "number": 15,
+                            "text": "15. previous question stem",
+                            "bbox": {"left": 60, "top": 1850.0, "right": 790, "bottom": 1886.0},
+                        },
+                        {
+                            "number": 16,
+                            "text": "16. main topic question",
+                            "bbox": {"left": 60, "top": 2031.9, "right": 800, "bottom": 2067.9},
+                        },
+                        {
+                            "number": 17,
+                            "text": "17. not mentioned question",
+                            "bbox": {"left": 60, "top": 2400.0, "right": 850, "bottom": 2436.0},
+                        },
+                    ],
+                    "pdf_text_lines": [
+                        {
+                            "text": "15. previous question stem",
+                            "bbox": {"left": 60, "top": 1850.0, "right": 790, "bottom": 1886.0},
+                        },
+                        {
+                            "text": choice_line,
+                            "bbox": {"left": 90, "top": 1900.0, "right": 1200, "bottom": 1936.0},
+                        },
+                        {
+                            "text": header_text,
+                            "bbox": {"left": 60, "top": 1973.6, "right": 1400, "bottom": 2010.9},
+                        },
+                        {
+                            "text": "16. main topic question",
+                            "bbox": {"left": 60, "top": 2031.9, "right": 800, "bottom": 2067.9},
+                        },
+                        {
+                            "text": "17. not mentioned question",
+                            "bbox": {"left": 60, "top": 2400.0, "right": 850, "bottom": 2436.0},
+                        },
+                    ],
+                }
+                self.source_path = "synthetic-bodyless-passage-header.pdf"
+
+        segmented = segment_page(
+            Source(image),
+            page_id="bodyless-passage-header-page",
+            subject=Subject.ENGLISH,
+        )
+
+        self.assertEqual("pdf-text-markers", segmented.metadata.get("segmenter"))
+        self.assertEqual(1, segmented.metadata.get("pdf_passage_range_block_count"))
+        passage_blocks = [
+            block
+            for block in segmented.blocks
+            if block.metadata.get("segmenter") == "pdf-passage-range"
+        ]
+        self.assertEqual(1, len(passage_blocks))
+        passage_block = passage_blocks[0]
+        self.assertEqual({"start": 16, "end": 17}, passage_block.metadata.get("passage_range"))
+        self.assertEqual([16, 17], passage_block.metadata.get("passage_child_marker_numbers"))
+        # The crop must carry the whole header line, top and bottom.
+        self.assertLessEqual(passage_block.bbox.top, 1973.6)
+        self.assertGreaterEqual(passage_block.bbox.bottom, 2010.9)
+
+        by_number = {
+            block.metadata.get("problem_number"): block
+            for block in segmented.blocks
+            if block.metadata.get("problem_number") is not None
+        }
+        self.assertEqual({15, 16, 17}, set(by_number))
+        # Question 15 stops above the header instead of swallowing it: the
+        # header is not a continuation of question 15's choice list.
+        self.assertLessEqual(by_number[15].bbox.bottom, 1973.6)
+        self.assertTrue(by_number[15].metadata.get("choice_bottom_trimmed"))
+        self.assertGreaterEqual(by_number[16].bbox.top, 2010.9)
+
+    def test_pdf_bodyless_passage_range_header_kept_at_small_page_floor(self):
+        """The fixed 40.0px floor, not the 2% term, is what is pinned here.
+
+        This is the original (pre-measurement) synthetic geometry, kept as a
+        second scenario: on a 600x1000 page the page-relative term
+        (``image.height * 0.02`` = 20.0) is smaller than the fixed 40.0px
+        floor, so ``max(40.0, image.height * 0.02)`` resolves to the constant
+        40.0 and that is the term the header's 34.0px fragment is measured
+        against. See
+        test_pdf_bodyless_passage_range_header_still_starts_a_passage above
+        for the companion scenario that pins the page-relative term instead.
         """
         image = Image.new("RGB", (600, 1000), "white")
         draw = ImageDraw.Draw(image)
@@ -2032,11 +2140,11 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
                         },
                     ],
                 }
-                self.source_path = "synthetic-bodyless-passage-header.pdf"
+                self.source_path = "synthetic-bodyless-passage-header-small.pdf"
 
         segmented = segment_page(
             Source(image),
-            page_id="bodyless-passage-header-page",
+            page_id="bodyless-passage-header-small-page",
             subject=Subject.ENGLISH,
         )
 
@@ -2050,31 +2158,23 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         self.assertEqual(1, len(passage_blocks))
         passage_block = passage_blocks[0]
         self.assertEqual({"start": 16, "end": 17}, passage_block.metadata.get("passage_range"))
-        self.assertEqual([16, 17], passage_block.metadata.get("passage_child_marker_numbers"))
-        # The crop must carry the whole header line, top and bottom.
         self.assertLessEqual(passage_block.bbox.top, 750.0)
         self.assertGreaterEqual(passage_block.bbox.bottom, 768.0)
 
-        by_number = {
-            block.metadata.get("problem_number"): block
-            for block in segmented.blocks
-            if block.metadata.get("problem_number") is not None
-        }
-        self.assertEqual({15, 16, 17}, set(by_number))
-        # Question 15 stops above the header instead of swallowing it: the
-        # header is not a continuation of question 15's choice list.
-        self.assertLessEqual(by_number[15].bbox.bottom, 750.0)
-        self.assertTrue(by_number[15].metadata.get("choice_bottom_trimmed"))
-        self.assertGreaterEqual(by_number[16].bbox.top, 768.0)
-
     def test_short_passage_continuation_fragment_is_still_dropped(self):
-        """The header keeps its own short fragment; a body sliver stays dropped.
+        """The header keeps its own short fragment; a same-height sliver stays dropped.
 
-        The page-relative minimum height is what stops a passage from growing a
-        fragment with no body in it -- here the next column carries one line of
-        its own above its first question. Only the fragment that holds the
-        header line itself is exempt from that minimum, so the header column
-        yields a block and the next column does not.
+        On this 800px-tall page the fixed 40.0px floor -- not the 2% term
+        (``image.height * 0.02`` = 16.0px here) -- is what a too-short
+        fragment is measured against. Only the fragment that both (a) sits in
+        the header's own column and (b) actually spans the header's own
+        vertical midpoint is exempt from that floor.
+
+        The column-2 sliver here is deliberately placed level with the header
+        line itself, so its span also contains the header's midpoint (613):
+        a version of this exemption that forgets to check the column would
+        wrongly exempt this sliver too and keep it as a second block, even
+        though it holds no part of the passage.
         """
         image = Image.new("RGB", (600, 800), "white")
         text_lines = [
@@ -2084,12 +2184,12 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
             },
             {
                 "text": "직전 문항의 남은 한 줄",
-                "bbox": {"left": 330, "top": 110, "right": 520, "bottom": 136},
+                "bbox": {"left": 330, "top": 606, "right": 520, "bottom": 632},
             },
         ]
         right_markers = [
-            {"number": 1, "bbox": {"left": 330, "top": 150, "right": 350, "bottom": 176}},
-            {"number": 2, "bbox": {"left": 330, "top": 420, "right": 350, "bottom": 446}},
+            {"number": 1, "bbox": {"left": 330, "top": 642, "right": 350, "bottom": 668}},
+            {"number": 2, "bbox": {"left": 330, "top": 700, "right": 350, "bottom": 726}},
         ]
 
         blocks = _build_pdf_passage_range_blocks(
@@ -2109,6 +2209,108 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         self.assertLessEqual(blocks[0].bbox.top, 600.0)
         self.assertGreaterEqual(blocks[0].bbox.bottom, 626.0)
         self.assertEqual(1, blocks[0].metadata.get("column_index"))
+
+        # Pin the containment bound itself: a marker immediately under the
+        # header, in the header's OWN column, gives the header's fragment a
+        # computed bottom (616) that lands above the header's own bottom edge
+        # (626) but at/after its midpoint (613). The exemption must still
+        # fire here -- a version that checks against the header's full bottom
+        # instead of its midpoint would wrongly reject this fragment and drop
+        # the block entirely.
+        pin_text_lines = [
+            {
+                "text": "[3~4] 다음 글을 읽고 물음에 답하시오.",
+                "bbox": {"left": 40, "top": 600, "right": 280, "bottom": 626},
+            },
+        ]
+        pin_markers = [
+            {"number": 3, "bbox": {"left": 60, "top": 630, "right": 80, "bottom": 656}},
+            {"number": 4, "bbox": {"left": 60, "top": 700, "right": 80, "bottom": 726}},
+        ]
+        pin_blocks = _build_pdf_passage_range_blocks(
+            image,
+            "page-2",
+            pin_text_lines,
+            [(1, pin_markers, (40.0, 285.0))],
+            page_area=float(image.width * image.height),
+            start_index=1,
+        )
+
+        self.assertEqual(
+            ["passage_range"],
+            [block.metadata.get("marker_kind") for block in pin_blocks],
+        )
+        self.assertEqual({"start": 3, "end": 4}, pin_blocks[0].metadata.get("passage_range"))
+
+    def test_trim_choice_continuation_ignores_in_question_range_look_alike(self):
+        """A free-text line that merely looks like a range must not break the scan.
+
+        ``_extract_pdf_passage_range`` accepts a bare leading range with no
+        brackets, plus loose shared-material cues, so an in-question line such
+        as a table caption ("1~3족 원소의 성질을...") can match it even though it
+        starts no real passage -- the passage builder itself already guards
+        against exporting a range like this as a header (its own
+        preceding-number check). The choice-continuation scan must apply the
+        same reasoning: only treat a match as a real header break when the
+        claimed range actually starts after the question being trimmed.
+        """
+        image = Image.new("RGB", (600, 1000), "white")
+        choice_line = "    ".join(PDF_CHOICE_MARKERS)
+        false_positive_text = "1~3족 원소의 성질을 나타낸 표이다. 옳은 것을 <보기>에서 고르시오."
+        # Confirms this is the same false-positive shape the finding names --
+        # a bare in-question range, not a real shared-passage header.
+        self.assertEqual((1, 3), _extract_pdf_passage_range(false_positive_text))
+
+        text_lines = [
+            {
+                "text": choice_line,
+                "bbox": {"left": 60, "top": 100, "right": 380, "bottom": 126},
+            },
+            {
+                "text": false_positive_text,
+                "bbox": {"left": 60, "top": 140, "right": 380, "bottom": 166},
+            },
+            {
+                "text": "표를 보고 다음 물음에 답하시오.",
+                "bbox": {"left": 60, "top": 180, "right": 380, "bottom": 206},
+            },
+        ]
+
+        # Knowing the current question is 15, the range (1, 3) cannot be a
+        # header governing questions below 15 -- it starts well before it --
+        # so the scan must not break here and must keep scanning past it.
+        fixed_bottom, fixed_trimmed, fixed_tail = _trim_pdf_problem_bottom_to_last_choice(
+            image,
+            text_lines,
+            left=40.0,
+            right=400.0,
+            top=50.0,
+            bottom=400.0,
+            problem_number=15,
+        )
+        self.assertTrue(fixed_trimmed)
+        self.assertFalse(fixed_tail)
+        # The whole trailing content -- the look-alike line and the line after
+        # it -- is retained in the crop, not orphaned outside every block.
+        self.assertGreaterEqual(fixed_bottom, 206.0)
+        self.assertEqual(224.0, fixed_bottom)
+
+        # Without a known problem number the guard falls back to the old,
+        # always-break behaviour (this is what the bug looked like before the
+        # fix): the scan stops at the look-alike line's own top and its bottom
+        # (140..166) lands split across two crops instead of belonging to
+        # either -- exactly the "disappears from every output unit" defect.
+        old_bottom, old_trimmed, _old_tail = _trim_pdf_problem_bottom_to_last_choice(
+            image,
+            text_lines,
+            left=40.0,
+            right=400.0,
+            top=50.0,
+            bottom=400.0,
+        )
+        self.assertTrue(old_trimmed)
+        self.assertGreater(old_bottom, 140.0)
+        self.assertLess(old_bottom, 166.0)
 
 
 if __name__ == "__main__":

@@ -1260,6 +1260,7 @@ def _trim_pdf_problem_bottom_to_last_choice(
     right: float,
     top: float,
     bottom: float,
+    problem_number: int | None = None,
 ) -> tuple[float, bool, bool]:
     region_lines = _pdf_text_lines_in_region(
         text_lines,
@@ -1288,8 +1289,14 @@ def _trim_pdf_problem_bottom_to_last_choice(
         # A shared-passage range header belongs to the questions below it, never
         # to the choice list above it, however tightly the page sets the two.
         # Without this a listening header printed one line under question 15's
-        # last choice was pulled into question 15's crop.
-        if _extract_pdf_passage_range(next_line.get("text")) is not None:
+        # last choice was pulled into question 15's crop. Require the claimed
+        # range to actually start after this question -- otherwise a loose
+        # in-question match (a free-text line whose leading numbers merely look
+        # like a range, e.g. a title reciting "1~3족 원소") would break the scan
+        # on a line that belongs to no block on the page, the same shape the
+        # passage builder itself rejects at its own preceding-number guard.
+        next_range = _extract_pdf_passage_range(next_line.get("text"))
+        if next_range is not None and (problem_number is None or next_range[0] > problem_number):
             break
         gap = next_line_box.top - last_choice_bottom
         if gap > continuation_gap:
@@ -2608,6 +2615,7 @@ def _segment_pdf_problem_markers(
                     right=right_bound,
                     top=top,
                     bottom=bottom,
+                    problem_number=marker.get("number") if isinstance(marker.get("number"), int) else None,
                 )
                 if choice_trimmed:
                     choice_bottom_trim_count += 1
