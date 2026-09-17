@@ -12,6 +12,7 @@ from typing import Any
 from PIL import Image, features
 
 from problem_parser import ParseResult
+from trial_continuation import continuations
 
 # Vercel caps function response bodies at 4.5 MB; leave room for headers and slack.
 RESPONSE_BUDGET_BYTES = 3_500_000
@@ -108,8 +109,10 @@ def _payload_for_step(
     elapsed_ms: int,
     processed_page_limit: int,
     extra: dict[str, Any] | None = None,
+    continuation_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     step = PREVIEW_STEPS[step_index]
+    continuation_by_id = continuation_by_id or {}
     problems = []
     for problem in result.problems:
         board = None
@@ -131,6 +134,8 @@ def _payload_for_step(
                 "needs_review": needs_review(problem.risk_flags),
                 "preview": encode_preview_data_uri(problem.image, long_side=step.problem_long_side, quality=step.quality),
                 "board": board,
+                # Passage whose remaining questions sit past the page cap (trial_continuation).
+                "continuation": continuation_by_id.get(problem.problem_id),
             }
         )
     payload: dict[str, Any] = {
@@ -171,6 +176,7 @@ def build_parse_body(
     """Return the first preview and JSON within budget, or reject an oversized result."""
     payload: dict[str, Any] = {}
     body = b""
+    continuation_by_id = continuations(result)  # step-independent; computed once
     for step_index in range(len(PREVIEW_STEPS)):
         payload = _payload_for_step(
             result,
@@ -179,6 +185,7 @@ def build_parse_body(
             elapsed_ms=elapsed_ms,
             processed_page_limit=processed_page_limit,
             extra=extra,
+            continuation_by_id=continuation_by_id,
         )
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
         if len(body) <= budget_bytes:

@@ -10,6 +10,7 @@ from PIL import Image, features
 
 from problem_parser import ParsedPage, ParsedProblem, ParsedRegion, ParseResult
 from structured_schema import Box
+from trial_continuation import continuations
 from trial_preview import (
     BOARD_BACKGROUND_RGB,
     PREVIEW_FORMAT,
@@ -117,6 +118,7 @@ class TestBuildParsePayload(unittest.TestCase):
         self.assertEqual(PREVIEW_STEPS[0].problem_long_side, max(_decode(problem["preview"]).size))
         self.assertIsNone(problem["board"])
         self.assertFalse(payload["board_previews"])
+        self.assertIsNone(problem["continuation"])
 
     def test_falls_back_to_smaller_step_when_over_budget(self):
         roomy, roomy_body = build_parse_body(_result(problem_count=4), remaining_today=1, elapsed_ms=1, processed_page_limit=3)
@@ -223,6 +225,29 @@ class TestBoardPreviews(unittest.TestCase):
         self.assertLessEqual(len(body), sizes[2] - 1)
         with self.assertRaises(PreviewBudgetExceeded):
             build_parse_body(result, remaining_today=1, elapsed_ms=1, processed_page_limit=4, budget_bytes=sizes[3] - 1)
+
+
+class TestContinuation(unittest.TestCase):
+    def test_cut_passage_carries_its_remaining_numbers_on_every_step(self):
+        result = _result(problem_count=3)  # numbers 1..3, source_page_count=16, one processed page
+        result.problems[:] = [
+            replace(result.problems[0], problem_id="q10", number=10, title="10."),
+            replace(result.problems[1], problem_id="q11", number=11, title="11."),
+            replace(result.problems[2], problem_id="pass", number=None, title="지문 10~13"),
+        ]
+        for step_index in range(len(PREVIEW_STEPS)):
+            payload = _payload_for_step(
+                result,
+                step_index,
+                remaining_today=1,
+                elapsed_ms=1,
+                processed_page_limit=4,
+                continuation_by_id=continuations(result),
+            )
+            by_id = {problem["problem_id"]: problem["continuation"] for problem in payload["problems"]}
+            self.assertEqual({"q10": None, "q11": None, "pass": {"numbers": [12, 13], "page": 2}}, by_id)
+        payload = build_parse_payload(result, remaining_today=1, elapsed_ms=1, processed_page_limit=4)
+        self.assertEqual({"numbers": [12, 13], "page": 2}, payload["problems"][2]["continuation"])
 
 
 if __name__ == "__main__":
