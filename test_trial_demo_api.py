@@ -3,7 +3,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
-from fastapi.testclient import TestClient
+try:
+    from fastapi.testclient import TestClient
+except ModuleNotFoundError as error:  # the CI lock and the desktop venv have no web dependencies
+    raise unittest.SkipTest(f"trial web dependencies missing: {error}")
 
 from test_trial_api import FakeInspector, FakeParser, FakeVerifier, PDF_BODY
 from trial_config import TrialConfig
