@@ -215,6 +215,9 @@ class TestTrialPageMarkup(unittest.TestCase):
         css = (PROJECT_ROOT / "public/style.css").read_text(encoding="utf-8")
         self.assertIn(".problem-card--board img", css)
         self.assertIn('.preview-toggle button[aria-pressed="true"]', css)
+        self.assertIn("logic.continuationNote(", script)
+        self.assertIn('"continue-chip"', script)
+        self.assertIn(".continue-chip", css)
 
 
 if __name__ == "__main__":

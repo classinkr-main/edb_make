@@ -375,6 +375,14 @@
         chip.textContent = "확인 필요";
         head.appendChild(chip);
       }
+      const note = logic.continuationNote(problem);
+      if (note) {
+        const chip = document.createElement("span");
+        chip.className = "continue-chip";
+        chip.textContent = `${Number(problem.continuation.page)}쪽에 이어짐`;
+        chip.title = note;
+        head.appendChild(chip);
+      }
       item.appendChild(head);
 
       const source = logic.cardImageSource(problem, state.previewMode);
