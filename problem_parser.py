@@ -277,6 +277,9 @@ def parse_problems(
         crop_margins=True,
         max_dimension=None,
         timings=timing_ms,
+        # The rendered page PNG only feeds the normalize step, which reads the
+        # image the renderer already holds. Writing it cost 108 ms per page.
+        write_page_files=False,
     )
     timing_ms["recognize"] = _elapsed_ms(recognize_started_at)
     page_repair = tuple(dict(page.metadata.get("ai_fallback") or {}) for page in page_models)

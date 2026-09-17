@@ -87,9 +87,17 @@ class NormalizedPageImage:
     width_px: int
     height_px: int
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Set when the renderer kept the page in memory instead of going through a file.
+    # Excluded from equality and repr: a PIL image compares by identity and prints
+    # its whole header. When this is set, ``normalized_path`` may not exist on disk.
+    rendered_image: Image.Image | None = field(default=None, repr=False, compare=False)
 
     @property
     def image(self) -> Image.Image:
+        # convert() returns a copy even when the mode already matches, so callers
+        # still get their own image and cannot mutate the retained one.
+        if self.rendered_image is not None:
+            return self.rendered_image.convert("RGB")
         return Image.open(self.normalized_path).convert("RGB")
 
 
@@ -431,7 +439,21 @@ def _render_pdf_pages_with_external_pymupdf(
     raise RuntimeError(f"PyMuPDF is required to render PDF pages ({detail})")
 
 
-def render_pdf_pages(source: str | Path, output_dir: str | Path, dpi: int = 160) -> list[NormalizedPageImage]:
+def render_pdf_pages(
+    source: str | Path,
+    output_dir: str | Path,
+    dpi: int = 160,
+    write_files: bool = True,
+) -> list[NormalizedPageImage]:
+    """Render every page of a PDF.
+
+    With ``write_files`` each page is also saved as a PNG at ``normalized_path``,
+    which is what the desktop pipeline's artifacts and its render cache rely on.
+    Callers that only read ``NormalizedPageImage.image`` can pass ``False``: the
+    page is then carried in memory and the PNG is never written. Encoding one
+    200 DPI page as PNG measured 108 ms against 3 ms to wrap the same pixmap in
+    a PIL image, so the write dominates the render stage for such callers.
+    """
     source_path = Path(source)
     target_dir = Path(output_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -448,7 +470,11 @@ def render_pdf_pages(source: str | Path, output_dir: str | Path, dpi: int = 160)
             page = doc.load_page(page_index)
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             out_path = target_dir / f"{source_path.stem}_page_{page_index + 1:03d}.png"
-            pix.save(out_path.as_posix())
+            rendered_image: Image.Image | None = None
+            if write_files:
+                pix.save(out_path.as_posix())
+            else:
+                rendered_image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             try:
                 page_dict = page.get_text("dict")
             except Exception:
@@ -471,6 +497,7 @@ def render_pdf_pages(source: str | Path, output_dir: str | Path, dpi: int = 160)
                         "pdf_text_lines": _extract_pdf_text_lines(page, scale, page_dict),
                         "pdf_media_regions": _extract_pdf_media_regions(page, scale, page_dict),
                     },
+                    rendered_image=rendered_image,
                 )
             )
     finally:
@@ -2744,6 +2771,7 @@ def _normalize_pdf_rendered_pages(
             enable_margin_crop=enable_margin_crop,
             max_dimension=max_dimension,
             base_metadata=dict(page.metadata),
+            image=page.rendered_image,
         )
         normalized.metadata.setdefault("source_pdf_path", str(source_path))
         normalized.metadata["source_type"] = "pdf"
@@ -3693,12 +3721,19 @@ def normalize_image(
     enable_margin_crop: bool = True,
     max_dimension: int | None = None,
     base_metadata: dict[str, Any] | None = None,
+    image: Image.Image | None = None,
 ) -> NormalizedPageImage:
+    """Normalize one page image and write the result into ``output_dir``.
+
+    ``image`` lets a caller hand over a page it already holds; ``source`` is then
+    used only for naming and metadata and never opened. Without it the page is
+    read from ``source`` as before.
+    """
     source_path = Path(source)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    image = load_image(source_path)
+    image = image.convert("RGB") if image is not None else load_image(source_path)
     metadata: dict[str, Any] = dict(base_metadata or {})
     metadata.setdefault("source_type", "image")
 
@@ -3756,7 +3791,14 @@ def prepare_pages(
     enable_deskew: bool = True,
     enable_margin_crop: bool = True,
     max_dimension: int | None = None,
+    write_page_files: bool = True,
 ) -> list[NormalizedPageImage]:
+    """Normalize every page of a source document.
+
+    ``write_page_files`` is forwarded to :func:`render_pdf_pages`. The rendered
+    PNG is only an intermediate feeding the normalize step, so a caller that
+    reads the returned pages through ``NormalizedPageImage.image`` can skip it.
+    """
     source_path = Path(source)
     suffix = source_path.suffix.lower()
     normalized_dir = Path(output_dir)
@@ -3774,7 +3816,9 @@ def prepare_pages(
         if cached_pdf_pages:
             return cached_pdf_pages
 
-        rendered = render_pdf_pages(source_path, normalized_dir / "rendered", dpi=dpi)
+        rendered = render_pdf_pages(
+            source_path, normalized_dir / "rendered", dpi=dpi, write_files=write_page_files
+        )
         normalized_pages = _normalize_pdf_rendered_pages(
             source_path,
             rendered,
@@ -3891,7 +3935,9 @@ def prepare_pages(
                 )
                 return normalized_pages
         converted_pdf = convert_hwp_to_pdf(source_path, normalized_dir / "converted")
-        rendered = render_pdf_pages(converted_pdf, normalized_dir / "rendered", dpi=dpi)
+        rendered = render_pdf_pages(
+            converted_pdf, normalized_dir / "rendered", dpi=dpi, write_files=write_page_files
+        )
         conversion_quality = _summarize_pdf_render_quality(rendered)
         conversion_quality = _prefer_pdf_text_stem_markers_when_numeric_sparse(rendered, conversion_quality)
         for key in (
@@ -4016,6 +4062,7 @@ def prepare_source_pages(
     deskew: bool = True,
     crop_margins: bool = True,
     max_dimension: int | None = None,
+    write_page_files: bool = True,
 ) -> list[PreparedPage]:
     normalized_pages = prepare_pages(
         path,
@@ -4025,6 +4072,7 @@ def prepare_source_pages(
         enable_deskew=deskew,
         enable_margin_crop=crop_margins,
         max_dimension=max_dimension,
+        write_page_files=write_page_files,
     )
     prepared: list[PreparedPage] = []
     for page in normalized_pages:

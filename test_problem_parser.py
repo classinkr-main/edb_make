@@ -593,5 +593,80 @@ class TestParseProblems(unittest.TestCase):
         self.assertEqual([("none", None), ("none", config)], seen)
 
 
+class TestPageFilesStayOutOfTheTrialPath(unittest.TestCase):
+    """The rendered page PNG only feeds the normalize step, so the trial skips it."""
+
+    def _pipeline(self, path: Path, work: Path, *, write_page_files: bool):
+        from build_problem_board_edb import build_pages, build_problem_entries, resolve_subject
+        from layout_template_schema import LayoutTemplate
+
+        work.mkdir(parents=True, exist_ok=True)
+        prepared, models = build_pages(
+            path,
+            subject=resolve_subject("unknown"),
+            ocr_mode="none",
+            ai_fallback_config=None,
+            pdf_dpi=PDF_RENDER_DPI,
+            detect_perspective=False,
+            deskew=True,
+            crop_margins=True,
+            max_dimension=None,
+            write_page_files=write_page_files,
+        )
+        entries = build_problem_entries(
+            prepared, models, work, LayoutTemplate(name="academy-default"), render_board_assets=False
+        )
+        signature = [
+            (
+                entry.problem_number,
+                entry.title,
+                round(entry.bounds.left, 3),
+                round(entry.bounds.top, 3),
+                round(entry.bounds.width, 3),
+                round(entry.bounds.height, 3),
+                Path(entry.crop_path).read_bytes(),
+            )
+            for entry in entries
+        ]
+        return signature, [page.image.size for page in prepared]
+
+    def test_skipping_page_files_changes_nothing_but_the_files(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "on").mkdir()
+            (root / "off").mkdir()
+            written = _write_text_exam_pdf(root / "on" / "exam.pdf", [[1, 2], [3, 4], [5, 6]])
+            skipped = _write_text_exam_pdf(root / "off" / "exam.pdf", [[1, 2], [3, 4], [5, 6]])
+
+            on_signature, on_pages = self._pipeline(written, root / "on-work", write_page_files=True)
+            off_signature, off_pages = self._pipeline(skipped, root / "off-work", write_page_files=False)
+
+            self.assertEqual(on_signature, off_signature)
+            self.assertEqual(on_pages, off_pages)
+            rendered_on = sorted((written.parent / ".pipeline_cache" / "rendered").glob("*.png"))
+            rendered_off = sorted((skipped.parent / ".pipeline_cache" / "rendered").glob("*.png"))
+            self.assertEqual(3, len(rendered_on), "the default must keep writing the rendered page PNGs")
+            self.assertEqual([], rendered_off, "the trial path must not write rendered page PNGs")
+
+    def test_render_pdf_pages_carries_the_page_in_memory_when_it_writes_no_file(self):
+        from preprocess import render_pdf_pages
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = _write_text_exam_pdf(root / "exam.pdf", [[1, 2]])
+
+            kept = render_pdf_pages(source, root / "kept", dpi=72, write_files=False)
+            self.assertEqual(1, len(kept))
+            self.assertIsNotNone(kept[0].rendered_image)
+            self.assertFalse(Path(kept[0].normalized_path).exists())
+            # The property must hand out a copy, not the retained image itself.
+            self.assertIsNot(kept[0].image, kept[0].rendered_image)
+            self.assertEqual(kept[0].rendered_image.size, kept[0].image.size)
+
+            written = render_pdf_pages(source, root / "written", dpi=72)
+            self.assertIsNone(written[0].rendered_image)
+            self.assertTrue(Path(written[0].normalized_path).exists())
+            self.assertEqual(kept[0].image.tobytes(), written[0].image.tobytes())
+
 if __name__ == "__main__":
     unittest.main()

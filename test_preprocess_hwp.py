@@ -963,7 +963,7 @@ class TestPreprocessHwp(unittest.TestCase):
                 self.assertEqual(tmp_path / "out" / "converted", out_dir)
                 return converted
 
-            def fake_render_pdf_pages(src, out_dir, dpi):
+            def fake_render_pdf_pages(src, out_dir, dpi, write_files=True):
                 self.assertEqual(converted, src)
                 self.assertEqual(tmp_path / "out" / "rendered", out_dir)
                 self.assertEqual(144, dpi)

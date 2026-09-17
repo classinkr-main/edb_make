@@ -2628,6 +2628,7 @@ def build_pages(
     ocr_semaphore: threading.BoundedSemaphore | None = None,
     global_ocr_worker_limit: int | None = None,
     timings: dict[str, int] | None = None,
+    write_page_files: bool = True,
 ) -> tuple[list[PreparedPage], list[PageModel]]:
     render_started_at = time.perf_counter()
     prepared_pages = prepare_source_pages(
@@ -2637,6 +2638,7 @@ def build_pages(
         deskew=deskew,
         crop_margins=crop_margins,
         max_dimension=max_dimension,
+        write_page_files=write_page_files,
     )
     _record_ms(timings, "render", render_started_at)
     if _normalize_input_intent(input_intent) == "page-as-is":

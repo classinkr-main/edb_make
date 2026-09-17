@@ -43,7 +43,9 @@ class TestPdfPreprocessCache(unittest.TestCase):
             source.write_bytes(b"%PDF-1.4 same source bytes")
             out_dir = root / "out"
 
-            def fake_render_pdf_pages(src: Path, output_dir: Path, dpi: int) -> list[preprocess.NormalizedPageImage]:
+            def fake_render_pdf_pages(
+                src: Path, output_dir: Path, dpi: int, write_files: bool = True
+            ) -> list[preprocess.NormalizedPageImage]:
                 self.assertEqual(source, src)
                 self.assertEqual(out_dir / "rendered", output_dir)
                 self.assertEqual(144, dpi)
@@ -77,7 +79,9 @@ class TestPdfPreprocessCache(unittest.TestCase):
             source.write_bytes(b"%PDF-1.4 full page master")
             rendered_size = (1654, 2339)
 
-            def fake_render_pdf_pages(src: Path, output_dir: Path, dpi: int) -> list[preprocess.NormalizedPageImage]:
+            def fake_render_pdf_pages(
+                src: Path, output_dir: Path, dpi: int, write_files: bool = True
+            ) -> list[preprocess.NormalizedPageImage]:
                 self.assertEqual(200, dpi)
                 page = self._rendered_pdf_page(src, output_dir, size=rendered_size)
                 page.metadata["dpi"] = dpi
@@ -106,7 +110,9 @@ class TestPdfPreprocessCache(unittest.TestCase):
             second_source.write_bytes(b"%PDF-1.4 identical pdf bytes")
             out_dir = root / "out"
 
-            def fake_render_pdf_pages(src: Path, output_dir: Path, dpi: int) -> list[preprocess.NormalizedPageImage]:
+            def fake_render_pdf_pages(
+                src: Path, output_dir: Path, dpi: int, write_files: bool = True
+            ) -> list[preprocess.NormalizedPageImage]:
                 return [self._rendered_pdf_page(src, output_dir)]
 
             with mock.patch.object(preprocess, "render_pdf_pages", side_effect=fake_render_pdf_pages) as render_mock:
@@ -136,7 +142,9 @@ class TestPdfPreprocessCache(unittest.TestCase):
             source.write_bytes(b"%PDF-1.4 option sensitive bytes")
             out_dir = root / "out"
 
-            def fake_render_pdf_pages(src: Path, output_dir: Path, dpi: int) -> list[preprocess.NormalizedPageImage]:
+            def fake_render_pdf_pages(
+                src: Path, output_dir: Path, dpi: int, write_files: bool = True
+            ) -> list[preprocess.NormalizedPageImage]:
                 return [self._rendered_pdf_page(src, output_dir, size=(120, 160))]
 
             with mock.patch.object(preprocess, "render_pdf_pages", side_effect=fake_render_pdf_pages) as render_mock:
