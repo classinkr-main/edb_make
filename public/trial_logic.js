@@ -169,6 +169,12 @@
     return { headline, seconds, questionCount, passageCount };
   }
 
+  function highestNumber(payload) {
+    const problems = Array.isArray(payload.problems) ? payload.problems : [];
+    const numbers = problems.map(problem => Number(problem && problem.number)).filter(n => Number.isFinite(n) && n > 0);
+    return numbers.length ? Math.max(...numbers) : null;
+  }
+
   function pagesBanner(payload) {
     const source = Number(payload.source_page_count) || 0;
     const processed = Number(payload.processed_page_count) || 0;
@@ -177,11 +183,26 @@
       return null;
     }
     const rest = source - processed;
+    const highest = highestNumber(payload);
+    const found = highest === null ? "" : ` · ${highest}번까지 찾았어요`;
     return {
-      text: `✦ 무료 체험은 앞 ${max}쪽까지예요 · 나머지 ${rest}쪽은 프리미엄으로`,
+      text: `✦ 무료 체험은 앞 ${max}쪽까지예요${found} · 나머지 ${rest}쪽은 프리미엄으로`,
       feature: "limit_pages",
       context: { max, rest },
     };
+  }
+
+  // "13번은 5쪽부터예요": the passage's remaining questions sit past the page cap.
+  function continuationNote(problem) {
+    const info = problem && problem.continuation;
+    if (!info || !Array.isArray(info.numbers) || info.numbers.length === 0) {
+      return null;
+    }
+    const page = Number(info.page);
+    if (!Number.isFinite(page) || page <= 0) {
+      return null;
+    }
+    return `${info.numbers.join("·")}번은 ${page}쪽부터예요`;
   }
 
   function problemLabel(problem) {
@@ -224,6 +245,7 @@
   return {
     FEATURES,
     cardImageSource,
+    continuationNote,
     hasBoardPreviews,
     interpretError,
     isSafeImageSource,

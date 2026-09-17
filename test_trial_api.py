@@ -52,6 +52,16 @@ def _result_with_boards(problem_count: int = 2) -> ParseResult:
     return result
 
 
+def _result_with_cut_passage() -> ParseResult:
+    result = _result(problem_count=3)
+    result.problems[:] = [
+        replace(result.problems[0], problem_id="q10", number=10, title="10."),
+        replace(result.problems[1], problem_id="q11", number=11, title="11."),
+        replace(result.problems[2], problem_id="pass", number=None, title="지문 10~13"),
+    ]
+    return result
+
+
 class FakeParser:
     def __init__(self, result=None, error=None, gate=None, delay=0.0):
         self.result = result or _result()
@@ -221,6 +231,8 @@ class TestParseSuccess(TrialApiCase):
         self.assertIsNone(event["reject_code"])
         self.assertEqual(len(PDF_BODY), event["bytes"])
         self.assertEqual((0, 0), (event["timing"]["preview_step"], event["timing"]["board"]))
+        self.assertEqual(0, event["timing"]["continued"])
+        self.assertTrue(all(problem["continuation"] is None for problem in body["problems"]))
 
     def test_board_previews_are_returned_and_counted_in_the_event(self):
         client = self.make_client(parser=FakeParser(result=_result_with_boards()))
@@ -230,6 +242,13 @@ class TestParseSuccess(TrialApiCase):
             self.assertTrue(problem["board"].startswith("data:image/"))
         self.assertEqual(1, self.store.events[-1]["timing"]["board"])
         self.assertEqual(0, self.store.events[-1]["timing"]["preview_step"])
+
+    def test_cut_passage_is_marked_and_counted(self):
+        client = self.make_client(parser=FakeParser(result=_result_with_cut_passage()))
+        body = self.post_pdf(client).json()
+        by_id = {problem["problem_id"]: problem["continuation"] for problem in body["problems"]}
+        self.assertEqual({"q10": None, "q11": None, "pass": {"numbers": [12, 13], "page": 2}}, by_id)
+        self.assertEqual(1, self.store.events[-1]["timing"]["continued"])
 
     def test_board_previews_can_be_switched_off(self):
         config = TrialConfig(ip_salt="salt", cron_secret="cron-secret", board_previews=False)

@@ -133,7 +133,7 @@ class TestTrialWebLogic(unittest.TestCase):
             assert.equal(logic.summarize({ ...payload, problems: [{ number: 5 }] }).headline, '문항 1개를 찾았어요');
             assert.equal(logic.summarize({ ...payload, problems: [] }).headline, '문항을 찾지 못했어요');
             assert.deepEqual(logic.pagesBanner(payload), {
-              text: '✦ 무료 체험은 앞 3쪽까지예요 · 나머지 13쪽은 프리미엄으로',
+              text: '✦ 무료 체험은 앞 3쪽까지예요 · 2번까지 찾았어요 · 나머지 13쪽은 프리미엄으로',
               feature: 'limit_pages',
               context: { max: 3, rest: 13 },
             });
@@ -146,6 +146,25 @@ class TestTrialWebLogic(unittest.TestCase):
             assert.equal(logic.isSafeImageSource('data:image/jpeg;base64,AAAA'), true);
             assert.equal(logic.isSafeImageSource('javascript:alert(1)'), false);
             assert.equal(logic.isSafeImageSource('https://evil.example/x.jpg'), false);
+            """
+        )
+
+    def test_continuation_note_and_banner_count(self) -> None:
+        run_node(
+            """
+            const logic = require('./public/trial_logic.js');
+            assert.equal(logic.continuationNote({ continuation: { numbers: [13], page: 5 } }), '13번은 5쪽부터예요');
+            assert.equal(logic.continuationNote({ continuation: { numbers: [12, 13], page: 5 } }), '12·13번은 5쪽부터예요');
+            assert.equal(logic.continuationNote({ continuation: null }), null);
+            assert.equal(logic.continuationNote({ continuation: { numbers: [], page: 5 } }), null);
+            assert.equal(logic.continuationNote(null), null);
+            const cut = { source_page_count: 16, processed_page_count: 4, processed_page_limit: 4,
+                          problems: [{ number: 10 }, { number: null }, { number: 12 }] };
+            assert.equal(logic.pagesBanner(cut).text, '✦ 무료 체험은 앞 4쪽까지예요 · 12번까지 찾았어요 · 나머지 12쪽은 프리미엄으로');
+            assert.deepEqual(logic.pagesBanner(cut).context, { max: 4, rest: 12 });
+            const noNumbers = { source_page_count: 16, processed_page_count: 4, processed_page_limit: 4, problems: [{ number: null }] };
+            assert.equal(logic.pagesBanner(noNumbers).text, '✦ 무료 체험은 앞 4쪽까지예요 · 나머지 12쪽은 프리미엄으로');
+            assert.equal(logic.pagesBanner({ source_page_count: 4, processed_page_count: 4, problems: [{ number: 20 }] }), null);
             """
         )
 
@@ -196,6 +215,9 @@ class TestTrialPageMarkup(unittest.TestCase):
         css = (PROJECT_ROOT / "public/style.css").read_text(encoding="utf-8")
         self.assertIn(".problem-card--board img", css)
         self.assertIn('.preview-toggle button[aria-pressed="true"]', css)
+        self.assertIn("logic.continuationNote(", script)
+        self.assertIn('"continue-chip"', script)
+        self.assertIn(".continue-chip", css)
 
 
 if __name__ == "__main__":
