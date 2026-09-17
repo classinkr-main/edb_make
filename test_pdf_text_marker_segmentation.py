@@ -712,7 +712,13 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         안내문 carries a "How It Works" list numbered 1.-4. that restarts below
         question 28 and is indented from the column's question markers. The
         list steps belong to question 28, so no extra problem may appear and
-        question 28's block must still reach past the last list line.
+        question 28's block must still reach past the last list line. As on
+        the real page, question 28's own ①-⑤ answer choices resume right
+        after the list -- that is the third signal
+        (``_indented_nested_enumeration_marker_ids``) that tells the parser
+        the list belongs to the question above it rather than being an
+        independent restarted section (see the "flush restarted section"
+        tests below).
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "boxed_notice_list.pdf"
@@ -727,6 +733,25 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
             page.insert_text((354, 510), "2. Check out what you need in the app.", fontsize=11)
             page.insert_text((354, 550), "3. Pick up your item from Monday to Sunday.", fontsize=11)
             page.insert_text((354, 590), "4. Return it in good condition.", fontsize=11)
+            # PyMuPDF's default "helv" font has no glyph for the circled
+            # digits and silently substitutes "." for them, so the choice
+            # lines are inserted with a font that actually carries them --
+            # otherwise _text_contains_choice_marker would never see one.
+            page.insert_text(
+                (330, 630), "① Log-in is optional before borrowing.", fontsize=11, fontname="korea"
+            )
+            page.insert_text(
+                (330, 660), "② Reservation is only possible on site.", fontsize=11, fontname="korea"
+            )
+            page.insert_text(
+                (330, 690), "③ Items can only be picked up on weekdays.", fontsize=11, fontname="korea"
+            )
+            page.insert_text(
+                (330, 720), "④ The rental period cannot be extended.", fontsize=11, fontname="korea"
+            )
+            page.insert_text(
+                (330, 750), "⑤ The late fee is two dollars a day.", fontsize=11, fontname="korea"
+            )
             doc.save(pdf_path)
             doc.close()
 
@@ -771,9 +796,16 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
     def test_pdf_problem_markers_keep_a_flush_restarted_section(self):
         """Repeated numbers alone must not drop a marker.
 
-        Workbook pages restart numbering per section, and a restarted question
-        is printed flush with the column's other question markers. Only a
-        marker that is both indented and out of sequence is list content.
+        No case in the 13-case trial bench actually restarts its numbering
+        -- every marker column in the corpus runs strictly ascending -- so
+        whether a real restarted section prints flush with its column (and
+        would therefore survive on indentation alone) is unverified, not a
+        validated corpus pattern. This manufactured page only pins that a
+        restart's numbers being out of sequence is not, by itself, enough to
+        drop a marker: with the run printed flush (no indentation) the first
+        signal never applies, so the second signal is never even reached.
+        The next test below pins the case this one cannot: a restart that is
+        shifted just enough to look indented.
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "restarted_section.pdf"
@@ -803,6 +835,222 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
 
             self.assertEqual(
                 [5, 6, 1, 2, 3],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
+    def test_pdf_problem_markers_keep_an_inset_restarted_section_without_host_choices(self):
+        """A restarted section without a trailing host choice list survives.
+
+        Same page as ``test_pdf_problem_markers_keep_a_flush_restarted_section``,
+        except the restarted section is shifted 7 pt to the right (about
+        2.5 mm) instead of printed flush -- a boxed or inset restarted
+        section, which the corpus does not contain an example of either way
+        (see that test's docstring). Before the choice-marker signal this
+        shift alone tripped the indentation threshold and, combined with the
+        restart's out-of-sequence numbers, silently deleted questions 1 and
+        2 into question 6's crop. There is no host answer-choice line
+        printed after questions 1/2 here (they are the last things in their
+        column), so the choice-marker signal must keep them.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "restarted_section_inset.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=600, height=800)
+            page.insert_text((48, 100), "5. fifth question of the first section", fontsize=14)
+            page.insert_text((48, 300), "6. sixth question of the first section", fontsize=14)
+            page.insert_text((55, 500), "1. first question of the second section", fontsize=14)
+            page.insert_text((55, 700), "2. second question of the second section", fontsize=14)
+            page.insert_text((330, 100), "3. third question of the second section", fontsize=14)
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=144,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [5, 6, 1, 2, 3],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
+    def test_pdf_problem_markers_keep_an_ascending_indented_run(self):
+        """An indented but ascending run is not list content.
+
+        Pins the ascending-sequence signal in isolation: markers 12 and 13
+        are indented past 9-11 (same as an inset list would be) and a host
+        choice line follows them (same as a genuine embedded list would
+        have), so only the "does not continue the ascending run" signal
+        keeps them from being dropped. Without it (e.g. if the ``number <=
+        highest_number`` check were removed) every other guard in this test
+        is satisfied and 12/13 would be swallowed.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "ascending_indented_run.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            for number, x, y in ((9, 60, 80), (10, 60, 160), (11, 60, 240)):
+                page.insert_textbox(
+                    fitz.Rect(x, y, 545, y + 50),
+                    f"{number}. problem stem for question {number}",
+                    fontsize=12,
+                )
+            for number, x, y in ((12, 100, 340), (13, 100, 420)):
+                page.insert_textbox(
+                    fitz.Rect(x, y, 545, y + 50),
+                    f"{number}. problem stem for question {number}",
+                    fontsize=12,
+                )
+            page.insert_text(
+                (60, 500), "① a   ② b   ③ c   ④ d   ⑤ e", fontsize=11, fontname="korea"
+            )
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=200,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [9, 10, 11, 12, 13],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
+    def test_pdf_problem_markers_keep_a_narrow_indent_below_the_px_floor(self):
+        """A sub-character indent must not reach ``PDF_NESTED_MARKER_MIN_INDENT_PX``.
+
+        On this page the page-width ratio alone (~0.7%) would never trip the
+        threshold, so only the fixed pixel floor is in play. The restarted
+        section is shifted about one character width (7.2 pt) -- less than
+        the 12 px floor -- and a host choice line follows it, so if the
+        floor were not enforced (e.g. dropped to 0) this indent alone, with
+        the run's out-of-sequence numbers, would be enough to drop it.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "narrow_indent_px_floor.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=504, height=700)
+            stem = "{0}. This line of stem text runs most of the way across the page width for the crop"
+            y = 80
+            for number in (9, 10, 11):
+                page.insert_textbox(
+                    fitz.Rect(60, y, 484, y + 40), stem.format(number), fontsize=11
+                )
+                y += 90
+            for number in (1, 2):
+                page.insert_textbox(
+                    fitz.Rect(67.2, y, 484, y + 40), stem.format(number), fontsize=11
+                )
+                y += 90
+            page.insert_text((60, y + 20), "① a   ② b   ③ c", fontsize=11, fontname="korea")
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=100,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [9, 10, 11, 1, 2],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
+    def test_pdf_problem_markers_keep_a_narrow_indent_below_the_ratio_floor(self):
+        """A sub-character indent must not reach ``PDF_NESTED_MARKER_MIN_INDENT_RATIO``.
+
+        This page is wide enough (raster width ~1533 px) that the page-width
+        ratio (1.2%, ~18 px) governs instead of the fixed 12 px floor. The
+        restarted section is shifted about one character width (5.5 pt,
+        ~15 px at this DPI) -- above the 12 px floor but below the ratio's
+        18 px -- and a host choice line follows it, so this test would only
+        fail if the ratio term were weakened (e.g. dropped to 0, leaving
+        just the 12 px floor, which this indent clears).
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "narrow_indent_ratio_floor.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=850, height=1100)
+            stem = "{0}. This line of stem text runs most of the way across the page width for the crop boundary test case here today"
+            y = 80
+            for number in (9, 10, 11):
+                page.insert_textbox(
+                    fitz.Rect(60, y, 830, y + 40), stem.format(number), fontsize=11
+                )
+                y += 90
+            for number in (1, 2):
+                page.insert_textbox(
+                    fitz.Rect(65.5, y, 830, y + 40), stem.format(number), fontsize=11
+                )
+                y += 90
+            page.insert_text((60, y + 20), "① a   ② b   ③ c", fontsize=11, fontname="korea")
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=200,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [9, 10, 11, 1, 2],
                 [
                     problem.metadata.get("problem_number")
                     for problem in page_model.problems

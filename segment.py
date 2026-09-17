@@ -75,10 +75,18 @@ PDF_TEXT_MARKER_MIN_HWP_LAYOUT_HEIGHT_RATIO = 0.001
 # the 13-case trial bench (90 marker columns): every real question marker is
 # flush with the other markers of its column to within 1.2 px, 0.06% of the
 # page width, while the "How It Works" list inside the 안내문 box of the
-# 2026 3월 고2 영어 paper's question 28 is indented 51.5 px, 2.75%. The
-# threshold sits between the two, and above the 0.80% that one character of
-# that paper's question numbers occupies, so a paper that right-aligns its
-# question numbers ("9." under "10.") cannot trip it either.
+# 2026 3월 고2 영어 paper's question 28 is indented 51.5 px, 2.75% -- on that
+# paper's own deskewed, margin-cropped raster width, not the original PDF
+# page. The threshold sits between those two measurements, but that is a
+# calibration against this one paper's two-column geometry, not a general
+# guarantee: on a dense single-column page one character can be a larger
+# fraction of the (narrower, uncropped-by-columns) page width than it is
+# here, so a paper that right-aligns its question numbers ("9." under
+# "10.") is not guaranteed to stay under this ratio. Nothing in the 13-case
+# corpus exercises that geometry, so this constant is not validated outside
+# it; see ``_indented_nested_enumeration_marker_ids`` for the additional
+# choice-marker signal that keeps a wrongly-indented real question from
+# being dropped even if this threshold is crossed.
 PDF_NESTED_MARKER_MIN_INDENT_PX = 12.0
 PDF_NESTED_MARKER_MIN_INDENT_RATIO = 0.012
 PDF_CHOICE_MARKERS = ("①", "②", "③", "④", "⑤")
@@ -2198,6 +2206,7 @@ def _indented_nested_enumeration_marker_ids(
     page_width: int,
     *,
     skip_marker_ids: set[int] | None = None,
+    text_lines: list[dict[str, Any]] | None = None,
 ) -> set[int]:
     """Markers that are an indented list inside the question above them.
 
@@ -2206,19 +2215,41 @@ def _indented_nested_enumeration_marker_ids(
     become extra top-level problems and cut the question that contains them
     short at the first step.
 
-    Two independent signals must agree before a marker is dropped, because
-    neither is safe alone:
+    Three independent signals must all agree before a run of markers is
+    dropped, because none is safe alone:
 
-    * the marker is indented past every question marker accepted above it in
-      the same column -- a real question is printed flush with its column's
-      other questions, a list step is inset inside the question body;
-    * the marker does not continue that column's ascending run -- a list
-      restarts at 1 below a much higher question number.
+    * every marker in the run is indented past the question marker accepted
+      above it in the same column -- a real question is printed flush with
+      its column's other questions, a list step is inset inside the
+      question body;
+    * the run does not continue that column's ascending sequence -- a list
+      restarts at 1 below a much higher question number;
+    * a line containing one of ``PDF_CHOICE_MARKERS`` (circled digits) falls
+      between the run's last marker and the next accepted question marker in
+      the column, or the column bottom if none follows. That line is the
+      *host* question's own answer choices resuming after its embedded
+      list; a section that is genuinely a fresh run of independent
+      questions has no such line waiting there instead of a question of its
+      own.
 
-    A workbook section that restarts its numbering satisfies the second but
-    not the first (it stays flush), so repeated numbers on their own never
-    lose a question. A list that opens a column, before any question marker
-    establishes the column's left edge, is left alone for the same reason.
+    Only the first two signals used to gate a drop, before this function grew
+    the third. No case in the trial bench actually restarts its numbering --
+    every marker column in the
+    13-case corpus is strictly ascending except the one boxed-list column
+    this function exists for -- so whether a restarted section prints flush
+    with its column (and therefore survives the first signal) is untested,
+    not verified; nothing in the corpus exercises it. Requiring the choice
+    line closes that gap: shifting an indented-but-real restarted section by
+    only a few points, or printing it inset instead of flush, used to make
+    the first two signals agree and silently swallow it, because neither
+    signal looks past the run itself. The third signal does, and a
+    restarted section's own trailing content is not the enclosing
+    question's leftover answer choices.
+
+    A list that opens a column, before any question marker establishes the
+    column's left edge, is left alone for the same reason the first two
+    signals leave it alone: there is no accepted marker yet to be indented
+    relative to.
 
     ``skip_marker_ids`` are markers the caller has already discarded (the
     clipped HWP layout numbers of ``_is_tiny_hwp_layout_marker``). Their
@@ -2226,11 +2257,12 @@ def _indented_nested_enumeration_marker_ids(
     """
     nested: set[int] = set()
     skipped = skip_marker_ids or set()
+    lines = text_lines if isinstance(text_lines, list) else []
     min_indent = max(
         PDF_NESTED_MARKER_MIN_INDENT_PX,
         float(page_width) * PDF_NESTED_MARKER_MIN_INDENT_RATIO,
     )
-    for _column_index, column_markers, _bounds in column_entries:
+    for _column_index, column_markers, (column_left, column_right) in column_entries:
         numbered = [
             marker
             for marker in column_markers
@@ -2240,6 +2272,24 @@ def _indented_nested_enumeration_marker_ids(
         ]
         question_left: float | None = None
         highest_number = 0
+        candidate_run: list[dict[str, Any]] = []
+
+        def _resolve_candidate_run(next_marker_box: Box | None) -> None:
+            if not candidate_run:
+                return
+            region_top = _marker_bbox(candidate_run[-1]).bottom
+            region_bottom = next_marker_box.top if next_marker_box is not None else float("inf")
+            region_lines = _pdf_text_lines_in_region(
+                lines,
+                left=column_left,
+                right=column_right,
+                top=region_top,
+                bottom=region_bottom,
+            )
+            if any(_text_contains_choice_marker(line.get("text")) for _box, line in region_lines):
+                nested.update(id(marker) for marker in candidate_run)
+            candidate_run.clear()
+
         for marker in sorted(numbered, key=lambda item: _marker_bbox(item).top):
             marker_box = _marker_bbox(marker)
             number = int(marker["number"])
@@ -2248,12 +2298,14 @@ def _indented_nested_enumeration_marker_ids(
                 and marker_box.left - question_left >= min_indent
                 and number <= highest_number
             ):
-                nested.add(id(marker))
+                candidate_run.append(marker)
                 continue
+            _resolve_candidate_run(marker_box)
             question_left = (
                 marker_box.left if question_left is None else min(question_left, marker_box.left)
             )
             highest_number = max(highest_number, number)
+        _resolve_candidate_run(None)
     return nested
 
 
@@ -2343,14 +2395,15 @@ def _segment_pdf_problem_markers(
     # The rule above only sees a list that the exam sequence resumes after.
     # A list printed inside the last question on a page has nothing after it,
     # so it is caught by its indentation instead.
+    usable_text_lines = text_lines if isinstance(text_lines, list) else []
     nested_enumeration_marker_ids |= _indented_nested_enumeration_marker_ids(
         column_entries,
         image.width,
         skip_marker_ids=ignored_tiny_marker_ids,
+        text_lines=usable_text_lines,
     )
 
     page_area = _page_area_px(image.width, image.height)
-    usable_text_lines = text_lines if isinstance(text_lines, list) else []
     blocks: list[ContentBlock] = []
     choice_bottom_trim_count = 0
     content_bottom_trim_count = 0
