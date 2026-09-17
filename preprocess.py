@@ -3972,6 +3972,7 @@ def prepare_pages(
                 enable_margin_crop=enable_margin_crop,
                 max_dimension=max_dimension,
                 base_metadata=dict(page.metadata),
+                image=page.rendered_image,
             )
             normalized.metadata.setdefault("source_pdf_path", str(converted_pdf))
             normalized.metadata["source_type"] = "hwp"

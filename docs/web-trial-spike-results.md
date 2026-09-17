@@ -183,7 +183,7 @@
 
 - 적용: `9b940a2` — 체험판은 페이지 PNG를 쓰지 않고 픽스맵을 메모리로 넘긴다(`preprocess.render_pdf_pages(write_files=False)`). 데스크톱 기본값은 그대로다.
 - 배포: `web-trial-bench` @ `3401f47`(트리는 `9b940a2`와 동일). 같은 프리뷰 별칭에 `--repeat 4`
-- 동일성: 코퍼스 13개에서 문항 번호·제목·박스·위험 플래그·crop 이미지 해시가 적용 전후 완전히 같다(`test_problem_parser.py::TestPageFilesStayOutOfTheTrialPath`)
+- 동일성: 두 가지로 확인했다. ① 커밋된 회귀 테스트 `test_problem_parser.py::TestPageFilesStayOutOfTheTrialPath`는 **합성 3쪽 PDF**로 두 경로의 문항·박스·crop 바이트가 같고 파일이 실제로 쓰이지 않음을 고정한다(코퍼스는 다루지 않는다). ② 코퍼스 13개 비교는 적용 시점에 한 번 돌린 임시 스크립트로, 파일 저장을 켠 경우와 끈 경우의 문항 번호·제목·박스·위험 플래그·crop 이미지 해시가 13/13 모두 같았다. 이 코퍼스 비교는 커밋된 테스트가 아니므로 회귀가 자동으로 잡히지는 않는다.
 
 | 시험지 | 이전 웜 p50 | 이후 웜 p50 | 변화 | render 이전 → 이후 |
 |---|---|---|---|---|
