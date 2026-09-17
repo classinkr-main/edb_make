@@ -190,6 +190,7 @@ def create_app(
             # whether the board previews survived it (ops doc §4-5).
             timing["preview_step"] = payload["preview_step"]
             timing["board"] = 1 if payload["board_previews"] else 0
+            timing["continued"] = sum(1 for problem in payload["problems"] if problem["continuation"])
             # encode is measured after the body exists, so the response cannot include it; the event does.
             timing["encode"] = _ms(encode_started_at)
             timing["parse_total"] = _ms(parse_started_at)
