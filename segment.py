@@ -1284,7 +1284,13 @@ def _trim_pdf_problem_bottom_to_last_choice(
     line_heights = [line_box.height for line_box, _line in region_lines if line_box.height > 0]
     median_line_height = sorted(line_heights)[len(line_heights) // 2] if line_heights else 18.0
     continuation_gap = max(18.0, min(72.0, max(median_line_height * 2.2, float(image.height) * 0.018)))
-    for next_line_box, _next_line in region_lines[last_choice_index + 1 :]:
+    for next_line_box, next_line in region_lines[last_choice_index + 1 :]:
+        # A shared-passage range header belongs to the questions below it, never
+        # to the choice list above it, however tightly the page sets the two.
+        # Without this a listening header printed one line under question 15's
+        # last choice was pulled into question 15's crop.
+        if _extract_pdf_passage_range(next_line.get("text")) is not None:
+            break
         gap = next_line_box.top - last_choice_bottom
         if gap > continuation_gap:
             break
@@ -2081,7 +2087,23 @@ def _build_pdf_passage_range_blocks(
                         min(fragment_footer_tops) - max(12.0, float(image.height) * 0.006),
                     )
 
-            if fragment_bottom - fragment_top < max(40.0, float(image.height) * 0.02):
+            # The page-relative minimum rejects a fragment too short to hold any
+            # passage body -- typically the continuation fragment at the top of
+            # the next column when nothing of the passage flows there. It must
+            # not reject the fragment that carries the header line itself: a
+            # bracketed range header is recorded as a passage whether or not the
+            # material it governs is printed on the page (a listening script is
+            # not), and then the header line is all there is to crop. Left to
+            # the minimum, an English listening header one line above its first
+            # question was dropped or kept purely by the leading between the
+            # two -- see docs/web-trial-quality.md.
+            carries_header_line = (
+                fragment_column_index == column_index
+                and fragment_top <= (header_box.top + header_box.bottom) / 2.0 <= fragment_bottom
+            )
+            if not carries_header_line and fragment_bottom - fragment_top < max(
+                40.0, float(image.height) * 0.02
+            ):
                 if stopped_at_problem:
                     break
                 continue

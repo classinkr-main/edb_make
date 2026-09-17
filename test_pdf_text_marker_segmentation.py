@@ -1957,6 +1957,159 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         self.assertEqual([2, 2], [block.metadata.get("column_index") for block in segmented.blocks])
         self.assertGreaterEqual(min(block.bbox.left for block in segmented.blocks), 300.0)
 
+    def test_pdf_bodyless_passage_range_header_still_starts_a_passage(self):
+        """A bracketed range header is a passage of its own, body or not.
+
+        docs/web-trial-quality.md records the project convention: a bracketed
+        range header is recorded as a passage unit whether or not the material
+        it governs is printed on the page (a listening script is not). The
+        geometry here is the one from ``english_2020suneung_go3_20191107``
+        page 2 of the trial bench, scaled to a 600x1000 page: the header sits
+        just under question 15's last choice line and just above question 16's
+        marker. At that spacing the header's own fragment is shorter than 2% of
+        the page height and the header line is inside the choice list's
+        continuation gap, so the header used to produce no passage block at all
+        and to be cropped into question 15 instead -- while the sister paper
+        ``english_go2_hakpyeong_20260324``, whose header is a few pixels
+        further from its question 16, produced the passage correctly.
+
+        The ink is drawn in latin script because PIL's default font carries no
+        Hangul glyphs; the text layer shape the detector keys on (a bracketed
+        range plus a shared-material cue) is the same in both languages.
+        """
+        image = Image.new("RGB", (600, 1000), "white")
+        draw = ImageDraw.Draw(image)
+        choice_line = "    ".join(PDF_CHOICE_MARKERS)
+        header_text = "[16 ~ 17] Listen to the following and answer the questions."
+        draw.text((60, 600), "15. previous question stem", fill=(20, 20, 20))
+        draw.text((72, 700), choice_line, fill=(20, 20, 20))
+        draw.text((60, 750), header_text, fill=(20, 20, 20))
+        draw.text((60, 790), "16. main topic question", fill=(20, 20, 20))
+        draw.text((60, 880), "17. not mentioned question", fill=(20, 20, 20))
+
+        class Source:
+            def __init__(self, source_image):
+                self.image = source_image
+                self.metadata = {
+                    "source_type": "pdf",
+                    "pdf_problem_markers": [
+                        {
+                            "number": 15,
+                            "text": "15. previous question stem",
+                            "bbox": {"left": 60, "top": 600, "right": 260, "bottom": 618},
+                        },
+                        {
+                            "number": 16,
+                            "text": "16. main topic question",
+                            "bbox": {"left": 60, "top": 790, "right": 250, "bottom": 808},
+                        },
+                        {
+                            "number": 17,
+                            "text": "17. not mentioned question",
+                            "bbox": {"left": 60, "top": 880, "right": 270, "bottom": 898},
+                        },
+                    ],
+                    "pdf_text_lines": [
+                        {
+                            "text": "15. previous question stem",
+                            "bbox": {"left": 60, "top": 600, "right": 260, "bottom": 618},
+                        },
+                        {
+                            "text": choice_line,
+                            "bbox": {"left": 72, "top": 700, "right": 360, "bottom": 718},
+                        },
+                        {
+                            "text": header_text,
+                            "bbox": {"left": 60, "top": 750, "right": 420, "bottom": 768},
+                        },
+                        {
+                            "text": "16. main topic question",
+                            "bbox": {"left": 60, "top": 790, "right": 250, "bottom": 808},
+                        },
+                        {
+                            "text": "17. not mentioned question",
+                            "bbox": {"left": 60, "top": 880, "right": 270, "bottom": 898},
+                        },
+                    ],
+                }
+                self.source_path = "synthetic-bodyless-passage-header.pdf"
+
+        segmented = segment_page(
+            Source(image),
+            page_id="bodyless-passage-header-page",
+            subject=Subject.ENGLISH,
+        )
+
+        self.assertEqual("pdf-text-markers", segmented.metadata.get("segmenter"))
+        self.assertEqual(1, segmented.metadata.get("pdf_passage_range_block_count"))
+        passage_blocks = [
+            block
+            for block in segmented.blocks
+            if block.metadata.get("segmenter") == "pdf-passage-range"
+        ]
+        self.assertEqual(1, len(passage_blocks))
+        passage_block = passage_blocks[0]
+        self.assertEqual({"start": 16, "end": 17}, passage_block.metadata.get("passage_range"))
+        self.assertEqual([16, 17], passage_block.metadata.get("passage_child_marker_numbers"))
+        # The crop must carry the whole header line, top and bottom.
+        self.assertLessEqual(passage_block.bbox.top, 750.0)
+        self.assertGreaterEqual(passage_block.bbox.bottom, 768.0)
+
+        by_number = {
+            block.metadata.get("problem_number"): block
+            for block in segmented.blocks
+            if block.metadata.get("problem_number") is not None
+        }
+        self.assertEqual({15, 16, 17}, set(by_number))
+        # Question 15 stops above the header instead of swallowing it: the
+        # header is not a continuation of question 15's choice list.
+        self.assertLessEqual(by_number[15].bbox.bottom, 750.0)
+        self.assertTrue(by_number[15].metadata.get("choice_bottom_trimmed"))
+        self.assertGreaterEqual(by_number[16].bbox.top, 768.0)
+
+    def test_short_passage_continuation_fragment_is_still_dropped(self):
+        """The header keeps its own short fragment; a body sliver stays dropped.
+
+        The page-relative minimum height is what stops a passage from growing a
+        fragment with no body in it -- here the next column carries one line of
+        its own above its first question. Only the fragment that holds the
+        header line itself is exempt from that minimum, so the header column
+        yields a block and the next column does not.
+        """
+        image = Image.new("RGB", (600, 800), "white")
+        text_lines = [
+            {
+                "text": "[1~2] 다음 글을 읽고 물음에 답하시오.",
+                "bbox": {"left": 40, "top": 600, "right": 280, "bottom": 626},
+            },
+            {
+                "text": "직전 문항의 남은 한 줄",
+                "bbox": {"left": 330, "top": 110, "right": 520, "bottom": 136},
+            },
+        ]
+        right_markers = [
+            {"number": 1, "bbox": {"left": 330, "top": 150, "right": 350, "bottom": 176}},
+            {"number": 2, "bbox": {"left": 330, "top": 420, "right": 350, "bottom": 446}},
+        ]
+
+        blocks = _build_pdf_passage_range_blocks(
+            image,
+            "page-1",
+            text_lines,
+            [(1, [], (40.0, 285.0)), (2, right_markers, (315.0, 560.0))],
+            page_area=float(image.width * image.height),
+            start_index=1,
+        )
+
+        self.assertEqual(
+            ["passage_range"],
+            [block.metadata.get("marker_kind") for block in blocks],
+        )
+        self.assertEqual(1, blocks[0].metadata.get("passage_fragment_count"))
+        self.assertLessEqual(blocks[0].bbox.top, 600.0)
+        self.assertGreaterEqual(blocks[0].bbox.bottom, 626.0)
+        self.assertEqual(1, blocks[0].metadata.get("column_index"))
+
 
 if __name__ == "__main__":
     unittest.main()
