@@ -1060,6 +1060,15 @@ def _obs(case: str, problems: list[tuple], total_ms: int = 100) -> dict:
 
 
 class TestScore(unittest.TestCase):
+    def test_score_module_never_claims_human_verification(self):
+        """The bench's ground_truth is a Claude agent's independent read of the trimmed input
+        (see each label's own source/note fields) -- never a person's sign-off. score.py's
+        docstrings and generated report footnote used to say "human-verified"; nothing in this
+        module may say that again (see docs/web-trial-quality.md's 라벨 형식 section, and the new
+        verified_by field, for the accurate wording)."""
+        source = Path(score.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("human-verified", source)
+
     def test_bbox_iou(self):
         box = {"left": 0.0, "top": 0.0, "width": 10.0, "height": 10.0}
         self.assertEqual(1.0, bbox_iou(box, box))
@@ -1177,7 +1186,7 @@ class TestScore(unittest.TestCase):
         self.assertIn("t:보기 중 옳은 것은?", warnings[0])
 
     def test_expected_from_ground_truth_overrides_the_oracle(self):
-        """A human-verified ground_truth object -- not the oracle -- decides the expected key set."""
+        """An independently read ground_truth object -- not the oracle -- decides the expected key set."""
         # q1's trial box (width 10) deliberately differs from its oracle box
         # (width 20) below: an identical fixture on both sides cannot tell a
         # correct "expected always carries the oracle's box" implementation
@@ -1268,6 +1277,52 @@ class TestScore(unittest.TestCase):
         self.assertEqual(1.0, score["question_precision"])
         self.assertEqual(0, score["low_iou"])
         self.assertEqual(1.0, score["mean_iou"])  # only q1 (a real oracle box) contributes
+
+    def test_expected_from_ground_truth_verified_by_defaults_to_model(self):
+        """Every label on disk today omits ``verified_by`` -- its ground_truth was read by a Claude
+        agent (see the label's own ``source``/``note`` fields), never signed off by a person -- so
+        the schema must default to "model", not silently imply a human when the field is absent."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        labels = {"case": "c", "status": "approved", "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "source": "visual page read, Claude", "note": ""}}
+        meta: dict = {}
+        expected, status = expected_from(oracle, trial, labels, meta=meta)
+        self.assertEqual("truth", status)
+        self.assertEqual("model", meta["verified_by"])
+
+    def test_expected_from_ground_truth_verified_by_human_is_surfaced(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        labels = {
+            "case": "c", "status": "approved",
+            "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "source": "reviewer sign-off", "note": "", "verified_by": "human"},
+        }
+        meta: dict = {}
+        expected, status = expected_from(oracle, trial, labels, meta=meta)
+        self.assertEqual("truth", status)
+        self.assertEqual("human", meta["verified_by"])
+
+    def test_expected_from_ground_truth_rejects_an_unknown_verified_by(self):
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        labels = {
+            "case": "c", "status": "approved",
+            "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "verified_by": "vibes"},
+        }
+        with self.assertRaises(ValueError) as ctx:
+            expected_from(oracle, trial, labels)
+        self.assertIn("verified_by", str(ctx.exception))
+        self.assertIn("'c'", str(ctx.exception))
+
+    def test_expected_from_meta_is_optional_and_ignored_when_omitted(self):
+        """meta is an add-on for score_all -- every pre-existing call site in this file omits it and
+        must keep working exactly as before (no meta, no crash, same 2-tuple return)."""
+        trial = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        oracle = _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])])
+        labels = {"case": "c", "status": "approved", "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "source": "human", "note": ""}}
+        expected, status = expected_from(oracle, trial, labels)
+        self.assertEqual("truth", status)
+        self.assertEqual({"q1"}, set(expected))
 
     def test_expected_from_without_ground_truth_behaves_exactly_as_before(self):
         """A label file with no ground_truth key (or ground_truth: null) must take the pre-existing oracle/items path -- status "approved" or "pending", never "truth"."""
@@ -1394,7 +1449,7 @@ class TestScore(unittest.TestCase):
         self.assertIn("| 합계 | 0/2 truth-backed, 2/2 provisional (1 approved) | 0.75 | 1.00 | 1.00 | 1.00 | 0.75 | 2 | 0.25 | 1 | 0 |", report)
 
     def test_render_report_aggregate_counts_truth_backed_cases_separately_from_provisional(self):
-        # A "truth" row (human-verified ground_truth) must be counted apart
+        # A "truth" row (an independently read ground_truth) must be counted apart
         # from "approved"/"pending" rows (both still oracle-sourced, hence
         # provisional per this task's own framing) -- not folded into the
         # same "approved" fraction the pre-existing aggregate cell used.
@@ -1443,7 +1498,9 @@ class TestScore(unittest.TestCase):
         self.assertIn("q5 t:#1 t:#2", body)
         # Trailing "?" is the ai_evidence column's fallback for a row with no
         # such field, same as every other hand-built fixture in this class.
-        self.assertTrue(body.endswith("| 100 | 200 | ? |"), body)
+        # The final blank cell is verified_by: this row is "pending" (no
+        # ground_truth at all), so there is nothing to attribute.
+        self.assertTrue(body.endswith("| 100 | 200 | ? |  |"), body)
         self.assertEqual(header.count("|"), body.count("|"))
 
     def test_render_report_adds_an_ai_evidence_column_and_a_zero_evidence_footnote(self):
@@ -1460,6 +1517,33 @@ class TestScore(unittest.TestCase):
         # hand-written banner in docs/web-trial-quality.md, it cannot go
         # stale relative to the numbers next to it.
         self.assertIn("AI page repair produced no evidence of a real change for 1 of 2 case(s): `b`", report)
+
+    def test_render_report_adds_a_verified_by_column(self):
+        # A case whose ground_truth is model-read must not render identically
+        # to one a person actually signed off on -- see docs/web-trial-quality.md's
+        # 라벨 형식 section. Row "d" carries no ground_truth at all (a
+        # provisional oracle-scored row), so its cell must be blank, not a
+        # fabricated "model".
+        rows = [
+            {"case": "a", "status": "truth", "verified_by": "model", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
+            {"case": "b", "status": "truth", "verified_by": "human", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
+            {"case": "d", "status": "pending", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200},
+        ]
+        report = render_report(rows)
+        self.assertIn("verified_by", report.splitlines()[0])
+        lines = report.splitlines()
+        self.assertTrue(any(line.startswith("| a |") and line.rstrip().endswith("| model |") for line in lines), report)
+        self.assertTrue(any(line.startswith("| b |") and line.rstrip().endswith("| human |") for line in lines), report)
+        self.assertTrue(any(line.startswith("| d |") and line.rstrip().endswith("|  |") for line in lines), report)
+
+    def test_render_report_truth_footnote_says_independently_read_not_human_verified(self):
+        # scripts/trial_bench/score.py used to call this a "human-verified"
+        # list -- it is a Claude agent's independent read of the trimmed
+        # input, not a person's sign-off (see verified_by, above).
+        truth_row = {"case": "a", "status": "truth", "verified_by": "model", "question_recall": 1.0, "question_precision": 1.0, "passage_recall": None, "passage_precision": None, "mean_iou": 1.0, "low_iou": 0, "review_rate": 0.0, "missing": [], "extra": [], "trial_ms": 100, "oracle_ms": 200}
+        report = render_report([truth_row])
+        self.assertNotIn("human-verified", report)
+        self.assertIn("independently read", report)
 
     def test_render_report_marks_a_row_with_no_ai_evidence_field_as_unknown_not_zero(self):
         # A row with no ai_evidence field at all (every other render_report
@@ -1715,11 +1799,44 @@ class TestScoreAll(unittest.TestCase):
         self.assertEqual([], row["missing"])
         self.assertEqual(["q9"], row["extra"])
         self.assertAlmostEqual(0.5, row["mean_iou"])  # trial-vs-oracle q1 box, not trial-vs-itself
+        # The label above omits verified_by -- it must default to "model",
+        # matching every label file on disk today (none carries a human sign-off).
+        self.assertEqual("model", row["verified_by"])
 
         report = render_report(rows)
         self.assertIn("| c | truth |", report)
         self.assertIn("1/1 truth-backed", report)
         self.assertIn("truth-backed case(s)", report)  # the ground_truth-boxes-are-the-oracle's footnote
+
+    def test_score_all_surfaces_a_human_verified_by_from_the_label(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("oracle", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            common.save_json(
+                common.bench_dir("labels", root) / "c.json",
+                {
+                    "case": "c",
+                    "status": "approved",
+                    "ground_truth": {"pages": 3, "question_numbers": [1], "passage_ranges": [], "source": "reviewer sign-off", "note": "", "verified_by": "human"},
+                    "items": [],
+                },
+            )
+            rows = score_all([], root=root)
+        self.assertEqual("human", rows[0]["verified_by"])
+        report = render_report(rows)
+        self.assertTrue(any(line.startswith("| c |") and line.rstrip().endswith("| human |") for line in report.splitlines()), report)
+
+    def test_score_all_leaves_verified_by_blank_for_a_non_truth_row(self):
+        # No labels file at all -> status "pending", no ground_truth in play
+        # -- verified_by must be blank, never a fabricated "model".
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            common.save_json(common.bench_dir("trial", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=100))
+            common.save_json(common.bench_dir("oracle", root) / "c.json", _obs("c", [("q1", 1, "1번", [(0, 0, 0, 10, 10)])], total_ms=200))
+            rows = score_all([], root=root)
+        self.assertEqual("pending", rows[0]["status"])
+        self.assertEqual("", rows[0]["verified_by"])
 
 
 class TestScoreMainReporting(unittest.TestCase):

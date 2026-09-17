@@ -23,6 +23,7 @@ LOW_IOU = 0.8
 DOC_START = "<!-- corpus-table -->"
 DOC_END = "<!-- /corpus-table -->"
 ACCEPTED_TRUTHS = {"trial", "oracle", "both", "neither"}
+ACCEPTED_VERIFIED_BY = {"model", "human"}
 
 
 def _area(box: dict[str, float]) -> float:
@@ -120,8 +121,8 @@ def _expected_from_ground_truth(
     oracle: dict[str, Any],
     *,
     warnings: list[str] | None = None,
-) -> dict[str, dict[str, Any]]:
-    """Expected key set built from a human-verified ``ground_truth`` object, not from the oracle.
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """(Expected key set, verified_by) built from an independently read ``ground_truth`` object, not from the oracle.
 
     ``ground_truth`` carries question numbers and passage ranges only -- no
     boxes -- so a key the oracle also reports keeps the oracle's own
@@ -146,15 +147,28 @@ def _expected_from_ground_truth(
     with nothing counted yet) is a normal, recoverable, in-progress label,
     not a broken file -- and must never be scored as if it were a real
     answer with an empty expected set.
+
+    The returned ``verified_by`` is ``ground_truth["verified_by"]`` --
+    "model" (default, when the key is absent) or "human" -- the provenance
+    class of whoever produced this ``ground_truth``. Every label on disk as
+    of this writing omits the key, because every one of them was read by a
+    Claude agent visually rendering the trimmed input (see the label's own
+    ``source``/``note`` fields), not signed off by a person; defaulting to
+    "model" keeps that true instead of silently implying a human reviewed a
+    label that says nothing about who did. An unrecognized value is a broken
+    label, raised the same way a malformed ``passage_ranges`` entry is.
     """
     if not isinstance(ground_truth, dict):
         raise ValueError(f"label case {case!r}: ground_truth is a {type(ground_truth).__name__}, not an object")
+    verified_by = ground_truth.get("verified_by", "model")
+    if verified_by not in ACCEPTED_VERIFIED_BY:
+        raise ValueError(f"label case {case!r}: ground_truth.verified_by {verified_by!r} is not one of {sorted(ACCEPTED_VERIFIED_BY)}")
     # ``pages`` is the trimmed trial input's own page count
     # (~/edb-trial-bench/inputs/<case>.pdf, MAX_PAGES leading pages) -- the
     # same input both the trial and the oracle parsed -- never the full
-    # source exam. A human counting from the wrong PDF is the likely failure
-    # mode this guards, so a mismatch is worth a warning even though the
-    # count itself is otherwise unused.
+    # source exam. Counting from the wrong PDF is the likely failure mode
+    # this guards, so a mismatch is worth a warning even though the count
+    # itself is otherwise unused.
     declared_pages, observed_pages = ground_truth.get("pages"), oracle.get("pages")
     if declared_pages is not None and observed_pages is not None and declared_pages != observed_pages:
         _warn(
@@ -175,7 +189,7 @@ def _expected_from_ground_truth(
         lo, hi = (start, end) if start <= end else (end, start)
         key = f"p{lo}-{hi}"
         expected[key] = oracle_by_key.get(key, {"key": key, "regions": []})
-    return expected
+    return expected, verified_by
 
 
 def expected_from(
@@ -184,27 +198,31 @@ def expected_from(
     labels: dict[str, Any] | None,
     *,
     warnings: list[str] | None = None,
+    meta: dict[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """Ground truth per key: a human-verified list, approved labels over the oracle, or the oracle itself while pending.
+    """Ground truth per key: an independently read list, approved labels over the oracle, or the oracle itself while pending.
 
     A label carrying a truthy ``ground_truth`` object (question_numbers,
     passage_ranges -- see _expected_from_ground_truth) takes full precedence
     over the oracle, but only when ``status`` is "approved" or its alias
     "truth" (the value this function itself returns, and so the natural one
-    for a human to copy back into the label): the expected key set comes
-    from that human-verified list alone, never from oracle["problems"], and
-    the status becomes "truth" so a reader can tell a real-answer row from
-    an oracle-as-provisional one at a glance. Its per-item "items" truth
-    overrides (below) do not apply on top of it -- once a case has real
-    ground truth, oracle-vs-trial adjudication is moot.
+    for whoever fills the label to copy back): the expected key set comes
+    from that independently read list alone, never from oracle["problems"],
+    and the status becomes "truth" so a reader can tell a real-answer row
+    from an oracle-as-provisional one at a glance. When ``meta`` is given,
+    this also writes ``meta["verified_by"]`` (see _expected_from_ground_truth)
+    so a caller such as score_all can surface who read this ground_truth --
+    "model" (default) or "human" -- without a second pass over the label.
+    Its per-item "items" truth overrides (below) do not apply on top of it --
+    once a case has real ground truth, oracle-vs-trial adjudication is moot.
 
     A ``ground_truth`` present under any other status (typically "pending",
     what adjudicate.py writes and every existing label file on disk
     currently carries) is *not* silently ignored: this warns on stderr and
     in ``warnings``, naming the case and the status, then falls through to
-    the oracle-scored path below -- so a human filling in ``ground_truth``
-    without also flipping ``status`` gets told, instead of unknowingly
-    getting a "pending" row that is quietly compared against itself.
+    the oracle-scored path below -- so filling in ``ground_truth`` without
+    also flipping ``status`` gets told, instead of unknowingly getting a
+    "pending" row that is quietly compared against itself.
     Likewise a ``ground_truth`` with an approved/truth status but with no
     usable question_numbers or passage_ranges (a half-filled stub such as
     ``{"source": ..., "note": "WIP"}``) warns and falls through rather than
@@ -238,8 +256,10 @@ def expected_from(
                 warnings,
             )
         else:
-            truth_expected = _expected_from_ground_truth(case, ground_truth, oracle, warnings=warnings)
+            truth_expected, verified_by = _expected_from_ground_truth(case, ground_truth, oracle, warnings=warnings)
             if truth_expected:
+                if meta is not None:
+                    meta["verified_by"] = verified_by
                 return truth_expected, "truth"
             _warn(
                 f"score.py: case {case!r}: ground_truth has no question_numbers or passage_ranges; "
@@ -355,7 +375,7 @@ def _keys_cell(keys: list[str]) -> str:
 
 
 def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | None = None) -> str:
-    headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms", "ai_evidence"]
+    headers = ["case", "status", "q_recall", "q_prec", "p_recall", "p_prec", "mean_iou", "low_iou", "review", "missing", "extra", "trial_ms", "oracle_ms", "ai_evidence", "verified_by"]
     table_rows = [
         [
             row["case"], row["status"], _fmt(row["question_recall"]), _fmt(row["question_precision"]),
@@ -366,6 +386,13 @@ def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | N
             # report cannot vouch for this row either way, distinct from
             # score_all's own "no records"/"NO EVIDENCE" cells.
             row.get("ai_evidence", "?"),
+            # verified_by is blank for a "pending"/"approved" row -- there is
+            # no ground_truth in play at all, so there is no one to name.
+            # Only a "truth" row carries it, and even then it says "model" by
+            # default (see _expected_from_ground_truth): a case whose answer
+            # key was read by a Claude agent must not render identically to
+            # one a person actually signed off on.
+            row.get("verified_by", ""),
         ]
         for row in rows
     ]
@@ -376,11 +403,12 @@ def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | N
             values = [row[field] for row in rows if row[field] is not None]
             return sum(values) / len(values) if values else None
 
-        # "truth" (a human-verified ground_truth object, see expected_from)
-        # is the only status backed by an independent answer; "approved" and
-        # "pending" are both still scored against the oracle -- provisional,
-        # in this task's own framing, however carefully adjudicated -- so the
-        # aggregate counts them on the same side of the truth-backed split.
+        # "truth" (an independently read ground_truth object, see
+        # expected_from) is the only status backed by an independent answer;
+        # "approved" and "pending" are both still scored against the oracle
+        # -- provisional, in this task's own framing, however carefully
+        # adjudicated -- so the aggregate counts them on the same side of the
+        # truth-backed split.
         truth_count = sum(1 for row in rows if row["status"] == "truth")
         approved_count = sum(1 for row in rows if row["status"] == "approved")
         provisional_count = count - truth_count
@@ -389,26 +417,26 @@ def render_report(rows: list[dict[str, Any]], excluded: list[dict[str, str]] | N
                 "합계", f"{truth_count}/{count} truth-backed, {provisional_count}/{count} provisional ({approved_count} approved)",
                 _fmt(mean("question_recall")), _fmt(mean("question_precision")), _fmt(mean("passage_recall")),
                 _fmt(mean("passage_precision")), _fmt(mean("mean_iou")), sum(row["low_iou"] for row in rows),
-                _fmt(mean("review_rate")), sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "", "",
+                _fmt(mean("review_rate")), sum(len(row["missing"]) for row in rows), sum(len(row["extra"]) for row in rows), "", "", "", "",
             ]
         )
     table = markdown_table(headers, table_rows)
     # Same "next to the numbers, regenerated every run" reasoning as the two
     # footnotes below: a "truth" row's q_recall/q_prec/p_recall/p_prec come
-    # from a human-verified question/passage list with no boxes of its own,
-    # so mean_iou/low_iou for it are still scored against the oracle's boxes
-    # (score_case skips the IoU pass only for a matched key the oracle never
-    # detected) -- that must be said here, not left to silently mix a
-    # human-verified count with an oracle-sourced box.
+    # from an independently read question/passage list with no boxes of its
+    # own, so mean_iou/low_iou for it are still scored against the oracle's
+    # boxes (score_case skips the IoU pass only for a matched key the oracle
+    # never detected) -- that must be said here, not left to silently mix an
+    # independently read count with an oracle-sourced box.
     truth_backed_cases = [row["case"] for row in rows if row["status"] == "truth"]
     if truth_backed_cases:
         table += (
             "\n\n> **"
             + ", ".join(f"`{case}`" for case in truth_backed_cases)
             + f": {len(truth_backed_cases)} truth-backed case(s) above.** `q_recall`/`q_prec`/`p_recall`/`p_prec` "
-            "come from a human-verified question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` "
-            "are still scored against the oracle's own boxes -- see `ground_truth` and the `docs/web-trial-quality.md` "
-            "라벨 형식 section."
+            "come from an independently read question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` "
+            "are still scored against the oracle's own boxes -- see `ground_truth`, `verified_by`, and the "
+            "`docs/web-trial-quality.md` 라벨 형식 section."
         )
     # The caveat lives next to the numbers it qualifies and is regenerated
     # every run, so it can never go stale the way a hand-written banner in
@@ -516,11 +544,19 @@ def score_all(
                 excluded.append({"case": case, "reason": reason})
             continue
         labels = load_json(labels_path) if labels_path.is_file() else None
-        expected, status = expected_from(oracle, trial, labels, warnings=warnings)
+        meta: dict[str, Any] = {}
+        expected, status = expected_from(oracle, trial, labels, warnings=warnings, meta=meta)
         row = score_case(trial, expected)
         oracle_page_repair = (oracle.get("oracle") or {}).get("page_repair") if isinstance(oracle.get("oracle"), dict) else None
         evidence_cell, evidence_ok = ai_evidence_cell(oracle_page_repair)
-        row.update(status=status, oracle_ms=oracle["timing_ms"].get("total"), ai_evidence=evidence_cell, ai_evidence_ok=evidence_ok)
+        # meta["verified_by"] is only set when expected_from actually used
+        # ground_truth (status "truth"); a "pending"/"approved" row has no
+        # ground_truth in play at all, so its cell must be blank, never a
+        # fabricated "model".
+        row.update(
+            status=status, oracle_ms=oracle["timing_ms"].get("total"), ai_evidence=evidence_cell,
+            ai_evidence_ok=evidence_ok, verified_by=meta.get("verified_by", ""),
+        )
         rows.append(row)
     return rows
 

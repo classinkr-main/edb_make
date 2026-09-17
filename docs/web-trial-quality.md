@@ -10,10 +10,11 @@
 |---|---|
 | `q_recall` / `q_prec` | 정답 문항 번호 중 체험판이 찾은 비율 / 체험판 문항 중 정답에 있는 비율 |
 | `p_recall` / `p_prec` | 지문 범위(예: 1~3) 기준 같은 비율 |
-| `mean_iou` / `low_iou` | 짝지은 문항의 박스 IoU 평균 / 0.8 미만 개수 (짝지은 것이 하나도 없으면 빈 칸). **`status`가 `truth`인 케이스도 이 박스는 사람이 확인한 것이 아니라 항상 오라클의 박스다** -- 사람이 적는 정답은 문항 번호·지문 범위 목록일 뿐 박스를 담지 않으므로, IoU는 오라클도 그 문항을 찾았을 때만 오라클 박스 대 체험판 박스로 계산한다. 오라클이 그 문항을 아예 못 찾았으면(사람 목록에만 있는 문항) 비교할 박스가 없으므로 그 문항은 `mean_iou`/`low_iou` 계산에서 빠진다 -- 0으로 세지 않는다 |
+| `mean_iou` / `low_iou` | 짝지은 문항의 박스 IoU 평균 / 0.8 미만 개수 (짝지은 것이 하나도 없으면 빈 칸). **`status`가 `truth`인 케이스도 이 박스는 `ground_truth`가 담고 있는 값이 아니라 항상 오라클의 박스다** -- `ground_truth`는 문항 번호·지문 범위 목록일 뿐 박스를 담지 않으므로, IoU는 오라클도 그 문항을 찾았을 때만 오라클 박스 대 체험판 박스로 계산한다. 오라클이 그 문항을 아예 못 찾았으면(`ground_truth` 목록에만 있는 문항) 비교할 박스가 없으므로 그 문항은 `mean_iou`/`low_iou` 계산에서 빠진다 -- 0으로 세지 않는다 |
 | `missing` / `extra` | 정답에는 있는데 체험판에 없는 키 / 체험판에는 있는데 정답에 없는 키. 번호도 지문 범위도 아닌 체험판 항목(`t:<제목>` 형태의 미분류 단위)은 항상 위양성으로 `extra`에 포함되고, 집계 행에는 케이스별 개수의 합으로 나온다 |
 | `review` | "확인 필요" 배지 비율 |
-| `status` | `truth`는 사람이 검증한 `ground_truth`(아래) 기준, `approved`는 Fable이 오라클을 기준으로 판정한 라벨, `pending`은 오라클을 임시 정답으로 -- `approved`와 `pending`은 둘 다 결국 오라클에서 나온 값이므로 독립적인 정답이 아니라 잠정치("provisional")다. 집계(`합계`) 행에 이 케이스들 중 몇 개가 `truth`이고 몇 개가 잠정치인지가 `N/M truth-backed, N/M provisional (K approved)` 형태로 나온다 |
+| `status` | `truth`는 독립적으로 읽은 `ground_truth`(아래) 기준, `approved`는 Fable(오라클 판정을 수행하는 에이전트 -- 사람이 아니다)이 오라클을 기준으로 판정한 라벨, `pending`은 오라클을 임시 정답으로 -- `approved`와 `pending`은 둘 다 결국 오라클에서 나온 값이므로 독립적인 정답이 아니라 잠정치("provisional")다. 집계(`합계`) 행에 이 케이스들 중 몇 개가 `truth`이고 몇 개가 잠정치인지가 `N/M truth-backed, N/M provisional (K approved)` 형태로 나온다 |
+| `verified_by` | `truth` 케이스의 `ground_truth`를 누가/무엇이 만들었는지 -- `ground_truth.verified_by`의 값을 그대로 옮긴 것이다(필드가 없으면 `model`). `truth`가 아닌 행은 `ground_truth`를 아예 쓰지 않으므로 빈 칸이다. 지금까지 만들어진 13개 라벨은 전부 `model`이다: 전부 Claude 에이전트가 트리밍된 입력을 시각적으로 읽어 만든 것이고, 사람이 서명(sign-off)한 케이스는 아직 하나도 없다 |
 | `ai_evidence` | 이 케이스의 오라클 실행에서 AI 페이지 보정 결과가 로컬 기준선과 실제로 달라진 쪽수/전체 쪽수(`oracle.page_repair.pages_changed`). 블록 분류, 문항 묶음, 제목(`display_title`), 크롭 박스(`bbox_px`), 확인 필요 플래그(`review_flags`) 중 하나라도 달라지면 그 쪽은 바뀐 것으로 센다. 0쪽이면 `(NO EVIDENCE)`가 붙고, 오라클 관측값 자체가 없으면 `no records`, 그보다 오래된(열이 없는) 관측값이면 `?`로 표시된다 -- 이 셋 중 어느 쪽도 "체험판이 AI급 인식과 일치했다"는 증거가 아니다 |
 
 분모가 0인 지표(예: 정답에 지문이 하나도 없을 때의 `p_recall`)는 1.00이 아니라 빈 칸으로 나온다. 집계(`합계`) 행의 비율 열은 빈 칸을 제외한 케이스들의 평균이다.
@@ -30,51 +31,53 @@
     "pages": 4,
     "question_numbers": [1, 2, 3, "..."],
     "passage_ranges": [[1, 3], [4, 9]],
-    "source": "누가/무엇으로 검증했는지",
+    "verified_by": "model",
+    "source": "누가/무엇으로 만들었는지",
     "note": "..."
   },
   "items": ["..."]
 }
 ```
 
-- `question_numbers`는 **트리밍된 체험판 입력** `~/edb-trial-bench/inputs/<case>.pdf`(`make_inputs.py`가 원본 시험지 앞 `MAX_PAGES`쪽만 잘라낸 파일)에 실제로 존재하는 문항 번호 전체 목록(사람이 그 트리밍된 PDF를 직접 세어 만든 것)이다. **원본 시험지 전체를 기준으로 세면 안 된다** -- 그러면 트리밍으로 잘려나간 뒤쪽 문항까지 포함되어, 체험판이 놓친 적도 없는 문항들이 순전히 인위적인 대량 recall 미스로 보고된다. `passage_ranges`는 같은 트리밍된 입력 기준 지문 범위 목록이다. 둘 다 박스 좌표는 담지 않는다.
+- `question_numbers`는 **트리밍된 체험판 입력** `~/edb-trial-bench/inputs/<case>.pdf`(`make_inputs.py`가 원본 시험지 앞 `MAX_PAGES`쪽만 잘라낸 파일)에 실제로 존재하는 문항 번호 전체 목록(Claude 에이전트가 그 트리밍된 PDF를 150 DPI로 렌더링해 페이지 이미지를 직접 읽고 센 것 -- 방법과 날짜는 각 라벨의 `source`/`note` 필드에 남아 있다)이다. **원본 시험지 전체를 기준으로 세면 안 된다** -- 그러면 트리밍으로 잘려나간 뒤쪽 문항까지 포함되어, 체험판이 놓친 적도 없는 문항들이 순전히 인위적인 대량 recall 미스로 보고된다. `passage_ranges`는 같은 트리밍된 입력 기준 지문 범위 목록이다. 둘 다 박스 좌표는 담지 않는다.
+- `verified_by`는 그 `ground_truth`를 누가/무엇이 만들었는지 구분하는 필드다: `model`(기본값 -- 필드를 생략하면 이 값으로 취급된다) 또는 `human`. 지금까지 라벨을 채운 13개 케이스는 전부 이 필드를 생략했고, 즉 전부 Claude 에이전트가 만든 것이지 사람이 서명(sign-off)한 것이 아니다 -- 리포트의 `verified_by` 열이 케이스별로 이 구분을 그대로 보여준다(위 지표 표 참고). 두 값 외의 것은 `case`를 명시한 `ValueError`로 즉시 멈춘다.
 - `pages`는 그 트리밍된 입력의 페이지 수(관측값의 `pages`/`source_page_count`와 같은 값)다. 이 값은 실제로 검사된다: `score.py`가 라벨의 `pages`를 오라클 관측값의 `pages`와 비교해, 다르면(전형적으로 원본 시험지 전체를 기준으로 세었을 때) `case`와 두 값을 모두 명시한 경고를 stderr와 리포트 실행 로그에 남긴다 -- 스코어링을 막지는 않지만, 문항 번호를 잘못된 PDF에서 세었을 가능성을 알려준다.
-- 라벨 파일의 `status`가 `approved`이거나 `truth`(리포트가 실제로 찍는 값이자, 사람이 그대로 라벨에 복사해 넣기 쉬운 값 -- 둘 다 동일하게 받아들여진다)이고 `ground_truth`에 `question_numbers`나 `passage_ranges` 중 하나라도 실제 값이 있으면 `score.py`는 오라클의 `problems` 목록을 아예 참고하지 않고 `ground_truth`만으로 정답 키 집합(`q<번호>`, `p<시작>-<끝>`)을 만든다 -- 오라클이 어떤 문항을 찾았는지·놓쳤는지와 무관하게 사람이 적은 목록이 그대로 정답이 된다. 이때 보고서의 `status` 열은 `truth`로 나와, 오라클을 임시 정답으로 쓴 행과 한눈에 구분된다. `ground_truth`가 있으면 `items[].truth`(trial/oracle/both/neither) 조정은 적용되지 않는다 -- 사람이 적은 정답이 이미 최종이기 때문이다.
+- 라벨 파일의 `status`가 `approved`이거나 `truth`(리포트가 실제로 찍는 값이자, 라벨을 채우는 쪽이 그대로 복사해 넣기 쉬운 값 -- 둘 다 동일하게 받아들여진다)이고 `ground_truth`에 `question_numbers`나 `passage_ranges` 중 하나라도 실제 값이 있으면 `score.py`는 오라클의 `problems` 목록을 아예 참고하지 않고 `ground_truth`만으로 정답 키 집합(`q<번호>`, `p<시작>-<끝>`)을 만든다 -- 오라클이 어떤 문항을 찾았는지·놓쳤는지와 무관하게 `ground_truth`에 적힌 목록이 그대로 정답이 된다. 이때 보고서의 `status` 열은 `truth`로 나와, 오라클을 임시 정답으로 쓴 행과 한눈에 구분된다. `ground_truth`가 있으면 `items[].truth`(trial/oracle/both/neither) 조정은 적용되지 않는다 -- `ground_truth`가 이미 최종 정답이기 때문이다.
 - `ground_truth`가 truthy인데 `status`가 `approved`/`truth`가 아니면(예: 라벨을 아직 `pending`에 둔 채 `ground_truth`만 먼저 채워 넣은 경우) `score.py`는 그 값을 조용히 무시하지 않는다 -- `case`와 실제 `status`를 명시한 경고를 내고 기존 오라클 채점 경로로 넘어간다(그 라벨은 `pending`/`approved`로 그대로 채점됨). 마찬가지로 `ground_truth`는 있지만 `question_numbers`도 `passage_ranges`도 비어 있는 반쯤 채운 상태(예: `{"source": "...", "note": "WIP"}`만 있는 경우)도 `status: truth`로 격상시키지 않는다 -- 경고를 내고 같은 오라클 경로로 넘어간다.
-- `ground_truth`가 객체가 아니거나(예: 배열) `passage_ranges`의 원소가 `[시작, 끝]` 두 값짜리 쌍이 아니면 `score.py`는 `case`를 명시한 `ValueError`로 즉시 멈춘다 -- `items[]`의 알 수 없는 `truth` 값과 같은 처리다.
+- `ground_truth`가 객체가 아니거나(예: 배열), `passage_ranges`의 원소가 `[시작, 끝]` 두 값짜리 쌍이 아니거나, `verified_by`가 `model`/`human` 둘 다 아니면 `score.py`는 `case`를 명시한 `ValueError`로 즉시 멈춘다 -- `items[]`의 알 수 없는 `truth` 값과 같은 처리다.
 - `ground_truth`가 없거나 `null`인 라벨은 기존대로 오라클 + `items[].truth` 보정 경로를 그대로 타고 `status`도 `approved`/`pending`으로 남는다(이 문서와 코드 양쪽에서 하위 호환).
 - 박스 IoU(`mean_iou`/`low_iou`)는 `truth` 케이스에서도 여전히 오라클의 박스를 쓴다: 위 지표 표의 `mean_iou` 설명 참고.
-- 이 문서에 어떤 케이스의 `ground_truth` 값(문항 번호 목록·지문 범위 목록) 자체는 적지 않는다 -- 시험지 내용이므로 라벨 파일에만 두고, 이 문서에는 그 결과인 점수와 어긋난 키만 싣는다. 값을 세는 작업은 2026-09-17에 13개 케이스 전부 끝났고(아래 "결과"), 현재 `~/edb-trial-bench/labels/*.json` 13개가 모두 `status: "approved"` + `ground_truth`를 갖는다.
+- 이 문서에 어떤 케이스의 `ground_truth` 값(문항 번호 목록·지문 범위 목록) 자체는 적지 않는다 -- 시험지 내용이므로 라벨 파일에만 두고, 이 문서에는 그 결과인 점수와 어긋난 키만 싣는다. 읽는 작업은 2026-09-17에 13개 케이스 전부 끝났고(아래 "결과"), 현재 `~/edb-trial-bench/labels/*.json` 13개가 모두 `status: "approved"` + `ground_truth`(전부 `verified_by` 생략 = `model`)를 갖는다.
 
 ## 결과
 
-아래 표는 13개 케이스 **전부**를 사람이 검증한 정답(`ground_truth`) 기준으로 채점한 것이다 -- `status` 열이 13행 모두 `truth`이고, 집계 행이 `13/13 truth-backed, 0/13 provisional`이다. 오라클을 임시 정답으로 쓴 행은 이제 하나도 없다. 재측정할 때 기존 라벨·관측값과 섞이지 않도록 별도 `TRIAL_BENCH_ROOT`(`scripts/trial_bench/common.py:21`)를 쓴다.
+아래 표는 13개 케이스 **전부**를 독립적으로 읽은 정답(`ground_truth`) 기준으로 채점한 것이다 -- `status` 열이 13행 모두 `truth`이고, 집계 행이 `13/13 truth-backed, 0/13 provisional`이다. 오라클을 임시 정답으로 쓴 행은 이제 하나도 없다. **이 정답을 만든 것은 Claude 에이전트(모델)다: 트리밍된 입력을 페이지 이미지로 렌더링해 시각적으로 읽고 문항 번호·지문 범위를 센 것이지, 파서(체험판·오라클) 출력을 베낀 것이 아니다.** `verified_by` 열(과 각 라벨의 `source`/`note` 필드)이 그 근거이고, 13개 전부 `model`이다 -- **사람이 이 정답을 검토하고 서명(sign-off)한 적은 아직 한 번도 없다.** 재측정할 때 기존 라벨·관측값과 섞이지 않도록 별도 `TRIAL_BENCH_ROOT`(`scripts/trial_bench/common.py:21`)를 쓴다.
 
-- **코퍼스 규모**: 13개 케이스 / 5개 과목 -- 과학 4(물리학Ⅰ×2, 지구과학, 전자기) · 국어 3 · 영어 2 · 수학 2 · 사회(생활과윤리) 2. 사람이 트리밍된 입력에서 직접 센 정답은 문항 207개와 지문 범위 9개이고, 체험판이 내놓은 단위는 219개다.
+- **코퍼스 규모**: 13개 케이스 / 5개 과목 -- 과학 4(물리학Ⅰ×2, 지구과학, 전자기) · 국어 3 · 영어 2 · 수학 2 · 사회(생활과윤리) 2. Claude가 트리밍된 입력에서 직접 읽고 센 정답은 문항 207개와 지문 범위 9개이고, 체험판이 내놓은 단위는 219개다.
 - **트리밍 쪽수는 케이스마다 다르다 -- 코퍼스 전체가 앞 3쪽인 것도, 전체가 앞 4쪽인 것도 아니다.** 영어·수학·사회 6개 케이스는 현재 캡(`trial_input.py`의 `DEFAULT_MAX_PAGES = 4`)대로 앞 4쪽이고, 나머지 7개(국어 3 · 과학 4)는 캡이 3이던 시절에 만들어진 앞 3쪽 입력 그대로다. 이 7개는 `~/edb-trial-bench/sources/`에 원본 PDF가 남아 있지 않아(현재 `sources/`에는 2026-09-16에 추가한 6개뿐) 다시 4쪽으로 자르려면 원본을 다시 받아야 한다. 특히 `01_물리학Ⅰ_문제지`·`earth_input`·`physics_input`은 원본 자체가 4쪽이므로, 오늘의 체험판이라면 읽었을 네 번째 쪽이 이 측정에는 아예 들어 있지 않다.
 - 표의 `ai_evidence` 열은 이제 13행 모두 채워져 있고, 13행 모두 `(NO EVIDENCE)`다. 그 뜻은 아래 "오라클이 기여한 것과 하지 않은 것" 항목에 있다.
 
 <!-- corpus-table -->
 측정일 2026-09-17 · 라벨 없는 케이스는 오라클을 임시 정답으로 채점(pending)
 
-| case | status | q_recall | q_prec | p_recall | p_prec | mean_iou | low_iou | review | missing | extra | trial_ms | oracle_ms | ai_evidence |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 01_물리학Ⅰ_문제지 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1218 | 7971 | 0/3 (NO EVIDENCE) |
-| 2025학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1405 | 12856 | 0/3 (NO EVIDENCE) |
-| 2026학년도-9월-모평-국어-언어와매체 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1267 | 8267 | 0/3 (NO EVIDENCE) |
-| 2026학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1369 | 8386 | 0/3 (NO EVIDENCE) |
-| earth_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1219 | 6711 | 0/3 (NO EVIDENCE) |
-| english_2020suneung_go3_20191107 | truth | 1.00 | 1.00 | 0.00 |  | 1.00 | 0 | 0.00 | p16-17 |  | 1316 | 43832 | 0/4 (NO EVIDENCE) |
-| english_go2_hakpyeong_20260324 | truth | 1.00 | 0.88 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  | q1#2 q2#2 q3#2 q4#2 | 1301 | 20263 | 0/4 (NO EVIDENCE) |
-| math_2026suneung_9wolmopyeong_20250903 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 739 | 11783 | 0/4 (NO EVIDENCE) |
-| math_go3_hakpyeong_20240328 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 636 | 10122 | 0/4 (NO EVIDENCE) |
-| physics_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1170 | 7385 | 0/3 (NO EVIDENCE) |
-| social_saengwoon_2020suneung_20191015 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1335 | 16030 | 0/4 (NO EVIDENCE) |
-| social_saengwoon_2025suneung_9wolmopyeong_20240904 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1507 | 16190 | 0/4 (NO EVIDENCE) |
-| 전자기_교재문제 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 865 | 10065 | 0/3 (NO EVIDENCE) |
-| 합계 | 13/13 truth-backed, 0/13 provisional (0 approved) | 1.00 | 0.99 | 0.80 | 1.00 | 1.00 | 0 | 0.00 | 1 | 4 |  |  |  |
+| case | status | q_recall | q_prec | p_recall | p_prec | mean_iou | low_iou | review | missing | extra | trial_ms | oracle_ms | ai_evidence | verified_by |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 01_물리학Ⅰ_문제지 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1218 | 7971 | 0/3 (NO EVIDENCE) | model |
+| 2025학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1405 | 12856 | 0/3 (NO EVIDENCE) | model |
+| 2026학년도-9월-모평-국어-언어와매체 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1267 | 8267 | 0/3 (NO EVIDENCE) | model |
+| 2026학년도-수능-국어-언어와매체-홀수형 | truth | 1.00 | 1.00 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  |  | 1369 | 8386 | 0/3 (NO EVIDENCE) | model |
+| earth_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1219 | 6711 | 0/3 (NO EVIDENCE) | model |
+| english_2020suneung_go3_20191107 | truth | 1.00 | 1.00 | 0.00 |  | 1.00 | 0 | 0.00 | p16-17 |  | 1316 | 43832 | 0/4 (NO EVIDENCE) | model |
+| english_go2_hakpyeong_20260324 | truth | 1.00 | 0.88 | 1.00 | 1.00 | 1.00 | 0 | 0.00 |  | q1#2 q2#2 q3#2 q4#2 | 1301 | 20263 | 0/4 (NO EVIDENCE) | model |
+| math_2026suneung_9wolmopyeong_20250903 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 739 | 11783 | 0/4 (NO EVIDENCE) | model |
+| math_go3_hakpyeong_20240328 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 636 | 10122 | 0/4 (NO EVIDENCE) | model |
+| physics_input | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1170 | 7385 | 0/3 (NO EVIDENCE) | model |
+| social_saengwoon_2020suneung_20191015 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1335 | 16030 | 0/4 (NO EVIDENCE) | model |
+| social_saengwoon_2025suneung_9wolmopyeong_20240904 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 1507 | 16190 | 0/4 (NO EVIDENCE) | model |
+| 전자기_교재문제 | truth | 1.00 | 1.00 |  |  | 1.00 | 0 | 0.00 |  |  | 865 | 10065 | 0/3 (NO EVIDENCE) | model |
+| 합계 | 13/13 truth-backed, 0/13 provisional (0 approved) | 1.00 | 0.99 | 0.80 | 1.00 | 1.00 | 0 | 0.00 | 1 | 4 |  |  |  |  |
 
-> **`01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`: 13 truth-backed case(s) above.** `q_recall`/`q_prec`/`p_recall`/`p_prec` come from a human-verified question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` are still scored against the oracle's own boxes -- see `ground_truth` and the `docs/web-trial-quality.md` 라벨 형식 section.
+> **`01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`: 13 truth-backed case(s) above.** `q_recall`/`q_prec`/`p_recall`/`p_prec` come from an independently read question/passage list (the label's `ground_truth`), but `mean_iou`/`low_iou` are still scored against the oracle's own boxes -- see `ground_truth`, `verified_by`, and the `docs/web-trial-quality.md` 라벨 형식 section.
 
 > **AI page repair produced no evidence of a real change for 13 of 13 case(s): `01_물리학Ⅰ_문제지`, `2025학년도-수능-국어-언어와매체-홀수형`, `2026학년도-9월-모평-국어-언어와매체`, `2026학년도-수능-국어-언어와매체-홀수형`, `earth_input`, `english_2020suneung_go3_20191107`, `english_go2_hakpyeong_20260324`, `math_2026suneung_9wolmopyeong_20250903`, `math_go3_hakpyeong_20240328`, `physics_input`, `social_saengwoon_2020suneung_20191015`, `social_saengwoon_2025suneung_9wolmopyeong_20240904`, `전자기_교재문제`.** On those cases the forced-AI oracle's block types, problem grouping, titles, crop boxes and review flags all came out identical to what the local baseline produced on its own, so those rows' scores show agreement with the trial's own local baseline, not confirmation by AI-grade recognition -- see `ai_evidence` and rerun scripts/trial_bench/oracle.py to refresh.
 <!-- /corpus-table -->
@@ -92,7 +95,8 @@
 | 확인 필요 비율 0.2 이하 | 0.00 | 0/219 = 0.000 | 통과, 단 아래 단서 |
 
 - **지문 범위 recall이 유일한 실제 미달**이다. 케이스 평균 0.80, 범위 단위로도 9개 중 8개(0.889)로 두 방식 모두 0.9에 못 미친다. 원인은 단 한 건 -- `english_2020suneung_go3_20191107`의 `p16-17` 누락(아래 오류 유형 1).
-- **박스 IoU 두 열은 통과가 아니라 미측정이다.** `mean_iou`/`low_iou`는 사람이 검증한 정답이 아니라 **오라클의 박스**와 비교한 값인데(사람이 적는 정답은 번호·범위 목록일 뿐 박스가 없다), 이번 코퍼스에서는 오라클 관측값의 키 집합이 13개 케이스 전부 체험판과 동일하고 짝지은 키의 `regions`가 **바이트 단위로 같다**. 그래서 채점된 215쌍의 IoU가 전부 정확히 `1.0`이다 -- 근사적으로 1에 가까운 것이 아니라 같은 값끼리 비교한 결과다. 즉 이 두 열은 "박스가 정확하다"는 증거가 아니라 "박스를 검증할 독립적인 기준이 아직 없다"는 표시다. 확인 명령:
+- **판단이 필요한 지점: `p16-17`을 지문 범위로 셀지 여부.** 이 원인 유일 건의 판단 근거는 라벨 파일(`~/edb-trial-bench/labels/english_2020suneung_go3_20191107.json`)의 `ground_truth.note`에만 적혀 있었고, 이 문서에는 지금까지 옮겨진 적이 없었다: 문제의 `[16~17] 다음을 듣고, 물음에 답하시오.`는 대괄호로 범위를 표시한 헤더이지만, 그것이 다스리는 것은 듣기 스크립트이고 트리밍된 지면에는 본문이 인쇄되어 있지 않다. 그 노트는 "본문 없는 대괄호 헤더에 대해 지문 단위를 아예 만들지 않는 파서도 defensible하다"고 명시하며, 실제로 이 라벨에서 `[16, 17]` 항목 하나만 빼면 지문 범위 recall이 0.889 → 1.00으로 오르고 위 표의 §3 게이트 5개가 전부 **통과**로 바뀐다. **이 프로젝트는 그 대안을 채택하지 않는다.** 대괄호 범위 헤더는 본문 유무와 무관하게 항상 지문 단위로 기록한다는 기존 관례를 그대로 유지하며, 그래서 위 표의 지문 범위 recall 행은 **미달**로 남는다. 이유는 둘이다: **(1) 같은 헤더 형식이 이미 정확히 처리된 선례가 코퍼스 안에 있다** -- `english_go2_hakpyeong_20260324`에서 체험판 스스로 같은 `[16~17]` 헤더를 `p16-17`로 정확히 잡아냈으므로, 같은 형식을 한 케이스에서는 필수로 요구하고 다른 케이스에서는 선택으로 두면 recall 기준 자체가 케이스마다 달라져 버린다. **(2) 관찰된 실패 양상이 그 defensible한 대안과 다르다** -- 아래 "발견된 오류 유형" 절 1번이 기록하듯, 체험판이 이 헤더를 놓친 원인은 헤더가 앞 문항 단위로 흡수된 버그이지, "본문 없는 헤더는 지문 단위를 만들지 않는다"는 의도된 설계가 아니다. 의도된 설계가 아닌 결과를 defensible한 설계 선택으로 취급해 라벨을 고치는 것은 게이트를 통과시키기 위해 정답을 맞추는 것과 다르지 않다. 이 판단이 나중에 바뀌면(예: 본문 없는 대괄호 헤더를 지문 단위로 세지 않기로 프로젝트가 명시적으로 결정하면) 라벨의 `ground_truth.passage_ranges`에서 `[16, 17]`을 빼고 이 문서 맨 위의 "갱신" 명령으로 이 문서를 다시 생성해야 하며, 그 전까지 이 미달은 실제 결함이지 라벨링 관례의 부작용이 아니다.
+- **박스 IoU 두 열은 통과가 아니라 미측정이다.** `mean_iou`/`low_iou`는 독립적으로 읽은 정답(`ground_truth`)이 아니라 **오라클의 박스**와 비교한 값인데(`ground_truth`는 번호·범위 목록일 뿐 박스가 없다), 이번 코퍼스에서는 오라클 관측값의 키 집합이 13개 케이스 전부 체험판과 동일하고 짝지은 키의 `regions`가 **바이트 단위로 같다**. 그래서 채점된 215쌍의 IoU가 전부 정확히 `1.0`이다 -- 근사적으로 1에 가까운 것이 아니라 같은 값끼리 비교한 결과다. 즉 이 두 열은 "박스가 정확하다"는 증거가 아니라 "박스를 검증할 독립적인 기준이 아직 없다"는 표시다. 확인 명령:
   ```
   GEMINI_API_KEY= .venv/bin/python -c "
   import sys, json, pathlib; sys.path.insert(0,'.')
@@ -112,7 +116,7 @@
 
 ### 발견된 오류 유형
 
-체험판이 사람 정답과 어긋난 곳은 5건이고, 전부 영어 2개 케이스에 몰려 있다. 나머지 11개 케이스(국어 3 · 과학 4 · 수학 2 · 사회 2)는 문항·범위가 정답과 완전히 일치한다.
+체험판이 `ground_truth`(Claude가 독립적으로 읽은 정답)와 어긋난 곳은 5건이고, 전부 영어 2개 케이스에 몰려 있다. 나머지 11개 케이스(국어 3 · 과학 4 · 수학 2 · 사회 2)는 문항·범위가 정답과 완전히 일치한다.
 
 | 오류 유형 | 건수 | 어디서 | 어느 쪽이 옳은가 |
 |---|---|---|---|
@@ -128,15 +132,15 @@
 
 ### 오라클이 기여한 것과 하지 않은 것
 
-- **기여한 것: 없다.** `adjudicate.py`는 13개 케이스 전부 disagreement **0건**을 보고했고(`~/edb-trial-bench/adjudication/` 디렉터리 자체가 만들어지지 않는다), 따라서 사람이 볼 판정 이미지도 0장이다. 그럴 수밖에 없는 것이, 오라클 관측값은 13개 케이스 전부 키 집합도 박스도 체험판과 동일하기 때문이다.
-- 그래서 오라클은 위 5건 중 **단 하나도** 잡아내지 못했다. `p16-17`은 오라클도 똑같이 놓쳤고, `q1#2`~`q4#2`는 오라클도 똑같이 만들어냈다. 5건을 찾아낸 것은 전적으로 사람이 트리밍된 입력을 직접 읽어 만든 `ground_truth`다.
+- **기여한 것: 없다.** `adjudicate.py`는 13개 케이스 전부 disagreement **0건**을 보고했고(`~/edb-trial-bench/adjudication/` 디렉터리 자체가 만들어지지 않는다), 따라서 확인용 판정 이미지도 0장이다. 그럴 수밖에 없는 것이, 오라클 관측값은 13개 케이스 전부 키 집합도 박스도 체험판과 동일하기 때문이다.
+- 그래서 오라클은 위 5건 중 **단 하나도** 잡아내지 못했다. `p16-17`은 오라클도 똑같이 놓쳤고, `q1#2`~`q4#2`는 오라클도 똑같이 만들어냈다. 5건을 찾아낸 것은 전적으로 Claude가 트리밍된 입력을 직접 읽어 만든 `ground_truth`다.
 - 근본 원인은 이전 절들이 기록한 그대로다: 강제 Gemini 페이지 보정이 13개 케이스 35쪽 전부에서 `repair_applied`는 됐지만 `repair_changed = 0`이었다(표의 `ai_evidence` 열이 13행 모두 `(NO EVIDENCE)`). 보정이 아무것도 바꾸지 않으니 오라클 출력은 정의상 체험판 출력과 같아지고, 오라클을 정답으로 쓰는 한 점수는 항상 1.00이 된다. 이번 재채점 이전의 `pending` 표가 전부 1.00이었던 것은 품질의 증거가 아니라 그 항등식이었다.
 
 ### 남아 있는 공백
 
 - **영어**: 유일하게 오류가 나온 과목이고, 2개 케이스 모두에서 나왔다(한쪽은 지문 누락, 한쪽은 문항 위양성). 케이스도 2개뿐이라 과목 단위 수치(`q_prec` 0.933, `p_recall` 0.500)의 표본이 가장 얇다.
 - **지문 범위를 가진 과목이 국어·영어뿐이다.** 지문 범위 9개는 국어 7개 + 영어 2개이고, 과학·수학·사회 8개 케이스에는 지문 범위가 하나도 없어 `p_recall`/`p_prec`가 빈 칸이다. 즉 §3의 지문 범위 게이트는 13개 케이스가 아니라 5개 케이스·9개 범위 위에서만 판정된다.
-- **박스 정확도는 어느 과목에서도 검증되지 않았다**(위 게이트 판정의 IoU 항목). 사람이 적는 `ground_truth`에 박스가 없고 오라클 박스는 체험판 박스와 동일하므로, 박스에 대한 독립적인 기준은 코퍼스 전체에 0개다.
+- **박스 정확도는 어느 과목에서도 검증되지 않았다**(위 게이트 판정의 IoU 항목). `ground_truth`에 박스가 없고 오라클 박스는 체험판 박스와 동일하므로, 박스에 대한 독립적인 기준은 코퍼스 전체에 0개다.
 - **트리밍 쪽수 불일치**: 7개 케이스가 아직 앞 3쪽이고 원본이 `sources/`에 없다(위 결과 절). 그중 과학 3개는 원본 4쪽 중 한 쪽이 측정에서 통째로 빠져 있다.
 - **재현성 점검은 여전히 범위 밖이다**: 계획서 §13이 요구한 "같은 케이스를 두 번 돌려 문항 집합이 다른지"는 이번에도 하지 않았다(각 케이스 1회 관측).
 
@@ -162,7 +166,7 @@
 
   영어 2개 케이스는 이 표를 처음 만들었을 때는 오라클이 페이지 하나도 처리하지 못하고 실패했다(`Gemini response JSON decode failed: Unterminated string`, 각각 1회 재시도에도 동일하게 재현되어 지속 실패로 기록). 원인을 진단하고 고친 뒤 다시 돌린 결과는 아래 "오라클 영어 지원 수정" 항목에 있다 -- 이 표의 두 행과 이 절의 판정·해석 문장(11개 케이스 기준)은 그 진단 이전 스냅샷이다. **영어 2개를 포함한 13개 케이스 전부를 다시 채점한 현재 결과는 위 "결과" 절에 있다**(2026-09-17). `repair_changed = 0`이라는 이 절의 헤드라인은 13개 케이스 35쪽 전부에서 그대로 유지됐다.
 - **판정(adjudicate) 결과**: 오라클이 성공한 11개 케이스 모두 disagreement 0건, 생성된 조정용 이미지도 0장(`~/edb-trial-bench/adjudication/` 디렉터리 자체가 만들어지지 않았다). 영어 2개를 고쳐 넣은 뒤인 2026-09-17 재실행에서도 13개 케이스 전부 disagreement 0건으로 같았다.
-- **이 숫자가 증명하는 것과 증명하지 않는 것**: 11개 케이스에서 체험판과 오라클이 완전히 일치한 것은, 오라클의 강제 AI 보정이 로컬 기준선을 단 한 쪽도 바꾸지 않았기 때문이다(`ai_evidence` 열, 위 표의 `repair_changed`). 즉 이 일치는 "체험판이 AI급 인식과 같다"는 근거가 아니라 "이번 코퍼스에서는 AI가 로컬 파서와 다른 답을 내지 않았다"는 근거일 뿐이다. `low_iou`/`review`/`missing`/`extra`가 전부 0인 것, adjudication 이미지가 0장인 것도 같은 이유로 독립적인 정답과의 일치를 뜻하지 않는다. **이 예상은 2026-09-17에 확인됐다**: 사람이 검증한 정답으로 다시 채점하자 같은 관측값에서 `missing` 1건과 `extra` 4건이 나왔다(위 "결과" 절). `low_iou`가 0인 것만은 그때도 그대로였는데, 그것 역시 품질이 아니라 오라클 박스와 체험판 박스가 동일해서였다. 영어 과목은 (아래 수정 전까지는) 오라클 자체가 실패했으므로 일치·불일치 어느 쪽도 말할 수 없었고, 계획서(§13)가 요구한 "같은 케이스를 두 번 돌려 문항 집합이 다른지" 재현성 점검도 이번 실행 범위 밖이다(1회씩만 실행 -- 2026-09-17 재채점에서도 마찬가지다).
+- **이 숫자가 증명하는 것과 증명하지 않는 것**: 11개 케이스에서 체험판과 오라클이 완전히 일치한 것은, 오라클의 강제 AI 보정이 로컬 기준선을 단 한 쪽도 바꾸지 않았기 때문이다(`ai_evidence` 열, 위 표의 `repair_changed`). 즉 이 일치는 "체험판이 AI급 인식과 같다"는 근거가 아니라 "이번 코퍼스에서는 AI가 로컬 파서와 다른 답을 내지 않았다"는 근거일 뿐이다. `low_iou`/`review`/`missing`/`extra`가 전부 0인 것, adjudication 이미지가 0장인 것도 같은 이유로 독립적인 정답과의 일치를 뜻하지 않는다. **이 예상은 2026-09-17에 확인됐다**: 독립적으로 읽은 정답(`ground_truth`)으로 다시 채점하자 같은 관측값에서 `missing` 1건과 `extra` 4건이 나왔다(위 "결과" 절). `low_iou`가 0인 것만은 그때도 그대로였는데, 그것 역시 품질이 아니라 오라클 박스와 체험판 박스가 동일해서였다. 영어 과목은 (아래 수정 전까지는) 오라클 자체가 실패했으므로 일치·불일치 어느 쪽도 말할 수 없었고, 계획서(§13)가 요구한 "같은 케이스를 두 번 돌려 문항 집합이 다른지" 재현성 점검도 이번 실행 범위 밖이다(1회씩만 실행 -- 2026-09-17 재채점에서도 마찬가지다).
 
 ## 2026-09-16 추가: 오라클 영어 지원 수정
 
