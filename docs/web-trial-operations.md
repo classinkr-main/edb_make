@@ -221,6 +221,11 @@ from public.trial_events
 where kind = 'parse' and status = 200 and created_at > now() - interval '7 days'
 group by 1, 2 order by 1, 2;
 
+-- 쪽수 상한에 잘린 지문 묶음: timing.continued 가 1 이상이면 "N쪽에 이어짐" 칩이 붙은 응답이다.
+select count(*) filter (where (timing->>'continued')::int > 0) as with_cut_passages, count(*) as parses
+from public.trial_events
+where kind = 'parse' and status = 200 and created_at > now() - interval '7 days';
+
 -- 인스턴스별 건수: 1건짜리 인스턴스가 많으면 콜드 스타트가 잦다는 뜻
 select instance_id, count(*) as requests, min(created_at) as first_seen, max(created_at) as last_seen
 from public.trial_events
