@@ -70,6 +70,17 @@ SEGMENTATION_MODE_DOCUMENT = "document"
 LARGE_BLOCK_AREA_RATIO = 0.18
 PDF_TEXT_MARKER_MIN_HWP_LAYOUT_HEIGHT_PX = 3.0
 PDF_TEXT_MARKER_MIN_HWP_LAYOUT_HEIGHT_RATIO = 0.001
+# How far right of its column's question markers a numbered line has to sit
+# before it can be read as list content rather than a question. Measured on
+# the 13-case trial bench (90 marker columns): every real question marker is
+# flush with the other markers of its column to within 1.2 px, 0.06% of the
+# page width, while the "How It Works" list inside the 안내문 box of the
+# 2026 3월 고2 영어 paper's question 28 is indented 51.5 px, 2.75%. The
+# threshold sits between the two, and above the 0.80% that one character of
+# that paper's question numbers occupies, so a paper that right-aligns its
+# question numbers ("9." under "10.") cannot trip it either.
+PDF_NESTED_MARKER_MIN_INDENT_PX = 12.0
+PDF_NESTED_MARKER_MIN_INDENT_RATIO = 0.012
 PDF_CHOICE_MARKERS = ("①", "②", "③", "④", "⑤")
 PDF_PASSAGE_TEXT_EDGE_PADDING_PX = 4.0
 PDF_PASSAGE_CENTER_DIVIDER_EXCLUSION_PX = 6.0
@@ -2182,6 +2193,70 @@ def _segment_pdf_passage_ranges_only(
     }
 
 
+def _indented_nested_enumeration_marker_ids(
+    column_entries: list[tuple[int, list[dict[str, Any]], tuple[float, float]]],
+    page_width: int,
+    *,
+    skip_marker_ids: set[int] | None = None,
+) -> set[int]:
+    """Markers that are an indented list inside the question above them.
+
+    A boxed notice can print its own numbered steps ("How It Works: 1. 2. 3.
+    4."). Those lines match the problem-marker pattern, so without this they
+    become extra top-level problems and cut the question that contains them
+    short at the first step.
+
+    Two independent signals must agree before a marker is dropped, because
+    neither is safe alone:
+
+    * the marker is indented past every question marker accepted above it in
+      the same column -- a real question is printed flush with its column's
+      other questions, a list step is inset inside the question body;
+    * the marker does not continue that column's ascending run -- a list
+      restarts at 1 below a much higher question number.
+
+    A workbook section that restarts its numbering satisfies the second but
+    not the first (it stays flush), so repeated numbers on their own never
+    lose a question. A list that opens a column, before any question marker
+    establishes the column's left edge, is left alone for the same reason.
+
+    ``skip_marker_ids`` are markers the caller has already discarded (the
+    clipped HWP layout numbers of ``_is_tiny_hwp_layout_marker``). Their
+    boxes are unreliable, so they neither anchor a column nor get reported.
+    """
+    nested: set[int] = set()
+    skipped = skip_marker_ids or set()
+    min_indent = max(
+        PDF_NESTED_MARKER_MIN_INDENT_PX,
+        float(page_width) * PDF_NESTED_MARKER_MIN_INDENT_RATIO,
+    )
+    for _column_index, column_markers, _bounds in column_entries:
+        numbered = [
+            marker
+            for marker in column_markers
+            if isinstance(marker.get("number"), int)
+            and _marker_bbox(marker) is not None
+            and id(marker) not in skipped
+        ]
+        question_left: float | None = None
+        highest_number = 0
+        for marker in sorted(numbered, key=lambda item: _marker_bbox(item).top):
+            marker_box = _marker_bbox(marker)
+            number = int(marker["number"])
+            if (
+                question_left is not None
+                and marker_box.left - question_left >= min_indent
+                and number <= highest_number
+            ):
+                nested.add(id(marker))
+                continue
+            question_left = (
+                marker_box.left if question_left is None else min(question_left, marker_box.left)
+            )
+            highest_number = max(highest_number, number)
+    return nested
+
+
 def _segment_pdf_problem_markers(
     image: Image.Image,
     page_id: str,
@@ -2264,6 +2339,15 @@ def _segment_pdf_problem_markers(
                 nested_enumeration_marker_ids.add(id(marker))
                 continue
         highest_number = max(highest_number, number)
+
+    # The rule above only sees a list that the exam sequence resumes after.
+    # A list printed inside the last question on a page has nothing after it,
+    # so it is caught by its indentation instead.
+    nested_enumeration_marker_ids |= _indented_nested_enumeration_marker_ids(
+        column_entries,
+        image.width,
+        skip_marker_ids=ignored_tiny_marker_ids,
+    )
 
     page_area = _page_area_px(image.width, image.height)
     usable_text_lines = text_lines if isinstance(text_lines, list) else []

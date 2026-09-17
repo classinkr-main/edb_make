@@ -705,6 +705,112 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
             )
             self.assertEqual(2, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
 
+    def test_pdf_problem_markers_ignore_indented_list_inside_a_later_question(self):
+        """A boxed notice's "1. 2. 3. 4." list must not become four problems.
+
+        Reproduces the 2026 3월 고2 영어 학력평가 page 4 trap: question 28's
+        안내문 carries a "How It Works" list numbered 1.-4. that restarts below
+        question 28 and is indented from the column's question markers. The
+        list steps belong to question 28, so no extra problem may appear and
+        question 28's block must still reach past the last list line.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "boxed_notice_list.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=600, height=800)
+            page.insert_text((48, 100), "25. twenty-fifth question", fontsize=14)
+            page.insert_text((48, 400), "26. twenty-sixth question", fontsize=14)
+            page.insert_text((330, 100), "27. twenty-seventh question", fontsize=14)
+            page.insert_text((330, 400), "28. Library of Things notice question", fontsize=14)
+            page.draw_rect(fitz.Rect(336, 430, 570, 620))
+            page.insert_text((354, 470), "1. Download the app and log in.", fontsize=11)
+            page.insert_text((354, 510), "2. Check out what you need in the app.", fontsize=11)
+            page.insert_text((354, 550), "3. Pick up your item from Monday to Sunday.", fontsize=11)
+            page.insert_text((354, 590), "4. Return it in good condition.", fontsize=11)
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=144,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.ENGLISH,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [25, 26, 27, 28],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(4, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+            blocks = {block.block_id: block for block in page_model.blocks}
+            last_list_line_bottom = 590 / 800 * page_model.height_px
+            question_28 = next(
+                problem
+                for problem in page_model.problems
+                if problem.metadata.get("problem_number") == 28
+            )
+            bottoms = [
+                blocks[block_id].bbox.bottom
+                for block_id in _problem_block_ids(question_28)
+                if block_id in blocks
+            ]
+            self.assertTrue(bottoms)
+            self.assertGreater(max(bottoms), last_list_line_bottom)
+
+    def test_pdf_problem_markers_keep_a_flush_restarted_section(self):
+        """Repeated numbers alone must not drop a marker.
+
+        Workbook pages restart numbering per section, and a restarted question
+        is printed flush with the column's other question markers. Only a
+        marker that is both indented and out of sequence is list content.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "restarted_section.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=600, height=800)
+            page.insert_text((48, 100), "5. fifth question of the first section", fontsize=14)
+            page.insert_text((48, 300), "6. sixth question of the first section", fontsize=14)
+            page.insert_text((48, 500), "1. first question of the second section", fontsize=14)
+            page.insert_text((48, 700), "2. second question of the second section", fontsize=14)
+            page.insert_text((330, 100), "3. third question of the second section", fontsize=14)
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=144,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [5, 6, 1, 2, 3],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
     def test_pdf_passage_range_block_stops_before_cross_column_child_questions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "passage_range_cross_column_children.pdf"
