@@ -85,11 +85,26 @@ PDF_TEXT_MARKER_MIN_HWP_LAYOUT_HEIGHT_RATIO = 0.001
 # "10.") is not guaranteed to stay under this ratio. Nothing in the 13-case
 # corpus exercises that geometry, so this constant is not validated outside
 # it; see ``_indented_nested_enumeration_marker_ids`` for the additional
-# choice-marker signal that keeps a wrongly-indented real question from
-# being dropped even if this threshold is crossed.
+# signals that keep a wrongly-indented real question from being dropped even
+# if this threshold is crossed.
 PDF_NESTED_MARKER_MIN_INDENT_PX = 12.0
 PDF_NESTED_MARKER_MIN_INDENT_RATIO = 0.012
 PDF_CHOICE_MARKERS = ("①", "②", "③", "④", "⑤")
+# Share of a column's width that one raster row has to be dark across
+# *without a gap* before it counts as a ruled box border rather than a line
+# of text. Unbroken run length, not total dark pixels: a border is one solid
+# run, while a dense line of text can darken as many pixels in a row and
+# still be nothing but short glyph strokes. Measured on the deskewed,
+# margin-cropped 200 dpi raster of the 2026 3월 고2 영어 paper's page 4:
+# in the right column (x 980-1872) the 안내문 box's borders run 98% of the
+# column width, and in the left column the only rows that pass 9% are ruled
+# lines themselves (the page header rule, and the axis of question 25's bar
+# chart) -- every row of text in that column peaks at 9%. The threshold sits
+# between the two with room for a box narrower than its column: the same
+# 안내문 reproduced on a 600x800 pt page at 144 dpi, in
+# ``test_pdf_problem_markers_ignore_indented_list_inside_a_later_question``,
+# boxes 62% of its column.
+PDF_NESTED_MARKER_BOX_RULE_MIN_WIDTH_RATIO = 0.45
 PDF_PASSAGE_TEXT_EDGE_PADDING_PX = 4.0
 PDF_PASSAGE_CENTER_DIVIDER_EXCLUSION_PX = 6.0
 PDF_PASSAGE_RANGE_BRACKET_RE = re.compile(
@@ -962,6 +977,60 @@ def _pdf_text_lines_in_region(
             continue
         lines.append((line_box, line))
     return sorted(lines, key=lambda item: (item[0].top, item[0].left))
+
+
+def _longest_unbroken_dark_run_ratio(mask: Image.Image) -> float:
+    """Longest gap-free dark run in any row, as a share of the mask width."""
+    if mask.width < 1 or mask.height < 1:
+        return 0.0
+    longest = 0
+    if np is not None:
+        array = np.asarray(mask, dtype=np.uint8)
+        if array.ndim == 2:
+            dark = array == 255
+            run = np.zeros(dark.shape[0], dtype=np.int32)
+            peak = np.zeros(dark.shape[0], dtype=np.int32)
+            for column_index in range(dark.shape[1]):
+                run = np.where(dark[:, column_index], run + 1, 0)
+                peak = np.maximum(peak, run)
+            return float(peak.max()) / float(mask.width)
+    pixels = mask.tobytes()
+    for row_index in range(mask.height):
+        offset = row_index * mask.width
+        run = 0
+        for value in pixels[offset : offset + mask.width]:
+            run = run + 1 if value == 255 else 0
+            if run > longest:
+                longest = run
+    return float(longest) / float(mask.width)
+
+
+def _has_horizontal_rule_in_band(
+    image: Image.Image,
+    *,
+    left: float,
+    right: float,
+    top: float,
+    bottom: float,
+) -> bool:
+    """True when a ruled border crosses the band, rather than only text.
+
+    See ``PDF_NESTED_MARKER_BOX_RULE_MIN_WIDTH_RATIO`` for the measurement
+    the threshold comes from.
+    """
+    crop_left = max(0, int(left))
+    crop_right = min(image.width, int(right))
+    crop_top = max(0, int(top))
+    crop_bottom = min(image.height, int(bottom))
+    if crop_right - crop_left < 2 or crop_bottom - crop_top < 1:
+        return False
+    mask = _dark_mask(
+        image.crop((crop_left, crop_top, crop_right, crop_bottom)), threshold=220
+    )
+    return (
+        _longest_unbroken_dark_run_ratio(mask)
+        >= PDF_NESTED_MARKER_BOX_RULE_MIN_WIDTH_RATIO
+    )
 
 
 def _mask_without_tall_vertical_rules(mask: Image.Image) -> Image.Image:
@@ -2207,6 +2276,7 @@ def _indented_nested_enumeration_marker_ids(
     *,
     skip_marker_ids: set[int] | None = None,
     text_lines: list[dict[str, Any]] | None = None,
+    image: Image.Image | None = None,
 ) -> set[int]:
     """Markers that are an indented list inside the question above them.
 
@@ -2215,8 +2285,10 @@ def _indented_nested_enumeration_marker_ids(
     become extra top-level problems and cut the question that contains them
     short at the first step.
 
-    Three independent signals must all agree before a run of markers is
-    dropped, because none is safe alone:
+    The unit considered here is a *run*: the consecutive indented,
+    out-of-sequence markers that follow one accepted question marker (the
+    "host"). Every one of these signals must agree before a run is dropped,
+    because none of them is safe alone:
 
     * every marker in the run is indented past the question marker accepted
       above it in the same column -- a real question is printed flush with
@@ -2226,34 +2298,51 @@ def _indented_nested_enumeration_marker_ids(
       restarts at 1 below a much higher question number;
     * a line containing one of ``PDF_CHOICE_MARKERS`` (circled digits) falls
       between the run's last marker and the next accepted question marker in
-      the column, or the column bottom if none follows. That line is the
-      *host* question's own answer choices resuming after its embedded
-      list; a section that is genuinely a fresh run of independent
-      questions has no such line waiting there instead of a question of its
-      own.
+      the column, or the column bottom if none follows -- the host
+      question's answer choices, which it has not printed yet because its
+      embedded list came first;
+    * no such choice line falls anywhere between the host marker and the
+      run's last marker. This is what tells a list apart from a restarted
+      section of real questions, and the signal above cannot do it: on a
+      Korean multiple-choice paper the *last question of a restarted
+      section* also has a ①-⑤ line sitting right after it, so a trailing
+      choice line alone says nothing. What differs is everything earlier --
+      a restarted section's own earlier questions carry their choices
+      between the run's markers, and a host that has already printed its
+      choices before the run starts cannot be waiting to print them after
+      it. A 안내문 list has neither. Verified on the 2026 3월 고2 영어 page
+      4 right column: no choice line falls between question 28's marker and
+      the last list item, and the resumed ①-⑤ block only begins below it;
+    * the run is boxed off: a ruled border crosses the column between the
+      host marker and the run's first marker, and another crosses between
+      the run's last marker and the bottom of that trailing choice line.
+      The 안내문 the corpus case lives in is such a box; a restarted section
+      that merely drifted a few points to the right is not enclosed at all,
+      and a section printed in its own box keeps its choices inside the box,
+      so the closing border does not fall where this looks for it.
 
-    Only the first two signals used to gate a drop, before this function grew
-    the third. No case in the trial bench actually restarts its numbering --
-    every marker column in the
-    13-case corpus is strictly ascending except the one boxed-list column
-    this function exists for -- so whether a restarted section prints flush
-    with its column (and therefore survives the first signal) is untested,
-    not verified; nothing in the corpus exercises it. Requiring the choice
-    line closes that gap: shifting an indented-but-real restarted section by
-    only a few points, or printing it inset instead of flush, used to make
-    the first two signals agree and silently swallow it, because neither
-    signal looks past the run itself. The third signal does, and a
-    restarted section's own trailing content is not the enclosing
-    question's leftover answer choices.
+    Only the first two signals used to gate a drop when this function was
+    written, and the third was added on its own afterwards. Neither state
+    could tell an inset restarted section of real questions from a list: no
+    case in the trial bench restarts its numbering -- every marker column in
+    the 13-case corpus is strictly ascending except the one boxed-list
+    column this function exists for -- so nothing in the corpus pins that
+    behaviour, and shifting a real restarted section a few points to the
+    right was enough to delete it into the question above. The last two
+    signals are what close that hole; see the "restarted section" tests in
+    ``test_pdf_text_marker_segmentation.py``.
 
     A list that opens a column, before any question marker establishes the
-    column's left edge, is left alone for the same reason the first two
-    signals leave it alone: there is no accepted marker yet to be indented
-    relative to.
+    column's left edge, is left alone for the same reason the first signal
+    leaves it alone: there is no accepted marker yet to be indented
+    relative to, and so no host for the list to belong to.
 
     ``skip_marker_ids`` are markers the caller has already discarded (the
     clipped HWP layout numbers of ``_is_tiny_hwp_layout_marker``). Their
     boxes are unreliable, so they neither anchor a column nor get reported.
+
+    Without ``image`` and ``text_lines`` the last three signals cannot be
+    evaluated at all, so nothing is dropped.
     """
     nested: set[int] = set()
     skipped = skip_marker_ids or set()
@@ -2272,21 +2361,61 @@ def _indented_nested_enumeration_marker_ids(
         ]
         question_left: float | None = None
         highest_number = 0
+        host_box: Box | None = None
         candidate_run: list[dict[str, Any]] = []
+
+        def _run_is_nested_list(next_marker_box: Box | None) -> bool:
+            if image is None or host_box is None:
+                return False
+            run_top = _marker_bbox(candidate_run[0])
+            run_bottom = _marker_bbox(candidate_run[-1])
+            region_bottom = (
+                next_marker_box.top if next_marker_box is not None else float(image.height)
+            )
+            trailing_choice_box: Box | None = None
+            for line_box, line in _pdf_text_lines_in_region(
+                lines,
+                left=column_left,
+                right=column_right,
+                top=run_bottom.bottom,
+                bottom=region_bottom,
+            ):
+                if _text_contains_choice_marker(line.get("text")):
+                    trailing_choice_box = line_box
+                    break
+            if trailing_choice_box is None:
+                return False
+            if any(
+                _text_contains_choice_marker(line.get("text"))
+                for _line_box, line in _pdf_text_lines_in_region(
+                    lines,
+                    left=column_left,
+                    right=column_right,
+                    top=host_box.bottom,
+                    bottom=run_bottom.top,
+                )
+            ):
+                return False
+            if not _has_horizontal_rule_in_band(
+                image,
+                left=column_left,
+                right=column_right,
+                top=host_box.bottom,
+                bottom=run_top.top,
+            ):
+                return False
+            return _has_horizontal_rule_in_band(
+                image,
+                left=column_left,
+                right=column_right,
+                top=run_bottom.bottom,
+                bottom=trailing_choice_box.bottom,
+            )
 
         def _resolve_candidate_run(next_marker_box: Box | None) -> None:
             if not candidate_run:
                 return
-            region_top = _marker_bbox(candidate_run[-1]).bottom
-            region_bottom = next_marker_box.top if next_marker_box is not None else float("inf")
-            region_lines = _pdf_text_lines_in_region(
-                lines,
-                left=column_left,
-                right=column_right,
-                top=region_top,
-                bottom=region_bottom,
-            )
-            if any(_text_contains_choice_marker(line.get("text")) for _box, line in region_lines):
+            if _run_is_nested_list(next_marker_box):
                 nested.update(id(marker) for marker in candidate_run)
             candidate_run.clear()
 
@@ -2305,6 +2434,7 @@ def _indented_nested_enumeration_marker_ids(
                 marker_box.left if question_left is None else min(question_left, marker_box.left)
             )
             highest_number = max(highest_number, number)
+            host_box = marker_box
         _resolve_candidate_run(None)
     return nested
 
@@ -2401,6 +2531,7 @@ def _segment_pdf_problem_markers(
         image.width,
         skip_marker_ids=ignored_tiny_marker_ids,
         text_lines=usable_text_lines,
+        image=image,
     )
 
     page_area = _page_area_px(image.width, image.height)

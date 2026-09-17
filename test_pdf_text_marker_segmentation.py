@@ -15,6 +15,7 @@ from preprocess import prepare_source_pages
 from segment import (
     PDF_CHOICE_MARKERS,
     _build_pdf_passage_range_blocks,
+    _indented_nested_enumeration_marker_ids,
     _looks_like_pdf_page_header_text_line,
     segment_page,
 )
@@ -713,12 +714,11 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         question 28 and is indented from the column's question markers. The
         list steps belong to question 28, so no extra problem may appear and
         question 28's block must still reach past the last list line. As on
-        the real page, question 28's own ①-⑤ answer choices resume right
-        after the list -- that is the third signal
-        (``_indented_nested_enumeration_marker_ids``) that tells the parser
-        the list belongs to the question above it rather than being an
-        independent restarted section (see the "flush restarted section"
-        tests below).
+        the real page the list is boxed, question 28 prints no answer choices
+        before the box, and its own ①-⑤ choices resume below it -- the
+        shape ``_indented_nested_enumeration_marker_ids`` requires before it
+        drops anything, and the one a restarted section of real questions
+        does not have (see the "restarted section" tests below).
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "boxed_notice_list.pdf"
@@ -850,12 +850,15 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
         except the restarted section is shifted 7 pt to the right (about
         2.5 mm) instead of printed flush -- a boxed or inset restarted
         section, which the corpus does not contain an example of either way
-        (see that test's docstring). Before the choice-marker signal this
-        shift alone tripped the indentation threshold and, combined with the
-        restart's out-of-sequence numbers, silently deleted questions 1 and
-        2 into question 6's crop. There is no host answer-choice line
-        printed after questions 1/2 here (they are the last things in their
-        column), so the choice-marker signal must keep them.
+        (see that test's docstring). That shift alone trips the indentation
+        threshold and, combined with the restart's out-of-sequence numbers,
+        used to silently delete questions 1 and 2 into question 6's crop.
+        This page pins the trailing-choice signal on its own: nothing at all
+        is printed after questions 1/2 (they are the last things in their
+        column), so there is no resuming host choice line and the run
+        survives. The two tests that follow pin the signals that have to
+        carry the same page once it does print answer choices, which is what
+        every question in the 13-case corpus does.
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "restarted_section_inset.pdf"
@@ -892,6 +895,176 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
                 ],
             )
             self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
+    def test_pdf_problem_markers_keep_an_inset_restarted_section_with_its_own_choices(self):
+        """A trailing ①-⑤ line is not evidence that the run is a list.
+
+        Same inset restarted section as the test above, except question 2 --
+        the last question of the restarted run -- prints its own answer
+        choices, as every question in the 13-case corpus does. That line
+        sits exactly where a host question's resuming choices would, so the
+        trailing-choice signal cannot tell the two apart and says "drop"
+        here just as it does for the 안내문 list. Nothing boxes this section
+        off, which is what has to keep questions 1 and 2 alive.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "restarted_section_inset_choices.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=600, height=800)
+            page.insert_text((48, 100), "5. fifth question of the first section", fontsize=14)
+            page.insert_text((48, 300), "6. sixth question of the first section", fontsize=14)
+            page.insert_text((55, 500), "1. first question of the second section", fontsize=14)
+            page.insert_text((55, 640), "2. second question of the second section", fontsize=14)
+            # "korea" for the same reason as in the boxed-notice test above:
+            # the default font silently drops the circled digits.
+            page.insert_text((55, 700), "① a ② b ③ c ④ d ⑤ e", fontsize=11, fontname="korea")
+            page.insert_text((330, 100), "3. third question of the second section", fontsize=14)
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=144,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [5, 6, 1, 2, 3],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+
+    def test_pdf_problem_markers_keep_a_boxed_restarted_section_with_its_own_choices(self):
+        """A bordered workbook section that restarts at 1 keeps its questions.
+
+        A restart-per-section workbook page: questions 11 and 12 flush in
+        their column with their own ①-⑤ choices, then a bordered 유형 연습
+        box whose questions restart at 1, 2, 3 inset 20 pt inside the
+        border, each with its own choices. Everything the 안내문 list this
+        filter exists for looks like is here -- the markers are inset, the
+        numbers restart, the section is boxed, and a ①-⑤ line follows the
+        last marker just where the host's resuming choices would be -- so
+        what has to tell the two apart is where the *other* choice lines
+        fall: question 12 has already printed its choices before the box,
+        and questions 1 and 2 print theirs between the run's markers,
+        neither of which happens inside a 안내문. Dropping the run deletes
+        three real questions and stretches question 12's crop over the
+        whole box.
+        """
+        choices = "① 가 ② 나 ③ 다 ④ 라 ⑤ 마"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "boxed_restarted_workbook.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=595, height=842)
+            page.insert_text((40, 80), "11. 열한 번째 문제입니다.", fontsize=12, fontname="korea")
+            page.insert_text((40, 110), choices, fontsize=11, fontname="korea")
+            page.insert_text((40, 160), "12. 열두 번째 문제입니다.", fontsize=12, fontname="korea")
+            page.insert_text((40, 190), choices, fontsize=11, fontname="korea")
+            page.draw_rect(fitz.Rect(40, 230, 555, 700))
+            page.insert_text((60, 265), "유형 연습", fontsize=12, fontname="korea")
+            page.insert_text((60, 310), "1. 유형 연습 첫 번째 문제입니다.", fontsize=12, fontname="korea")
+            page.insert_text((60, 345), choices, fontsize=11, fontname="korea")
+            page.insert_text((60, 425), "2. 유형 연습 두 번째 문제입니다.", fontsize=12, fontname="korea")
+            page.insert_text((60, 460), choices, fontsize=11, fontname="korea")
+            page.insert_text((60, 545), "3. 유형 연습 세 번째 문제입니다.", fontsize=12, fontname="korea")
+            page.insert_text((60, 580), choices, fontsize=11, fontname="korea")
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=200,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )[0]
+            page_model = build_page_model(
+                prepared,
+                subject=Subject.KOREAN,
+                ocr_mode="none",
+                ai_config=build_ai_fallback_config(mode="off"),
+            )
+
+            self.assertEqual(
+                [11, 12, 1, 2, 3],
+                [
+                    problem.metadata.get("problem_number")
+                    for problem in page_model.problems
+                    if problem.metadata.get("problem_number") is not None
+                ],
+            )
+            self.assertEqual(0, page_model.metadata.get("pdf_nested_enumeration_marker_count"))
+            blocks = {block.block_id: block for block in page_model.blocks}
+            question_12 = next(
+                problem
+                for problem in page_model.problems
+                if problem.metadata.get("problem_number") == 12
+            )
+            bottoms = [
+                blocks[block_id].bbox.bottom
+                for block_id in _problem_block_ids(question_12)
+                if block_id in blocks
+            ]
+            self.assertTrue(bottoms)
+            # The box's top border; question 12 ends above it.
+            self.assertLess(max(bottoms), 230 / 842 * page_model.height_px)
+
+    def test_indented_nested_run_kept_when_its_own_markers_carry_choices(self):
+        """Choice lines between the run's markers block the drop on their own.
+
+        Isolates the signal that stops the drop on the boxed workbook page
+        above, where it fires before the border check is ever reached. Both
+        halves of this test have the same geometry -- one host marker, an
+        inset run that restarts below it, ruled borders above and below the
+        run, and a resuming ①-⑤ line under the whole thing, which together
+        are enough to drop the run -- and the only difference is a choice
+        line printed between the run's two markers. A 안내문 list has no
+        such line; a restarted section of real questions does.
+        """
+        image = Image.new("RGB", (600, 800), "white")
+        draw = ImageDraw.Draw(image)
+        draw.line([(60, 200), (560, 200)], fill="black", width=3)
+        draw.line([(60, 600), (560, 600)], fill="black", width=3)
+        host = {"number": 28, "bbox": {"left": 40, "top": 140, "right": 70, "bottom": 170}}
+        first = {"number": 1, "bbox": {"left": 80, "top": 250, "right": 100, "bottom": 275}}
+        second = {"number": 2, "bbox": {"left": 80, "top": 350, "right": 100, "bottom": 375}}
+        column_entries = [(1, [host, first, second], (0.0, 600.0))]
+        host_choice_line = {
+            "text": "① a ② b ③ c ④ d ⑤ e",
+            "bbox": {"left": 40, "top": 640, "right": 400, "bottom": 665},
+        }
+        run_choice_line = {
+            "text": "① a ② b ③ c ④ d ⑤ e",
+            "bbox": {"left": 80, "top": 290, "right": 400, "bottom": 315},
+        }
+
+        dropped = _indented_nested_enumeration_marker_ids(
+            column_entries,
+            image.width,
+            text_lines=[host_choice_line],
+            image=image,
+        )
+        self.assertEqual({id(first), id(second)}, dropped)
+
+        kept = _indented_nested_enumeration_marker_ids(
+            column_entries,
+            image.width,
+            text_lines=[run_choice_line, host_choice_line],
+            image=image,
+        )
+        self.assertEqual(set(), kept)
 
     def test_pdf_problem_markers_keep_an_ascending_indented_run(self):
         """An indented but ascending run is not list content.
