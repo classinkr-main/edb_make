@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 HWP_DOCUMENT_EXTENSIONS = {".hwp", ".hwpx"}
 HWP_RENDER_TREE_BASE_DPI = 72.0
-PDF_NORMALIZED_CACHE_VERSION = 3
+PDF_NORMALIZED_CACHE_VERSION = 4
 IMAGE_NORMALIZED_CACHE_VERSION = 1
 HWP_NORMALIZED_CACHE_VERSION = 5
 HWP_FAST_TEXT_SIGNAL_GOOD_ENOUGH = 20
@@ -540,6 +540,7 @@ def render_pdf_pages(source: str | Path, output_dir: str | Path, dpi: int = 160)
                         "pdf_page_width_pt": float(page.rect.width),
                         "pdf_page_height_pt": float(page.rect.height),
                         "pdf_problem_markers": _extract_pdf_problem_markers(page, scale, page_dict),
+                        "pdf_badge_markers": _extract_pdf_badge_markers(page, scale, page_dict),
                         "pdf_text_stem_markers": _extract_pdf_text_stem_markers(page, scale, page_dict),
                         "pdf_text_lines": _extract_pdf_text_lines(page, scale, page_dict),
                         "pdf_media_regions": _extract_pdf_media_regions(page, scale, page_dict),
@@ -3216,6 +3217,109 @@ def _extract_pdf_problem_markers(
     return markers
 
 
+def _extract_pdf_badge_markers(
+    page: Any,
+    scale: float,
+    data: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Extract two-digit number badges ("01", "12") that head each problem.
+
+    Workbook-style PDFs often print the problem number alone in a colored
+    badge without a trailing period, so ``_extract_pdf_problem_markers`` never
+    sees them. These are only candidates: a lone two-digit line can also be a
+    table cell or fraction, so ``_promote_pdf_badge_markers_when_numeric_missing``
+    accepts them only when the whole document forms one clean sequence.
+    """
+    import re
+
+    markers: list[dict[str, Any]] = []
+    if data is None:
+        try:
+            data = page.get_text("dict")
+        except Exception:
+            return markers
+
+    for block in data.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        for line in block.get("lines") or []:
+            if not isinstance(line, dict):
+                continue
+            text = "".join(
+                str(span.get("text") or "")
+                for span in line.get("spans") or []
+                if isinstance(span, dict)
+            ).strip()
+            if not re.fullmatch(r"0[1-9]|[1-9][0-9]", text):
+                continue
+            bbox = line.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            left, top, right, bottom = [float(value) * scale for value in bbox]
+            markers.append(
+                {
+                    "number": int(text),
+                    "marker_kind": "badge",
+                    "text": text,
+                    "bbox": {
+                        "left": left,
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "width": max(0.0, right - left),
+                        "height": max(0.0, bottom - top),
+                    },
+                }
+            )
+
+    return markers
+
+
+PDF_BADGE_MARKER_MIN_COUNT = 3
+PDF_BADGE_MARKER_MIN_SEQUENCE_COVERAGE = 0.8
+
+
+def _promote_pdf_badge_markers_when_numeric_missing(pages: list[NormalizedPageImage]) -> bool:
+    """Use badge numbers as problem markers when "N." markers are absent.
+
+    Accepted only when the badges read as one document-wide numbering: no
+    repeated number, every page's numbers come after the previous page's, and
+    the run from first to last number is mostly filled in.
+    """
+    numeric_count = 0
+    badge_pages: list[list[dict[str, Any]]] = []
+    for page in pages:
+        numeric = page.metadata.get("pdf_problem_markers")
+        numeric_count += len(numeric) if isinstance(numeric, list) else 0
+        badges = page.metadata.get("pdf_badge_markers")
+        badge_pages.append(list(badges) if isinstance(badges, list) else [])
+
+    badge_numbers = [int(marker["number"]) for badges in badge_pages for marker in badges]
+    if len(badge_numbers) < PDF_BADGE_MARKER_MIN_COUNT or numeric_count >= len(badge_numbers):
+        return False
+    if len(set(badge_numbers)) != len(badge_numbers):
+        return False
+    previous_page_max = 0
+    for badges in badge_pages:
+        if not badges:
+            continue
+        page_numbers = [int(marker["number"]) for marker in badges]
+        if min(page_numbers) <= previous_page_max:
+            return False
+        previous_page_max = max(page_numbers)
+    span = max(badge_numbers) - min(badge_numbers) + 1
+    if len(badge_numbers) / span < PDF_BADGE_MARKER_MIN_SEQUENCE_COVERAGE:
+        return False
+
+    for page, badges in zip(pages, badge_pages):
+        numeric = page.metadata.get("pdf_problem_markers")
+        if isinstance(numeric, list) and numeric:
+            page.metadata["pdf_numeric_problem_markers"] = list(numeric)
+        page.metadata["pdf_problem_markers"] = badges
+        page.metadata["pdf_problem_marker_source"] = "badge"
+    return True
+
+
 def _looks_like_pdf_problem_stem_line(text: str) -> bool:
     import re
 
@@ -3547,6 +3651,7 @@ def _transform_pdf_text_geometry(
 ) -> None:
     for key in (
         "pdf_problem_markers",
+        "pdf_badge_markers",
         "pdf_text_stem_markers",
         "pdf_text_lines",
         "pdf_media_regions",
@@ -3879,6 +3984,7 @@ def prepare_pages(
             return cached_pdf_pages
 
         rendered = render_pdf_pages(source_path, normalized_dir / "rendered", dpi=dpi)
+        _promote_pdf_badge_markers_when_numeric_missing(rendered)
         normalized_pages = _normalize_pdf_rendered_pages(
             source_path,
             rendered,

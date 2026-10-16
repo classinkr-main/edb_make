@@ -124,6 +124,72 @@ class TestPdfTextMarkerSegmentation(unittest.TestCase):
             )
             self.assertEqual(4, len(page_model.problems))
 
+    def test_pdf_badge_numbers_drive_problem_count_when_period_markers_missing(self):
+        # Workbook layout: each problem is headed by a "01"-style badge with
+        # no trailing period and its body is an image, so "N." markers are
+        # absent and the old path fell back to band grouping.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pdf_path = Path(temp_dir) / "badge_workbook.pdf"
+            doc = fitz.open()
+            for page_index in range(2):
+                page = doc.new_page(width=600, height=800)
+                page.insert_text((60, 50), "Workbook title", fontsize=14)
+                for slot, (x, y) in enumerate(((60, 120), (330, 120), (60, 470), (330, 470))):
+                    number = page_index * 4 + slot + 1
+                    page.insert_text((x, y), f"{number:02d}", fontsize=10)
+                    page.insert_text((x + 30, y), "category label", fontsize=9)
+                    page.draw_rect(fitz.Rect(x, y + 20, x + 200, y + 150), color=(0, 0, 0), width=1)
+            doc.save(pdf_path)
+            doc.close()
+
+            prepared_pages = prepare_source_pages(
+                pdf_path,
+                pdf_dpi=144,
+                detect_perspective=False,
+                deskew=True,
+                crop_margins=True,
+            )
+            numbers = []
+            for prepared in prepared_pages:
+                self.assertEqual("badge", prepared.metadata.get("pdf_problem_marker_source"))
+                segmented = segment_page(prepared, page_id=prepared.page_id, subject=Subject.MATH)
+                self.assertEqual("pdf-text-markers", segmented.metadata.get("segmenter"))
+                numbers.extend(sorted(block.metadata.get("problem_number") for block in segmented.blocks))
+            self.assertEqual(list(range(1, 9)), numbers)
+
+    def test_pdf_badge_numbers_ignored_unless_document_sequence_is_clean(self):
+        def page_with_badges(numbers, numeric=0):
+            return preprocess_module.NormalizedPageImage(
+                page_id="page",
+                source_path="source.pdf",
+                normalized_path="page.png",
+                page_index=0,
+                width_px=600,
+                height_px=800,
+                metadata={
+                    "pdf_problem_markers": [{"number": index + 1} for index in range(numeric)],
+                    "pdf_badge_markers": [
+                        {"number": number, "marker_kind": "badge", "bbox": {"left": 0, "top": 0, "right": 1, "bottom": 1}}
+                        for number in numbers
+                    ],
+                },
+            )
+
+        # A lone "20" repeated on every page (e.g. a table value) is not a sequence.
+        repeated = [page_with_badges([20]), page_with_badges([20]), page_with_badges([20])]
+        self.assertFalse(preprocess_module._promote_pdf_badge_markers_when_numeric_missing(repeated))
+        # Numbers going backwards across pages are not a problem numbering.
+        backwards = [page_with_badges([5, 6]), page_with_badges([1, 2])]
+        self.assertFalse(preprocess_module._promote_pdf_badge_markers_when_numeric_missing(backwards))
+        # Real "N." markers win over badge candidates.
+        has_numeric = [page_with_badges([51, 52, 53], numeric=20)]
+        self.assertFalse(preprocess_module._promote_pdf_badge_markers_when_numeric_missing(has_numeric))
+        self.assertEqual(20, len(has_numeric[0].metadata["pdf_problem_markers"]))
+
+        clean = [page_with_badges([1, 2, 3, 4]), page_with_badges([5, 6, 7])]
+        self.assertTrue(preprocess_module._promote_pdf_badge_markers_when_numeric_missing(clean))
+        self.assertEqual([5, 6, 7], [m["number"] for m in clean[1].metadata["pdf_problem_markers"]])
+
     def test_pdf_problem_markers_keep_leading_sequence_before_question_ten(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             pdf_path = Path(temp_dir) / "leading_sequence_exam.pdf"
