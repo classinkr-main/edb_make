@@ -2225,13 +2225,25 @@ def _map_source_media_regions_to_crop(
 MEDIA_LINE_ART_MAX_COLOR_FRACTION = 0.05
 MEDIA_LINE_ART_MIN_BRIGHT_FRACTION = 0.45
 MEDIA_LINE_ART_MAX_MIDTONE_FRACTION = 0.18
+MEDIA_LINE_ART_SAMPLE_SIZE = 160
+MEDIA_LINE_ART_DETAIL_SAMPLE_SIZE = 480
 
 
 def _media_patch_is_line_art(patch: Image.Image) -> bool:
     if patch.width < 8 or patch.height < 8:
         return False
+    if _media_patch_is_line_art_at(patch, MEDIA_LINE_ART_SAMPLE_SIZE):
+        return True
+    # Text-dense scans (a whole question pasted as an image) blur into gray
+    # midtones at the coarse sample size and read as photos, leaving a white
+    # box on the board. Re-check at near-native size, where glyph strokes stay
+    # black-on-white; real photos keep their midtones and are still preserved.
+    return _media_patch_is_line_art_at(patch, MEDIA_LINE_ART_DETAIL_SAMPLE_SIZE)
+
+
+def _media_patch_is_line_art_at(patch: Image.Image, sample_size: int) -> bool:
     sample = patch.convert("RGB")
-    sample.thumbnail((160, 160))
+    sample.thumbnail((sample_size, sample_size))
     total = max(1, sample.width * sample.height)
     saturation_histogram = sample.convert("HSV").getchannel("S").histogram()
     colorful_fraction = sum(saturation_histogram[64:]) / total

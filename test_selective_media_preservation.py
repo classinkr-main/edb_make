@@ -12,6 +12,8 @@ from build_problem_board_edb import (
     _ProblemAssetTask,
     _apply_selective_media_preservation,
     _build_image_only_record_image,
+    _media_patch_is_line_art,
+    _media_patch_is_line_art_at,
     _problem_allows_selective_media_preservation,
     _render_problem_asset,
     _resolve_chalk_color,
@@ -125,6 +127,27 @@ def test_selective_overlay_changes_only_the_media_rectangle() -> None:
     assert selective.getpixel((50, 40)) == (20, 130, 220, 255)
     assert selective.getpixel((10, 10)) == rendered.getpixel((10, 10))
     assert selective.getpixel((100, 70)) == rendered.getpixel((100, 70))
+
+
+def test_text_dense_scan_is_chalked_while_photo_stays_preserved() -> None:
+    # A whole question pasted as a scan: thin glyph strokes blur into gray at
+    # the coarse sample and used to be preserved as a white box on the board.
+    scan = Image.new("RGB", (600, 300), "white")
+    draw = ImageDraw.Draw(scan)
+    for row_top in range(20, 280, 30):
+        for x in range(20, 580, 7):
+            draw.rectangle((x, row_top, x + 1, row_top + 14), fill="black")
+            draw.rectangle((x, row_top + 6, x + 4, row_top + 7), fill="black")
+    assert not _media_patch_is_line_art_at(scan, 160)
+    assert _media_patch_is_line_art(scan)
+
+    photo = Image.new("RGB", (600, 300))
+    pixels = photo.load()
+    for x in range(600):
+        for y in range(300):
+            value = int(60 + 170 * ((x + y) / 900))
+            pixels[x, y] = (value, value, value)
+    assert not _media_patch_is_line_art(photo)
 
 
 def test_default_stage2_asset_restores_pdf_media(tmp_path: Path) -> None:
