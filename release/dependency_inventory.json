@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "policy": "Every requirements-release.lock component must have an exact-version entry and reviewed license disposition.",
   "components": [
-    {"name":"Pillow","version":"12.2.0","licenseExpression":"MIT-CMU","disposition":"notice"},
+    {"name":"Pillow","version":"13.0.0","licenseExpression":"MIT-CMU","disposition":"notice"},
     {"name":"PyMuPDF","version":"1.27.2.3","licenseExpression":"LicenseRef-Artifex-Commercial-OR-AGPL-3.0-only","disposition":"legal-approval-required"},
     {"name":"numpy","version":"2.4.6","licenseExpression":"BSD-3-Clause AND 0BSD AND MIT AND Zlib AND CC0-1.0","disposition":"notice"},
     {"name":"opencv-python-headless","version":"4.13.0.92","licenseExpression":"Apache-2.0","disposition":"notice"},
@@ -12,7 +12,7 @@
     {"name":"unhwp","version":"0.5.1","licenseExpression":"MIT","disposition":"notice","licenseFileOptional":true},
     {"name":"rhwp-python","version":"0.7.0","licenseExpression":"MIT","disposition":"notice"},
     {"name":"six","version":"1.17.0","licenseExpression":"MIT","disposition":"notice"},
-    {"name":"cryptography","version":"49.0.0","licenseExpression":"Apache-2.0 OR BSD-3-Clause","disposition":"notice"},
+    {"name":"cryptography","version":"50.0.2","licenseExpression":"Apache-2.0 OR BSD-3-Clause","disposition":"notice"},
     {"name":"cffi","version":"2.0.0","licenseExpression":"MIT","disposition":"notice"},
     {"name":"pycparser","version":"3.0","licenseExpression":"BSD-3-Clause","disposition":"notice"},
     {"name":"lxml","version":"6.1.1","licenseExpression":"BSD-3-Clause","disposition":"notice"},
@@ -29,8 +29,8 @@
     {"name":"pywin32-ctypes","version":"0.2.3","licenseExpression":"BSD-3-Clause","disposition":"notice"},
     {"name":"packaging","version":"26.2","licenseExpression":"Apache-2.0 OR BSD-2-Clause","disposition":"notice"},
     {"name":"pyinstaller-hooks-contrib","version":"2026.6","licenseExpression":"GPL-2.0-or-later","disposition":"notice"},
-    {"name":"setuptools","version":"82.0.1","licenseExpression":"MIT","disposition":"notice"},
-    {"name":"pip","version":"26.1.1","licenseExpression":"MIT","disposition":"notice"},
+    {"name":"setuptools","version":"84.2.1","licenseExpression":"MIT","disposition":"notice"},
+    {"name":"pip","version":"26.3","licenseExpression":"MIT","disposition":"notice"},
     {"name":"wheel","version":"0.46.3","licenseExpression":"MIT","disposition":"notice"},
     {"name":"react","version":"18.2.0","licenseExpression":"MIT","disposition":"notice","ecosystem":"vendored-javascript"},
     {"name":"react-dom","version":"18.2.0","licenseExpression":"MIT","disposition":"notice","ecosystem":"vendored-javascript"}
