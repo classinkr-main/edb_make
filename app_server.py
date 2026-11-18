@@ -34,6 +34,8 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
+from collections import OrderedDict
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, url2pathname, urlopen
@@ -512,6 +514,10 @@ DEFAULT_ARTIFACT_RETENTION_DAYS = 30.0
 FILE_PREVIEW_MIN_DIMENSION = 256
 FILE_PREVIEW_MAX_DIMENSION = 2048
 FILE_PREVIEW_JPEG_QUALITY = 82
+# A board can hold several hundred tiles, so a fixed entry count evicted a
+# preview long before the teacher scrolled back to it and paid for the resize
+# and re-encode again. Bound the cache by bytes instead.
+FILE_PREVIEW_CACHE_MAX_BYTES = 96 * 1024 * 1024
 _session_storage_lock = threading.RLock()
 
 
@@ -2846,8 +2852,51 @@ def _parse_file_preview_max_dimension(query: dict[str, list[str]]) -> int | None
     return max(FILE_PREVIEW_MIN_DIMENSION, min(FILE_PREVIEW_MAX_DIMENSION, requested))
 
 
-@lru_cache(maxsize=32)
+_file_preview_cache: "OrderedDict[tuple[str, int, int, int], tuple[bytes, str] | None]" = OrderedDict()
+_file_preview_cache_bytes = 0
+_file_preview_cache_lock = threading.Lock()
+
+
+def clear_file_preview_cache() -> None:
+    global _file_preview_cache_bytes
+    with _file_preview_cache_lock:
+        _file_preview_cache.clear()
+        _file_preview_cache_bytes = 0
+
+
+def file_preview_cache_stats() -> dict[str, int]:
+    with _file_preview_cache_lock:
+        return {"entries": len(_file_preview_cache), "bytes": _file_preview_cache_bytes}
+
+
 def _build_file_preview_payload(
+    path_value: str,
+    modified_ns: int,
+    file_size: int,
+    max_dimension: int,
+) -> tuple[bytes, str] | None:
+    global _file_preview_cache_bytes
+    cache_key = (path_value, modified_ns, file_size, max_dimension)
+    with _file_preview_cache_lock:
+        if cache_key in _file_preview_cache:
+            _file_preview_cache.move_to_end(cache_key)
+            return _file_preview_cache[cache_key]
+
+    payload = _render_file_preview_payload(path_value, modified_ns, file_size, max_dimension)
+
+    with _file_preview_cache_lock:
+        if cache_key in _file_preview_cache:
+            _file_preview_cache.move_to_end(cache_key)
+            return _file_preview_cache[cache_key]
+        _file_preview_cache[cache_key] = payload
+        _file_preview_cache_bytes += len(payload[0]) if payload else 0
+        while _file_preview_cache_bytes > FILE_PREVIEW_CACHE_MAX_BYTES and len(_file_preview_cache) > 1:
+            _, evicted = _file_preview_cache.popitem(last=False)
+            _file_preview_cache_bytes -= len(evicted[0]) if evicted else 0
+    return payload
+
+
+def _render_file_preview_payload(
     path_value: str,
     modified_ns: int,
     file_size: int,
@@ -3809,6 +3858,25 @@ def _session_history_entry(session: dict[str, Any], *, updated_at: str | None = 
     }
 
 
+def _session_history_head_stores(history: list[dict[str, Any]], session: dict[str, Any]) -> bool:
+    """True when the newest history entry already holds exactly ``session``.
+
+    Re-merging in that case would rewrite the whole history file, timestamp
+    included, without changing anything a caller can observe.
+    """
+    if not history:
+        return False
+    head = history[0]
+    if not isinstance(head, dict):
+        return False
+    entry_id = hashlib.sha1(
+        _session_history_key(session).encode("utf-8", errors="ignore")
+    ).hexdigest()[:16]
+    if str(head.get("id") or "") != entry_id:
+        return False
+    return head.get("session") == session
+
+
 def _session_history_with_session(
     history: list[dict[str, Any]],
     session: dict[str, Any],
@@ -3958,15 +4026,30 @@ def persist_latest_session_with_history(
     return history, None
 
 
+@lru_cache(maxsize=8192)
+def _canonical_reference_path(value: str) -> str | None:
+    """Canonical on-disk path for a session file reference.
+
+    Decoding costs a URL parse plus a realpath walk, and one session-history
+    scan asks about the same few thousand references over and over, so the
+    mapping is memoized. Existence is still checked live by every caller, so a
+    deleted or newly written file is picked up immediately.
+    """
+    resolved = decode_file_reference(value)
+    if resolved is None:
+        return None
+    return str(resolved.resolve())
+
+
 def collect_session_file_paths(session: dict[str, Any]) -> set[str]:
     paths: set[str] = set()
 
     def add_path(value: Any) -> None:
         if not value:
             return
-        resolved = decode_file_reference(str(value))
-        if resolved and resolved.exists():
-            paths.add(str(resolved.resolve()))
+        canonical = _canonical_reference_path(str(value))
+        if canonical and os.path.exists(canonical):
+            paths.add(canonical)
 
     def add_edb_part_paths(summary: dict[str, Any]) -> None:
         raw_parts = summary.get("edbParts") if isinstance(summary.get("edbParts"), list) else summary.get("edb_parts")
@@ -4591,6 +4674,31 @@ def _find_problem(session: dict[str, Any], problem_id: str) -> tuple[int, dict[s
     raise ValueError(f"problem not found: {problem_id}")
 
 
+def _find_problems(
+    session: dict[str, Any],
+    problem_ids: Sequence[str],
+) -> list[tuple[int, dict[str, Any]]]:
+    """Locate several problems in one pass over the list.
+
+    Bulk actions used to rescan every problem once per requested id, which is
+    quadratic on the large sessions where those actions matter most.
+    """
+    wanted = {str(problem_id) for problem_id in problem_ids}
+    located: dict[str, tuple[int, dict[str, Any]]] = {}
+    for index, problem in enumerate(session.get("problems", [])):
+        if not isinstance(problem, dict):
+            continue
+        key = str(problem.get("id"))
+        if key in wanted and key not in located:
+            located[key] = (index, problem)
+            if len(located) == len(wanted):
+                break
+    for problem_id in problem_ids:
+        if str(problem_id) not in located:
+            raise ValueError(f"problem not found: {problem_id}")
+    return [located[str(problem_id)] for problem_id in problem_ids]
+
+
 def _find_page(session: dict[str, Any], page_id: str) -> dict[str, Any]:
     for page in session.get("pages", []):
         if isinstance(page, dict) and str(page.get("id")) == page_id:
@@ -4844,18 +4952,38 @@ def _hwp_quality_from_page(page: dict[str, Any]) -> dict[str, Any] | None:
     return quality if isinstance(quality, dict) else None
 
 
+@lru_cache(maxsize=8)
+def _load_pages_json_pages(path_value: str, modified_ns: int, file_size: int) -> tuple[dict[str, Any], ...]:
+    del modified_ns, file_size  # cache-key inputs; the path is read below
+    try:
+        payload = json.loads(Path(path_value).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(page for page in payload if isinstance(page, dict))
+
+
 def _session_pages_json_pages(session: dict[str, Any]) -> list[dict[str, Any]]:
+    """Structured pages for ``session``, parsed once per on-disk revision.
+
+    The page dicts are shared with other callers of the same revision, so
+    treat them as read-only.
+    """
     pages_json_value = session.get("pages_json_path") or session.get("pagesJsonPath")
     pages_json_path = decode_file_reference(str(pages_json_value)) if pages_json_value else None
-    if pages_json_path is None or not pages_json_path.exists():
+    if pages_json_path is None:
         return []
+    # `pages.json` is the largest artifact in a session and several summary
+    # helpers ask for it while building one response, so parse it once per
+    # on-disk revision instead of once per caller.
     try:
-        payload = json.loads(pages_json_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        stat = pages_json_path.stat()
+    except OSError:
         return []
-    if not isinstance(payload, list):
-        return []
-    return [page for page in payload if isinstance(page, dict)]
+    return list(
+        _load_pages_json_pages(str(pages_json_path), stat.st_mtime_ns, stat.st_size)
+    )
 
 
 def _session_hwp_quality_pages(session: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5495,10 +5623,7 @@ def _mutate_split(session: dict[str, Any], problem_id: str, split_y_ratio: float
 def _mutate_merge(session: dict[str, Any], problem_ids: list[str]) -> dict[str, Any]:
     if len(problem_ids) < 2:
         raise ValueError("merge requires at least 2 problems")
-    targets: list[tuple[int, dict[str, Any]]] = []
-    for pid in problem_ids:
-        index, problem = _find_problem(session, pid)
-        targets.append((index, problem))
+    targets = _find_problems(session, problem_ids)
     page_ids = {str(p.get("sourcePageId")) for _, p in targets}
     if len(page_ids) != 1:
         raise ValueError("merge requires all problems on the same source page")
@@ -6718,8 +6843,7 @@ def _mutate_exclude_many(session: dict[str, Any], problem_ids: Any) -> dict[str,
     ids = _coerce_problem_ids(problem_ids)
     if not ids:
         raise ValueError("problemIds is required")
-    for problem_id in ids:
-        _find_problem(session, problem_id)  # raises if missing
+    _find_problems(session, ids)  # raises if any id is missing
     _remove_problems(session, set(ids))
     return session
 
@@ -8414,7 +8538,14 @@ class AppHTTPServer(ThreadingHTTPServer):
             with _session_storage_lock:
                 if not LATEST_SESSION_JSON.exists():
                     save_latest_session(snapshot)
-                history = _session_history_with_session(load_session_history(), snapshot)
+                stored_history = load_session_history()
+                if _session_history_head_stores(stored_history, snapshot):
+                    # `GET /api/session/latest` is a poll. Rewriting ten
+                    # embedded session snapshots and fsyncing twice to bump a
+                    # timestamp nobody reads would make every read a durable
+                    # write and block concurrent session requests behind it.
+                    return True
+                history = _session_history_with_session(stored_history, snapshot)
                 try:
                     save_session_history(history)
                 except OSError as exc:
@@ -8511,6 +8642,17 @@ class AppHTTPServer(ThreadingHTTPServer):
 
 
 class AppRequestHandler(SimpleHTTPRequestHandler):
+    # Every response below sends an accurate Content-Length, so keep-alive is
+    # safe and the UI stops paying a TCP handshake plus a fresh worker thread
+    # for each of the hundreds of problem thumbnails a board loads.
+    protocol_version = "HTTP/1.1"
+    # Reap idle kept-alive connections instead of pinning a thread per tab.
+    timeout = 60
+    # Class-level defaults so a handler built without __init__ still answers.
+    _explicit_cache_control = False
+    _explicit_connection_header = False
+    _request_body_read = False
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
@@ -8710,9 +8852,60 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         client = self.client_address[0] if self.client_address else "-"
         print(f"[app-server] {client} - {format % args}")
 
+    def send_header(self, keyword: str, value: str) -> None:
+        normalized = keyword.lower()
+        if normalized == "cache-control":
+            self._explicit_cache_control = True
+        elif normalized == "connection":
+            self._explicit_connection_header = True
+        super().send_header(keyword, value)
+
+    def _request_body_is_unread(self) -> bool:
+        """True when this request announced a body that no handler consumed.
+
+        Leaving those bytes queued on a kept-alive connection would make the
+        next request on it start mid-payload, so the response has to announce
+        that the connection closes.
+        """
+        if self._request_body_read:
+            return False
+        command = getattr(self, "command", None)
+        if command is not None and command not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return False
+        headers = getattr(self, "headers", None)
+        if headers is None:
+            return False
+        try:
+            return int(headers.get("Content-Length", "0") or 0) > 0
+        except (TypeError, ValueError):
+            return True
+
+    def _request_is_dynamic(self) -> bool:
+        # A malformed request line can reach send_error before self.path is set.
+        raw_path = getattr(self, "path", None)
+        if not isinstance(raw_path, str):
+            return True
+        try:
+            request_path = urlparse(raw_path).path
+        except ValueError:
+            return True
+        return request_path.startswith("/api/") or request_path == "/generated_session.js"
+
     def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-store, max-age=0")
-        self.send_header("Pragma", "no-cache")
+        if not self._explicit_cache_control:
+            if self._request_is_dynamic():
+                # Session state must never be replayed from a browser cache.
+                self.send_header("Cache-Control", "no-store, max-age=0")
+                self.send_header("Pragma", "no-cache")
+            else:
+                # Bundled UI assets are revalidated on every load, so an
+                # in-place app update is still picked up immediately, but an
+                # unchanged bundle answers 304 instead of resending ~800 KB.
+                self.send_header("Cache-Control", "no-cache")
+        if not self._explicit_connection_header and self._request_body_is_unread():
+            self.send_header("Connection", "close")
+        self._explicit_cache_control = False
+        self._explicit_connection_header = False
         super().end_headers()
 
     def _rewrite_legacy_ui_asset_path(self, path: str) -> bool:
@@ -8772,6 +8965,7 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self) -> None:
+        self._request_body_read = False
         try:
             self._dispatch_post()
         except RequestPayloadTooLarge as exc:
@@ -8789,6 +8983,8 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
                 },
                 status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
+        finally:
+            self._close_connection_when_body_unread()
 
     def _dispatch_post(self) -> None:
         parsed = urlparse(self.path)
@@ -8849,11 +9045,15 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         self._send_json({"ok": False, "error": "unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self) -> None:
-        parsed = urlparse(self.path)
-        if parsed.path == "/api/session/latest":
-            self._handle_session_clear(parsed)
-            return
-        self._send_json({"ok": False, "error": "unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
+        self._request_body_read = False
+        try:
+            parsed = urlparse(self.path)
+            if parsed.path == "/api/session/latest":
+                self._handle_session_clear(parsed)
+                return
+            self._send_json({"ok": False, "error": "unknown endpoint"}, status=HTTPStatus.NOT_FOUND)
+        finally:
+            self._close_connection_when_body_unread()
 
     def _handle_session_publish(self) -> None:
         session, current_revision = self._current_session_state()
@@ -10315,9 +10515,15 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         if content_length > MAX_JSON_BODY_BYTES:
             raise RequestPayloadTooLarge(content_length, MAX_JSON_BODY_BYTES)
         raw_body = self.rfile.read(content_length) if content_length else b"{}"
+        self._request_body_read = True
         if not raw_body:
             return {}
         return json.loads(raw_body.decode("utf-8"))
+
+    def _close_connection_when_body_unread(self) -> None:
+        """Backstop for a response that never reached ``end_headers``."""
+        if self._request_body_is_unread():
+            self.close_connection = True
 
     def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
         response_payload = payload
