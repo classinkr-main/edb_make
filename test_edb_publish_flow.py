@@ -16,6 +16,7 @@ import edb_builder
 from inspect_edb import parse_edb, parse_embedded_images
 from app_server import (
     _problems_to_entries,
+    _template_from_session,
     _session_publish_history,
     _session_publish_blocking_preflight,
     _session_publish_summary,
@@ -1719,7 +1720,7 @@ class TestEdbPublishFlow(unittest.TestCase):
                     crop_format=CROP_FORMAT_V1,
                 )
 
-            self.assertEqual([20, 20, 2], [len(part["problemIds"]) for part in parts])
+            self.assertEqual([14, 14, 14], [len(part["problemIds"]) for part in parts])
             self.assertEqual(["height-gap_part01.edb", "height-gap_part02.edb", "height-gap_part03.edb"], [
                 Path(part["edbPath"]).name for part in parts
             ])
@@ -1736,6 +1737,58 @@ class TestEdbPublishFlow(unittest.TestCase):
                     )
                 validation = validate_edb_file(part["edbPath"], expected_min_records=part["recordCount"])
                 self.assertLessEqual(validation["pageCountHint"], 50)
+
+    def test_balanced_classin_ranges_keep_order_and_minimize_uneven_tail(self):
+        ranges = problem_board.balanced_classin_part_ranges([2.4] * 42)
+
+        self.assertEqual(
+            [(0, 14, 33.6), (14, 28, 33.6), (28, 42, 33.6)],
+            [(start, end, round(pages, 1)) for start, end, pages in ranges],
+        )
+
+    def test_classin_publish_plan_uses_final_image_record_geometry_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            template = LayoutTemplate(name="academy-default", board_page_count=84)
+            entries = [
+                self._make_problem_entry(root, f"p{index:02d}", Box(0, 0, 400, 972))
+                for index in range(42)
+            ]
+            for entry in entries:
+                entry.actual_height_pages = problem_board.estimate_height_pages((400, 972), template)
+
+            def fake_record_image(placement, entry, **_kwargs):
+                return problem_board._ImageOnlyRecordImage(
+                    crop_path=entry.crop_path,
+                    board_render_path=entry.board_render_path,
+                    image_bytes=b"",
+                    secondary_bytes=b"",
+                    width_px=400,
+                    height_px=972,
+                    scale_ratio=None,
+                )
+
+            with (
+                mock.patch.object(problem_board, "_build_image_only_record_image", side_effect=fake_record_image),
+                mock.patch.object(problem_board, "write_edb") as writer,
+            ):
+                parts = problem_board.plan_classin_limited_edb_parts(
+                    entries,
+                    template,
+                    root,
+                    record_mode="image-only",
+                    text_confidence_threshold=0.78,
+                    dark_board=True,
+                    board_theme=problem_board.DEFAULT_BOARD_THEME,
+                    crop_format=CROP_FORMAT_V1,
+                )
+
+            writer.assert_not_called()
+            self.assertEqual([14, 14, 14], [part["problemCount"] for part in parts])
+            self.assertEqual([33.6, 33.6, 33.6], [round(part["estimatedFlowEndPages"], 1) for part in parts])
+            self.assertEqual(list(entries[index].problem_id for index in range(42)), [
+                problem_id for part in parts for problem_id in part["problemIds"]
+            ])
 
     def test_problem_export_records_stage_timing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6385,6 +6438,190 @@ class TestEdbPublishFlow(unittest.TestCase):
         self.assertEqual([0.0, 1.2], [placement.start_y_pages for placement in placements])
         self.assertEqual([1.2, 2.4], [placement.snapped_next_start_y_pages for placement in placements])
 
+    def test_layout_engine_compact_mode_removes_slot_gap_without_overlap(self):
+        template = LayoutTemplate(
+            name="academy-default",
+            base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+            metadata={"layout_gap_mode": "compact"},
+        )
+        problems = [
+            ProblemLayoutInput(
+                problem_id="compact-1",
+                actual_content_height_pages=0.55,
+                metadata={"placement_scale_ratio": 1.4},
+            ),
+            ProblemLayoutInput(problem_id="compact-2", actual_content_height_pages=0.8),
+        ]
+
+        placements = place_problems(problems, template=template)
+
+        self.assertEqual([0.0, 0.77], [placement.start_y_pages for placement in placements])
+        self.assertEqual([0.77, 1.57], [placement.snapped_next_start_y_pages for placement in placements])
+        self.assertGreaterEqual(placements[1].start_y_pages, placements[0].actual_bottom_y_pages)
+
+    def test_layout_engine_compact_mode_uses_downscaled_rendered_height(self):
+        template = LayoutTemplate(
+            name="academy-default",
+            base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+            metadata={"layout_gap_mode": "compact"},
+        )
+        problems = [
+            ProblemLayoutInput(
+                problem_id="compact-small-1",
+                actual_content_height_pages=0.8,
+                metadata={"placement_scale_ratio": 0.75},
+            ),
+            ProblemLayoutInput(problem_id="compact-small-2", actual_content_height_pages=0.5),
+        ]
+
+        placements = place_problems(problems, template=template)
+
+        self.assertEqual([0.0, 0.6], [placement.start_y_pages for placement in placements])
+        self.assertEqual(0.6, placements[0].actual_bottom_y_pages)
+        self.assertEqual([0.6, 1.1], [placement.snapped_next_start_y_pages for placement in placements])
+
+    def test_layout_engine_honors_science_boundary_downscale_in_grid_mode(self):
+        template = LayoutTemplate(
+            name="academy-default",
+            base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+        )
+        fitted_scale = ONE_PROBLEM_SLOT_HEIGHT_PAGES / 1.26
+        problems = [
+            ProblemLayoutInput(
+                problem_id="physics-slight-overflow",
+                subject=Subject.SCIENCE,
+                actual_content_height_pages=1.26,
+                reading_heavy=True,
+                metadata={"placement_scale_ratio": fitted_scale},
+            ),
+            ProblemLayoutInput(
+                problem_id="physics-next",
+                subject=Subject.SCIENCE,
+                actual_content_height_pages=0.8,
+                reading_heavy=True,
+            ),
+        ]
+
+        placements = place_problems(problems, template=template)
+
+        self.assertEqual(0.0, placements[0].start_y_pages)
+        self.assertAlmostEqual(1.2, placements[0].actual_bottom_y_pages)
+        self.assertAlmostEqual(1.2, placements[0].snapped_next_start_y_pages)
+        self.assertAlmostEqual(1.2, placements[1].start_y_pages)
+        self.assertEqual(0.0, placements[0].overflow_amount_pages)
+
+        unchanged = place_problems(
+            [
+                ProblemLayoutInput(
+                    problem_id="physics-not-adjusted",
+                    subject=Subject.SCIENCE,
+                    actual_content_height_pages=1.26,
+                    reading_heavy=True,
+                )
+            ],
+            template=template,
+        )[0]
+        self.assertEqual(2.4, unchanged.snapped_next_start_y_pages)
+
+    def test_layout_engine_honors_multi_page_boundary_downscale(self):
+        template = LayoutTemplate(
+            name="academy-default",
+            base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+        )
+        placements = place_problems(
+            [
+                ProblemLayoutInput(
+                    problem_id="science-long-boundary",
+                    subject=Subject.SCIENCE,
+                    actual_content_height_pages=6.21,
+                    reading_heavy=True,
+                    metadata={"placement_scale_ratio": 6.0 / 6.21},
+                ),
+                ProblemLayoutInput(
+                    problem_id="science-after-long",
+                    subject=Subject.SCIENCE,
+                    actual_content_height_pages=0.7,
+                    reading_heavy=True,
+                ),
+            ],
+            template=template,
+        )
+
+        self.assertAlmostEqual(6.0, placements[0].actual_bottom_y_pages)
+        self.assertAlmostEqual(6.0, placements[0].snapped_next_start_y_pages)
+        self.assertAlmostEqual(6.0, placements[1].start_y_pages)
+
+    def test_layout_engine_reserves_explicitly_scaled_up_height(self):
+        template = LayoutTemplate(
+            name="academy-default",
+            base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+        )
+        placements = place_problems(
+            [
+                ProblemLayoutInput(
+                    problem_id="science-scaled-up",
+                    subject=Subject.SCIENCE,
+                    actual_content_height_pages=1.0,
+                    reading_heavy=True,
+                    metadata={"placement_scale_ratio": 1.4},
+                ),
+                ProblemLayoutInput(
+                    problem_id="science-after-scaled-up",
+                    subject=Subject.SCIENCE,
+                    actual_content_height_pages=0.7,
+                    reading_heavy=True,
+                ),
+            ],
+            template=template,
+        )
+
+        self.assertAlmostEqual(1.4, placements[0].actual_bottom_y_pages)
+        self.assertAlmostEqual(2.4, placements[0].snapped_next_start_y_pages)
+        self.assertAlmostEqual(2.4, placements[1].start_y_pages)
+
+    def test_layout_engine_per_item_zero_gap_pulls_following_problem_up(self):
+        template = LayoutTemplate(
+            name="academy-default",
+            base_slot_height_pages=ONE_PROBLEM_SLOT_HEIGHT_PAGES,
+        )
+        problems = [
+            ProblemLayoutInput(
+                problem_id="manual-gap-1",
+                actual_content_height_pages=0.55,
+                metadata={"placement_gap_after_pages": 0},
+            ),
+            ProblemLayoutInput(problem_id="manual-gap-2", actual_content_height_pages=0.8),
+        ]
+
+        placements = place_problems(problems, template=template)
+
+        self.assertEqual([0.0, 0.55], [placement.start_y_pages for placement in placements])
+        self.assertEqual([0.55, 1.75], [placement.snapped_next_start_y_pages for placement in placements])
+
+    def test_session_layout_gap_mode_and_problem_override_reach_export_inputs(self):
+        template = _template_from_session({"layoutGapMode": "compact"})
+        self.assertEqual("compact", template.metadata["layout_gap_mode"])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "problem.png"
+            Image.new("RGB", (400, 240), "white").save(image_path)
+            entries = _problems_to_entries(
+                [
+                    {
+                        "id": "gap-problem",
+                        "title": "Gap problem",
+                        "imagePath": image_path.resolve().as_uri(),
+                        "boardRenderPath": image_path.resolve().as_uri(),
+                        "placementGapAfterPages": 0,
+                    }
+                ],
+                template=template,
+            )
+
+        self.assertEqual(0.0, entries[0].placement_gap_after_pages)
+        layout_input = problem_board.placement_inputs(entries)[0]
+        self.assertEqual(0.0, layout_input.metadata["placement_gap_after_pages"])
+
     def test_v1_reconstruct_step_exports_transparent_high_res_png(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6578,6 +6815,30 @@ class TestEdbPublishFlow(unittest.TestCase):
 
         self.assertLess(cleaned.height, 872)
         self.assertGreater(cleaned.height, int(913 * 0.72))
+
+    def test_bottom_blue_watermark_trim_ignores_vertical_cyan_column_divider(self):
+        image = Image.new("RGB", (820, 913), "white")
+        draw = ImageDraw.Draw(image)
+        draw.text((80, 760), "D. final statement", fill="black")
+        draw.text((80, 850), "1 2 3 4 5", fill="black")
+        draw.rectangle((815, 0, 819, 912), fill=(70, 190, 230))
+
+        cleaned = _trim_source_page_chrome(
+            image,
+            preserve_horizontal_bounds=True,
+        )
+        with mock.patch.object(problem_board, "np", None):
+            cleaned_without_numpy = _trim_source_page_chrome(
+                image,
+                preserve_horizontal_bounds=True,
+            )
+
+        for candidate in (cleaned, cleaned_without_numpy):
+            self.assertEqual(image.size, candidate.size)
+            self.assertEqual(
+                image.crop((60, 740, 360, 890)).tobytes(),
+                candidate.crop((60, 740, 360, 890)).tobytes(),
+            )
 
     def test_trusted_pdf_marker_crop_trims_column_divider_and_footer_badge(self):
         with tempfile.TemporaryDirectory() as tmp:

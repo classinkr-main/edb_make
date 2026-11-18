@@ -6,8 +6,10 @@ import base64
 import binascii
 import concurrent.futures
 import errno
+import faulthandler
 import gzip
 import hashlib
+import hmac
 import importlib
 import ipaddress
 import json
@@ -18,6 +20,7 @@ import platform
 import re
 import shutil
 import socket
+import signal
 import struct
 import subprocess
 import sys
@@ -302,6 +305,18 @@ def split_problem_entries_for_classin_page_limit(*args: Any, **kwargs: Any) -> A
     return _lazy_call("build_problem_board_edb", "split_problem_entries_for_classin_page_limit", *args, **kwargs)
 
 
+def plan_classin_limited_edb_parts(*args: Any, **kwargs: Any) -> Any:
+    return _lazy_call("build_problem_board_edb", "plan_classin_limited_edb_parts", *args, **kwargs)
+
+
+def _classin_rendered_flow_metrics(*args: Any, **kwargs: Any) -> Any:
+    return _lazy_call("build_problem_board_edb", "_classin_rendered_flow_metrics", *args, **kwargs)
+
+
+def balanced_classin_part_ranges(*args: Any, **kwargs: Any) -> Any:
+    return _lazy_call("build_problem_board_edb", "balanced_classin_part_ranges", *args, **kwargs)
+
+
 def _validate_record_page_count_hints(*args: Any, **kwargs: Any) -> Any:
     return _lazy_call("build_problem_board_edb", "_validate_record_page_count_hints", *args, **kwargs)
 
@@ -414,12 +429,19 @@ APP_UPDATE_CONFIG_ALIAS_GROUPS = (
     ("updateFeedUrl", ("updateFeedUrl", "update_feed_url")),
     ("downloadUrl", ("downloadUrl", "download_url")),
     ("releaseNotesUrl", ("releaseNotesUrl", "release_notes_url")),
+    ("updatePinHash", ("updatePinHash", "update_pin_hash")),
 )
 APP_UPDATE_CONFIG_ERROR_KEY = "_configError"
 # Frontend uploads files as base64 inside JSON, so a 1 MB limit rejects many
 # normal PDFs/photos before parsing or AI recognition can start.
 MAX_JSON_BODY_BYTES = 64 * 1024 * 1024
 MAX_UPDATE_FEED_BYTES = 262_144
+MAX_UPDATE_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024
+UPDATE_PIN_MIN_LENGTH = 4
+UPDATE_PIN_MAX_LENGTH = 12
+UPDATE_PIN_PBKDF2_ITERATIONS = 210_000
+UPDATE_PIN_FAILURE_LIMIT = 5
+UPDATE_PIN_COOLDOWN_SECONDS = 60.0
 DEFAULT_RECOGNITION_MAX_DIMENSION = 4096
 UPDATE_STATUS_CACHE_TTL_SECONDS = 60.0
 RUNTIME_DIAGNOSTICS_CACHE_TTL_SECONDS = 45.0
@@ -438,6 +460,11 @@ CONTENT_TARGETS = {"all", "questions", "shared-passages"}
 OUTER_EDB_PREFIX_LEN = 11
 _update_status_cache_lock = threading.Lock()
 _update_status_cache: dict[tuple[str, ...], tuple[float, dict[str, Any]]] = {}
+_update_pin_attempt_lock = threading.Lock()
+_update_pin_failures = 0
+_update_pin_blocked_until = 0.0
+_update_install_lock = threading.Lock()
+_update_install_started = False
 _runtime_diagnostics_cache_lock = threading.Lock()
 _runtime_diagnostics_cache: tuple[float, dict[str, Any]] | None = None
 
@@ -526,6 +553,21 @@ class RequestPayloadTooLarge(Exception):
         self.content_length = content_length
         self.limit = limit
         super().__init__(f"request body is {content_length} bytes; limit is {limit} bytes")
+
+
+class AppUpdateError(RuntimeError):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status: HTTPStatus = HTTPStatus.CONFLICT,
+        recovery_steps: list[str] | None = None,
+    ) -> None:
+        self.code = code
+        self.status = status
+        self.recovery_steps = list(recovery_steps or [])
+        super().__init__(message)
 
 
 class ArtifactCleanupBusy(RuntimeError):
@@ -937,6 +979,109 @@ def _normalize_app_update_config_payload(payload: dict[str, Any]) -> tuple[dict[
     return normalized, ""
 
 
+def _parse_update_pin_verifier(value: Any) -> tuple[int, bytes, bytes] | None:
+    text = str(value or "").strip()
+    parts = text.split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return None
+    try:
+        iterations = int(parts[1])
+        salt = bytes.fromhex(parts[2])
+        expected = bytes.fromhex(parts[3])
+    except (TypeError, ValueError):
+        return None
+    if iterations < 100_000 or iterations > 2_000_000:
+        return None
+    if not 16 <= len(salt) <= 64 or len(expected) != 32:
+        return None
+    return iterations, salt, expected
+
+
+def build_update_pin_verifier(
+    pin: str,
+    *,
+    salt: bytes | None = None,
+    iterations: int = UPDATE_PIN_PBKDF2_ITERATIONS,
+) -> str:
+    normalized_pin = str(pin or "").strip()
+    if not normalized_pin.isascii() or not normalized_pin.isdigit():
+        raise ValueError("update PIN must contain ASCII digits only")
+    if not UPDATE_PIN_MIN_LENGTH <= len(normalized_pin) <= UPDATE_PIN_MAX_LENGTH:
+        raise ValueError(
+            f"update PIN must contain {UPDATE_PIN_MIN_LENGTH}-{UPDATE_PIN_MAX_LENGTH} digits"
+        )
+    if not 100_000 <= int(iterations) <= 2_000_000:
+        raise ValueError("update PIN PBKDF2 iterations are outside the allowed range")
+    actual_salt = bytes(salt) if salt is not None else os.urandom(16)
+    if not 16 <= len(actual_salt) <= 64:
+        raise ValueError("update PIN salt must contain 16-64 bytes")
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        normalized_pin.encode("ascii"),
+        actual_salt,
+        int(iterations),
+    )
+    return f"pbkdf2_sha256${int(iterations)}${actual_salt.hex()}${digest.hex()}"
+
+
+def verify_update_pin(pin: Any, verifier: Any) -> bool:
+    parsed = _parse_update_pin_verifier(verifier)
+    normalized_pin = str(pin or "").strip()
+    if parsed is None:
+        return False
+    if not normalized_pin.isascii() or not normalized_pin.isdigit():
+        return False
+    if not UPDATE_PIN_MIN_LENGTH <= len(normalized_pin) <= UPDATE_PIN_MAX_LENGTH:
+        return False
+    iterations, salt, expected = parsed
+    actual = hashlib.pbkdf2_hmac(
+        "sha256",
+        normalized_pin.encode("ascii"),
+        salt,
+        iterations,
+    )
+    return hmac.compare_digest(actual, expected)
+
+
+def clear_update_pin_attempts() -> None:
+    global _update_pin_failures, _update_pin_blocked_until
+    with _update_pin_attempt_lock:
+        _update_pin_failures = 0
+        _update_pin_blocked_until = 0.0
+
+
+def clear_update_install_state() -> None:
+    global _update_install_started
+    with _update_install_lock:
+        _update_install_started = False
+
+
+def _authorize_update_pin(pin: Any, verifier: Any) -> None:
+    global _update_pin_failures, _update_pin_blocked_until
+    now = time.monotonic()
+    with _update_pin_attempt_lock:
+        if _update_pin_blocked_until > now:
+            retry_after = max(1, math.ceil(_update_pin_blocked_until - now))
+            raise AppUpdateError(
+                "update_pin_rate_limited",
+                f"PIN 입력이 잠시 잠겼습니다. {retry_after}초 후 다시 시도해 주세요.",
+                status=HTTPStatus.TOO_MANY_REQUESTS,
+            )
+        if verify_update_pin(pin, verifier):
+            _update_pin_failures = 0
+            _update_pin_blocked_until = 0.0
+            return
+        _update_pin_failures += 1
+        if _update_pin_failures >= UPDATE_PIN_FAILURE_LIMIT:
+            _update_pin_failures = 0
+            _update_pin_blocked_until = now + UPDATE_PIN_COOLDOWN_SECONDS
+        raise AppUpdateError(
+            "invalid_update_pin",
+            "업데이트 PIN이 올바르지 않습니다.",
+            status=HTTPStatus.FORBIDDEN,
+        )
+
+
 def load_app_update_config() -> dict[str, Any]:
     config: dict[str, Any] = {
         "appId": "ClassInEDBMVP",
@@ -945,6 +1090,7 @@ def load_app_update_config() -> dict[str, Any]:
         "updateFeedUrl": "",
         "downloadUrl": "",
         "releaseNotesUrl": "",
+        "updatePinHash": "",
         "bugReportUrl": DEFAULT_BUG_REPORT_URL,
     }
     seen: set[Path] = set()
@@ -966,6 +1112,7 @@ def load_app_update_config() -> dict[str, Any]:
         "updateFeedUrl": "EDB_UPDATE_FEED_URL",
         "downloadUrl": "EDB_DOWNLOAD_URL",
         "releaseNotesUrl": "EDB_RELEASE_NOTES_URL",
+        "updatePinHash": "EDB_UPDATE_PIN_HASH",
         "bugReportUrl": "EDB_BUG_REPORT_URL",
     }
     for key, env_name in env_map.items():
@@ -1343,6 +1490,9 @@ def build_app_update_status() -> dict[str, Any]:
     platform_key = str(config.get("platform") or _app_platform_key())
     current_version = str(config.get("version") or "0.0.0")
     config_error = str(config.get(APP_UPDATE_CONFIG_ERROR_KEY) or "").strip()
+    update_pin_verifier = str(config.get("updatePinHash") or config.get("update_pin_hash") or "").strip()
+    if update_pin_verifier and _parse_update_pin_verifier(update_pin_verifier) is None:
+        config_error = "app_update_config.json updatePinHash is not a valid PBKDF2 verifier"
     feed_url = _normalize_update_url(config.get("updateFeedUrl") or config.get("update_feed_url"))
     fallback_download_url = _normalize_update_url(config.get("downloadUrl") or config.get("download_url"))
     fallback_notes_url = _normalize_update_url(config.get("releaseNotesUrl") or config.get("release_notes_url"))
@@ -1359,6 +1509,7 @@ def build_app_update_status() -> dict[str, Any]:
         fallback_download_url,
         fallback_notes_url,
         config_error,
+        update_pin_verifier,
     )
     cached = _cached_update_status(cache_key)
     if cached is not None:
@@ -1377,6 +1528,11 @@ def build_app_update_status() -> dict[str, Any]:
         "downloadUrl": fallback_download_url,
         "releaseNotesUrl": fallback_notes_url,
         "latest": None,
+        "automaticUpdateEnabled": bool(update_pin_verifier),
+        "automaticUpdateSupported": bool(
+            is_frozen_app() and platform_key in UPDATE_PLATFORM_ARTIFACT_TYPES
+        ),
+        "automaticUpdateReady": False,
     }
     if not feed_url:
         if config_error:
@@ -1502,6 +1658,13 @@ def build_app_update_status() -> dict[str, Any]:
         return _remember_update_status(cache_key, status)
     status["updateAvailable"] = comparison > 0
     status["channelStatus"] = "update_available" if comparison > 0 else "up_to_date"
+    status["automaticUpdateReady"] = bool(
+        status["updateAvailable"]
+        and status["automaticUpdateEnabled"]
+        and status["automaticUpdateSupported"]
+        and status.get("sha256")
+        and status.get("sizeBytes")
+    )
     return _remember_update_status(cache_key, status)
 
 
@@ -1515,6 +1678,378 @@ def _allowed_update_urls() -> set[str]:
         latest.get("releaseNotesUrl") if isinstance(latest, dict) else None,
     }
     return {str(url).strip() for url in candidates if str(url or "").strip()}
+
+
+def _update_artifact_details(status: dict[str, Any]) -> tuple[str, str, str, int, str]:
+    latest = status.get("latest") if isinstance(status.get("latest"), dict) else {}
+    download_url = _first_nonempty(status.get("downloadUrl"), latest.get("downloadUrl"))
+    file_name = _first_nonempty(latest.get("fileName"), _update_download_url_file_name(latest))
+    artifact_type = _first_nonempty(latest.get("artifactType")).lower()
+    expected_sha256 = _normalize_update_sha256(
+        _first_nonempty(status.get("sha256"), latest.get("sha256"))
+    )
+    expected_size = _normalize_positive_int(status.get("sizeBytes") or latest.get("sizeBytes"))
+    if not download_url or _normalize_update_url(download_url) != download_url:
+        raise AppUpdateError("update_download_unavailable", "안전한 업데이트 파일 URL이 없습니다.")
+    if not file_name or file_name != Path(file_name).name or file_name in {".", ".."}:
+        raise AppUpdateError("invalid_update_file_name", "업데이트 파일 이름이 올바르지 않습니다.")
+    if not artifact_type:
+        artifact_type = {
+            ".dmg": "dmg",
+            ".zip": "zip",
+            ".exe": "setup-exe",
+        }.get(Path(file_name).suffix.lower(), "")
+    platform_key = str(status.get("platform") or "").strip().lower()
+    metadata_error = _update_artifact_metadata_error(
+        {
+            "downloadUrl": download_url,
+            "fileName": file_name,
+            "artifactType": artifact_type,
+        },
+        platform_key,
+    )
+    if metadata_error:
+        raise AppUpdateError("invalid_update_artifact", metadata_error)
+    if not expected_sha256 or expected_size is None:
+        raise AppUpdateError(
+            "update_integrity_metadata_required",
+            "자동 업데이트에는 파일 크기와 SHA-256 검증 정보가 필요합니다.",
+            recovery_steps=["관리자에게 업데이트 피드의 sizeBytes와 sha256 등록을 요청해 주세요."],
+        )
+    if expected_size > MAX_UPDATE_ARTIFACT_BYTES:
+        raise AppUpdateError("update_artifact_too_large", "업데이트 파일이 허용 크기를 초과합니다.")
+    return download_url, file_name, artifact_type, expected_size, expected_sha256
+
+
+def _download_update_artifact(
+    status: dict[str, Any],
+    *,
+    runtime_dir: Path | None = None,
+) -> Path:
+    download_url, file_name, _artifact_type, expected_size, expected_sha256 = _update_artifact_details(status)
+    update_root = (runtime_dir or RUNTIME_DIR) / "updates"
+    update_root.mkdir(parents=True, exist_ok=True)
+    download_dir = Path(tempfile.mkdtemp(prefix="pending-", dir=update_root))
+    partial_path = download_dir / f"{file_name}.part"
+    final_path = download_dir / file_name
+    request = Request(
+        download_url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": f"ClassInEDBMVP/{status.get('currentVersion', '0')}",
+        },
+    )
+    try:
+        digest = hashlib.sha256()
+        total = 0
+        with urlopen(request, timeout=30.0) as response, partial_path.open("wb") as output:
+            response_url = str(getattr(response, "geturl", lambda: download_url)() or download_url)
+            if not _normalize_update_url(response_url):
+                raise AppUpdateError("unsafe_update_redirect", "업데이트 다운로드가 안전하지 않은 주소로 이동했습니다.")
+            raw_length = str(response.headers.get("Content-Length") or "").strip()
+            if raw_length:
+                try:
+                    content_length = int(raw_length)
+                except ValueError as exc:
+                    raise AppUpdateError(
+                        "invalid_update_content_length",
+                        "업데이트 서버가 올바르지 않은 파일 크기를 보냈습니다.",
+                    ) from exc
+                if content_length != expected_size:
+                    raise AppUpdateError(
+                        "update_size_mismatch",
+                        "업데이트 파일 크기가 배포 정보와 일치하지 않습니다.",
+                    )
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > expected_size or total > MAX_UPDATE_ARTIFACT_BYTES:
+                    raise AppUpdateError(
+                        "update_size_mismatch",
+                        "업데이트 파일 크기가 배포 정보보다 큽니다.",
+                    )
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if total != expected_size:
+            raise AppUpdateError(
+                "update_size_mismatch",
+                "업데이트 파일 크기가 배포 정보와 일치하지 않습니다.",
+            )
+        if not hmac.compare_digest(digest.hexdigest(), expected_sha256):
+            raise AppUpdateError(
+                "update_checksum_mismatch",
+                "업데이트 파일 무결성 검증에 실패했습니다.",
+                recovery_steps=["파일을 실행하지 않았습니다. 관리자에게 업데이트 피드를 확인해 달라고 요청해 주세요."],
+            )
+        os.replace(partial_path, final_path)
+        return final_path
+    except AppUpdateError:
+        shutil.rmtree(download_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(download_dir, ignore_errors=True)
+        raise AppUpdateError(
+            "update_download_failed",
+            f"업데이트 파일을 받지 못했습니다: {exc}",
+            status=HTTPStatus.BAD_GATEWAY,
+            recovery_steps=["인터넷 연결을 확인한 뒤 다시 시도해 주세요."],
+        ) from exc
+
+
+def _current_macos_bundle_path(executable: Path | None = None) -> Path | None:
+    candidate = Path(executable or sys.executable).absolute()
+    for path in (candidate, *candidate.parents):
+        if path.suffix.lower() == ".app":
+            return path
+    return None
+
+
+MACOS_UPDATE_HELPER = r'''#!/bin/zsh
+set -u
+parent_pid="$1"
+artifact="$2"
+artifact_type="$3"
+target_app="$4"
+log_file="$5"
+exec >>"$log_file" 2>&1
+echo "[$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)] updater waiting for process $parent_pid"
+while /bin/kill -0 "$parent_pid" 2>/dev/null; do /bin/sleep 0.25; done
+
+bundle_name="${target_app:t}"
+target_parent="${target_app:h}"
+work_dir="${artifact:h}/apply-$$"
+mount_dir="$work_dir/mount"
+extract_dir="$work_dir/extract"
+staged_app="$target_parent/.${bundle_name}.updating.$$"
+backup_app="$target_parent/.${bundle_name}.backup.$$"
+mounted=0
+cleanup() {
+  if [[ "$mounted" == "1" ]]; then /usr/bin/hdiutil detach "$mount_dir" -force >/dev/null 2>&1 || true; fi
+  /bin/rm -rf "$work_dir" "$staged_app"
+}
+trap cleanup EXIT
+/bin/mkdir -p "$work_dir"
+
+source_app=""
+if [[ "$artifact_type" == "dmg" ]]; then
+  /bin/mkdir -p "$mount_dir"
+  /usr/bin/hdiutil attach "$artifact" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
+  mounted=1
+  source_app="$mount_dir/$bundle_name"
+elif [[ "$artifact_type" == "zip" ]]; then
+  /bin/mkdir -p "$extract_dir"
+  /usr/bin/ditto -x -k "$artifact" "$extract_dir"
+  source_app="$extract_dir/$bundle_name"
+else
+  echo "unsupported macOS update artifact: $artifact_type"
+  exit 21
+fi
+
+if [[ ! -d "$source_app" ]]; then
+  echo "update archive does not contain $bundle_name"
+  exit 22
+fi
+/usr/bin/ditto "$source_app" "$staged_app"
+if command -v codesign >/dev/null 2>&1; then
+  /usr/bin/codesign --verify --deep --strict "$staged_app"
+fi
+if [[ ! -d "$target_app" ]]; then
+  echo "installed app disappeared before replacement: $target_app"
+  exit 23
+fi
+/bin/mv "$target_app" "$backup_app"
+if /bin/mv "$staged_app" "$target_app"; then
+  /bin/rm -rf "$backup_app" "$artifact"
+  /usr/bin/open "$target_app"
+  echo "update installed and app relaunched"
+else
+  /bin/mv "$backup_app" "$target_app" || true
+  echo "update replacement failed; previous app restored"
+  exit 24
+fi
+'''
+
+
+WINDOWS_UPDATE_HELPER = r'''param(
+  [Parameter(Mandatory=$true)][int]$ParentPid,
+  [Parameter(Mandatory=$true)][string]$Installer,
+  [Parameter(Mandatory=$true)][string]$AppExecutable,
+  [Parameter(Mandatory=$true)][string]$InstallDir,
+  [Parameter(Mandatory=$true)][string]$LogFile
+)
+$ErrorActionPreference = 'Stop'
+try { Wait-Process -Id $ParentPid -Timeout 120 -ErrorAction SilentlyContinue } catch {}
+$arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS', ('/DIR="' + $InstallDir + '"'), ('/LOG="' + $LogFile + '"'))
+$process = Start-Process -FilePath $Installer -ArgumentList $arguments -Wait -PassThru
+if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+  throw "installer exited with code $($process.ExitCode)"
+}
+if (Test-Path -LiteralPath $AppExecutable -PathType Leaf) {
+  Start-Process -FilePath $AppExecutable
+}
+Remove-Item -LiteralPath $Installer -Force -ErrorAction SilentlyContinue
+'''
+
+
+def _launch_macos_update_helper(artifact_path: Path, artifact_type: str) -> dict[str, Any]:
+    target_app = _current_macos_bundle_path()
+    if target_app is None or not is_frozen_app():
+        raise AppUpdateError(
+            "update_requires_packaged_app",
+            "자동 업데이트는 설치된 macOS 앱에서만 사용할 수 있습니다.",
+        )
+    if "AppTranslocation" in str(target_app):
+        raise AppUpdateError(
+            "update_translocated_app",
+            "격리 실행 중인 앱은 자동으로 교체할 수 없습니다.",
+            recovery_steps=["앱을 응용 프로그램 폴더로 옮겨 다시 실행해 주세요."],
+        )
+    if not target_app.exists() or not os.access(target_app.parent, os.W_OK):
+        raise AppUpdateError(
+            "update_target_not_writable",
+            "현재 앱 설치 위치에 업데이트를 덮어쓸 권한이 없습니다.",
+            recovery_steps=["쓰기 가능한 응용 프로그램 폴더에 앱을 설치한 뒤 다시 시도해 주세요."],
+        )
+    helper_path = artifact_path.parent / "apply-macos-update.zsh"
+    log_path = artifact_path.parent / "update-install.log"
+    helper_path.write_text(MACOS_UPDATE_HELPER, encoding="utf-8")
+    helper_path.chmod(0o700)
+    log_stream = log_path.open("ab")
+    try:
+        subprocess.Popen(
+            [
+                "/bin/zsh",
+                str(helper_path),
+                str(os.getpid()),
+                str(artifact_path),
+                artifact_type,
+                str(target_app),
+                str(log_path),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=log_stream,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    finally:
+        log_stream.close()
+    return {"platform": "macos", "targetName": target_app.name, "restartScheduled": True}
+
+
+def _launch_windows_update_helper(artifact_path: Path, artifact_type: str) -> dict[str, Any]:
+    if artifact_type != "setup-exe":
+        raise AppUpdateError("unsupported_update_artifact", "Windows 자동 업데이트는 Setup.exe만 지원합니다.")
+    if not is_frozen_app():
+        raise AppUpdateError(
+            "update_requires_packaged_app",
+            "자동 업데이트는 설치된 Windows 앱에서만 사용할 수 있습니다.",
+        )
+    executable = Path(sys.executable).absolute()
+    if not executable.is_file() or not os.access(executable.parent, os.W_OK):
+        raise AppUpdateError(
+            "update_target_not_writable",
+            "현재 앱 설치 위치에 업데이트를 덮어쓸 권한이 없습니다.",
+            recovery_steps=["쓰기 가능한 폴더에 앱을 설치한 뒤 다시 시도해 주세요."],
+        )
+    helper_path = artifact_path.parent / "apply-windows-update.ps1"
+    log_path = artifact_path.parent / "update-install.log"
+    helper_path.write_text(WINDOWS_UPDATE_HELPER, encoding="utf-8-sig")
+    creation_flags = 0
+    creation_flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    creation_flags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    subprocess.Popen(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(helper_path),
+            "-ParentPid",
+            str(os.getpid()),
+            "-Installer",
+            str(artifact_path),
+            "-AppExecutable",
+            str(executable),
+            "-InstallDir",
+            str(executable.parent),
+            "-LogFile",
+            str(log_path),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creation_flags,
+        close_fds=True,
+    )
+    return {"platform": "windows", "targetName": executable.name, "restartScheduled": True}
+
+
+def _launch_update_helper(artifact_path: Path, status: dict[str, Any], artifact_type: str) -> dict[str, Any]:
+    platform_key = str(status.get("platform") or "").strip().lower()
+    try:
+        if platform_key == "macos":
+            return _launch_macos_update_helper(artifact_path, artifact_type)
+        if platform_key == "windows":
+            return _launch_windows_update_helper(artifact_path, artifact_type)
+    except AppUpdateError:
+        raise
+    except Exception as exc:
+        raise AppUpdateError(
+            "update_installer_launch_failed",
+            f"업데이트 설치 도우미를 시작하지 못했습니다: {exc}",
+            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+        ) from exc
+    raise AppUpdateError("unsupported_update_platform", "이 운영체제의 자동 업데이트는 아직 지원하지 않습니다.")
+
+
+def prepare_app_update(pin: Any) -> dict[str, Any]:
+    status = build_app_update_status()
+    if not status.get("updateAvailable"):
+        raise AppUpdateError("update_not_available", "설치할 새 버전이 없습니다.")
+    config = load_app_update_config()
+    verifier = str(config.get("updatePinHash") or config.get("update_pin_hash") or "").strip()
+    if not verifier:
+        raise AppUpdateError(
+            "update_pin_not_configured",
+            "이 배포본에는 업데이트 PIN이 설정되어 있지 않습니다.",
+            recovery_steps=["배포 설정에 updatePinHash를 등록한 설치본을 사용해 주세요."],
+        )
+    if _parse_update_pin_verifier(verifier) is None:
+        raise AppUpdateError("invalid_update_pin_config", "업데이트 PIN 설정이 올바르지 않습니다.")
+    _authorize_update_pin(pin, verifier)
+    _download_url, file_name, artifact_type, _expected_size, _expected_sha256 = _update_artifact_details(status)
+    artifact_path = _download_update_artifact(status)
+    helper = _launch_update_helper(artifact_path, status, artifact_type)
+    latest = status.get("latest") if isinstance(status.get("latest"), dict) else {}
+    return {
+        "ok": True,
+        "accepted": True,
+        "currentVersion": status.get("currentVersion"),
+        "targetVersion": latest.get("version"),
+        "fileName": file_name,
+        **helper,
+    }
+
+
+def begin_app_update(pin: Any) -> dict[str, Any]:
+    global _update_install_started
+    if not _update_install_lock.acquire(blocking=False):
+        raise AppUpdateError("update_install_busy", "다른 업데이트 요청을 처리하고 있습니다.")
+    try:
+        if _update_install_started:
+            raise AppUpdateError("update_install_started", "업데이트가 이미 시작되었습니다.")
+        result = prepare_app_update(pin)
+        _update_install_started = True
+        return result
+    finally:
+        _update_install_lock.release()
 
 
 def ensure_runtime_dirs() -> None:
@@ -1549,6 +2084,13 @@ def configure_app_logging(log_file: str | Path | None = None) -> None:
     sys.stdout = stream
     sys.stderr = stream
     print(f"\n[{datetime.now().isoformat(timespec='seconds')}] {APP_NAME} starting")
+
+
+def enable_fatal_error_logging() -> None:
+    try:
+        faulthandler.enable(file=sys.stderr, all_threads=True)
+    except (AttributeError, OSError, RuntimeError, ValueError) as exc:
+        print(f"[app-server] faulthandler unavailable: {exc}", file=sys.stderr, flush=True)
 
 
 def _local_server_is_healthy(host: str, port: int, *, timeout: float = 0.35) -> bool:
@@ -1644,6 +2186,23 @@ def _coerce_placement_scale_ratio(value: Any) -> float | None:
     if ratio is None:
         return None
     return max(0.6, min(3.0, ratio))
+
+
+def _coerce_placement_gap_after_pages(value: Any) -> float | None:
+    if isinstance(value, dict):
+        for key in ("gapAfterPages", "placementGapAfterPages", "placement_gap_after_pages"):
+            if value.get(key) is not None:
+                value = value.get(key)
+                break
+        else:
+            return None
+    try:
+        gap_pages = _coerce_optional_float(value)
+    except (TypeError, ValueError):
+        return None
+    if gap_pages is None:
+        return None
+    return max(0.0, gap_pages)
 
 
 def _problem_preserves_legacy_placement_scale(problem: dict[str, Any]) -> bool:
@@ -2582,7 +3141,12 @@ def _write_classin_limited_edb_files_local(
             "page_count_hint": CLASSIN_MAX_BOARD_PAGE_COUNT,
         }
 
-    def render_chunk(chunk_entries: list[Any], *, allow_existing: bool = False) -> None:
+    def render_chunk(
+        chunk_entries: list[Any],
+        *,
+        allow_existing: bool = False,
+        from_recursive_split: bool = False,
+    ) -> None:
         rendered_chunk = build_rendered_chunk(chunk_entries, allow_existing=allow_existing)
         part_placements = list(rendered_chunk["placements"])
         flow_end_pages = float(rendered_chunk["flow_end_pages"])
@@ -2590,8 +3154,8 @@ def _write_classin_limited_edb_files_local(
             split_index = _first_placement_over_page_limit(part_placements, CLASSIN_MAX_BOARD_PAGE_COUNT)
             if split_index is None or split_index <= 0:
                 split_index = 1
-            render_chunk(chunk_entries[:split_index])
-            render_chunk(chunk_entries[split_index:])
+            render_chunk(chunk_entries[:split_index], from_recursive_split=True)
+            render_chunk(chunk_entries[split_index:], from_recursive_split=True)
             return
         if flow_end_pages > CLASSIN_MAX_BOARD_PAGE_COUNT + 1e-6:
             problem_id = str(getattr(chunk_entries[0], "problem_id", "unknown") or "unknown")
@@ -2600,6 +3164,7 @@ def _write_classin_limited_edb_files_local(
                 f"after rendering ({flow_end_pages:.3f} pages); split the source before publishing"
             )
 
+        rendered_chunk["from_recursive_split"] = from_recursive_split
         rendered_chunks.append(rendered_chunk)
 
     for chunk_entries in chunks:
@@ -2607,17 +3172,62 @@ def _write_classin_limited_edb_files_local(
 
     compacted_chunks: list[dict[str, Any]] = []
     for rendered_chunk in rendered_chunks:
-        if compacted_chunks:
+        can_compact_with_previous = bool(
+            compacted_chunks
+            and (
+                compacted_chunks[-1].get("from_recursive_split")
+                or rendered_chunk.get("from_recursive_split")
+            )
+        )
+        if can_compact_with_previous:
             candidate_entries = [
                 *list(compacted_chunks[-1]["entries"]),
                 *list(rendered_chunk["entries"]),
             ]
             candidate = build_rendered_chunk(candidate_entries)
             if float(candidate["flow_end_pages"]) <= CLASSIN_MAX_BOARD_PAGE_COUNT + 1e-6:
+                candidate["from_recursive_split"] = bool(
+                    compacted_chunks[-1].get("from_recursive_split")
+                    or rendered_chunk.get("from_recursive_split")
+                )
                 compacted_chunks[-1] = candidate
                 continue
         compacted_chunks.append(rendered_chunk)
     rendered_chunks = compacted_chunks
+
+    if len(rendered_chunks) >= 3 and not template.metadata.get("preserve_source_layout"):
+        flattened_entries = [
+            entry
+            for rendered_chunk in rendered_chunks
+            for entry in list(rendered_chunk["entries"])
+        ]
+        flattened_placements = [
+            placement
+            for rendered_chunk in rendered_chunks
+            for placement in list(rendered_chunk["placements"])
+        ]
+        rendered_advances, rendered_tails = _classin_rendered_flow_metrics(
+            flattened_entries,
+            flattened_placements,
+        )
+        if rendered_advances:
+            try:
+                balanced_ranges = balanced_classin_part_ranges(
+                    rendered_advances,
+                    tail_weights=rendered_tails,
+                    part_count=len(rendered_chunks),
+                )
+                balanced_chunks = [
+                    build_rendered_chunk(flattened_entries[start:end])
+                    for start, end, _estimated_pages in balanced_ranges
+                ]
+                if all(
+                    float(chunk["flow_end_pages"]) <= CLASSIN_MAX_BOARD_PAGE_COUNT + 1e-6
+                    for chunk in balanced_chunks
+                ):
+                    rendered_chunks = balanced_chunks
+            except ValueError:
+                pass
 
     part_count = len(rendered_chunks)
     parts: list[dict[str, Any]] = []
@@ -3446,6 +4056,75 @@ def _session_publish_preflight_blocked_payload(
         "blockingProblemIds": blocking_problem_ids,
         "blocking_problem_ids": blocking_problem_ids,
     }
+
+
+def _ordered_session_publish_sequence(
+    session: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Apply publish order/exclusions/placements without mutating the session."""
+
+    raw_problem_values = session.get("problems")
+    if not isinstance(raw_problem_values, list):
+        raw_problem_values = []
+    raw_id_issues = _session_problem_id_issues(raw_problem_values)
+    if raw_id_issues:
+        return [], raw_id_issues
+
+    raw_problems = [problem for problem in raw_problem_values if isinstance(problem, dict)]
+    order = list(payload.get("order") or [])
+    excluded = set(payload.get("excluded") or [])
+    placement_payload = payload.get("placements")
+    if not isinstance(placement_payload, dict):
+        placement_payload = {}
+
+    by_id = {
+        str(problem.get("id") or problem.get("problem_id") or "").strip(): problem
+        for problem in raw_problems
+    }
+    sequence: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_problem_id in order:
+        problem_id = str(raw_problem_id or "").strip()
+        if problem_id in by_id and problem_id not in excluded and problem_id not in seen:
+            sequence.append(by_id[problem_id])
+            seen.add(problem_id)
+    for problem_id, problem in by_id.items():
+        if problem_id in excluded or problem_id in seen:
+            continue
+        sequence.append(problem)
+        seen.add(problem_id)
+
+    sequence_with_placements: list[dict[str, Any]] = []
+    for problem in sequence:
+        problem_copy = dict(problem)
+        problem_id = str(problem_copy.get("id") or "")
+        preserve_legacy_scale = (
+            _problem_preserves_legacy_placement_scale(problem_copy)
+            or _problem_has_persisted_legacy_placement_scale(problem_copy)
+        )
+        x_ratio = _coerce_placement_x_ratio(placement_payload.get(problem_id))
+        if x_ratio is None:
+            x_ratio = _coerce_placement_x_ratio(problem_copy)
+        if x_ratio is not None:
+            problem_copy["placementXRatio"] = x_ratio
+        y_ratio = _coerce_placement_y_ratio(placement_payload.get(problem_id))
+        if y_ratio is None:
+            y_ratio = _coerce_placement_y_ratio(problem_copy)
+        if y_ratio is not None:
+            problem_copy["placementYRatio"] = y_ratio
+        scale_ratio = _coerce_placement_scale_ratio(placement_payload.get(problem_id))
+        if scale_ratio is None:
+            scale_ratio = _coerce_placement_scale_ratio(problem_copy)
+        if scale_ratio is not None:
+            problem_copy["placementScaleRatio"] = scale_ratio
+        if preserve_legacy_scale:
+            # Provenance comes only from the persisted problem, never from a
+            # new request patch that happens to use an oversized scale.
+            problem_copy["preserveLegacyPlacementScale"] = True
+            problem_copy["preserve_legacy_placement_scale"] = True
+        sequence_with_placements.append(problem_copy)
+    return sequence_with_placements, []
 
 
 def _session_publish_summary(
@@ -4411,6 +5090,7 @@ def _problems_to_entries(problems: list[dict[str, Any]], *, template: LayoutTemp
                 placement_x_ratio=_coerce_placement_x_ratio(problem),
                 placement_y_ratio=_coerce_placement_y_ratio(problem),
                 placement_scale_ratio=_coerce_placement_scale_ratio(problem),
+                placement_gap_after_pages=_coerce_placement_gap_after_pages(problem),
                 preserve_legacy_placement_scale=_problem_preserves_legacy_placement_scale(problem),
                 processing_step=_normalize_processing_step(
                     problem.get("processingStep")
@@ -4451,6 +5131,13 @@ def _template_from_session(session: dict[str, Any]) -> LayoutTemplate:
     template.base_slot_height_pages = ONE_PROBLEM_SLOT_HEIGHT_PAGES
     metadata = template_data.get("metadata") if isinstance(template_data.get("metadata"), dict) else {}
     template.metadata.update(metadata)
+    layout_gap_mode = str(
+        session.get("layoutGapMode")
+        or session.get("layout_gap_mode")
+        or template.metadata.get("layout_gap_mode")
+        or "classin-grid"
+    ).strip().lower()
+    template.metadata["layout_gap_mode"] = "compact" if layout_gap_mode == "compact" else "classin-grid"
     session_intent = (
         str(session.get("inputIntent") or session.get("input_intent") or "")
         .strip()
@@ -4856,6 +5543,7 @@ def _problem_skeleton_from_parent(parent: dict[str, Any]) -> dict[str, Any]:
         "placementXRatio": _coerce_placement_x_ratio(parent),
         "placementYRatio": _coerce_placement_y_ratio(parent),
         "placementScaleRatio": _coerce_placement_scale_ratio(parent),
+        "placementGapAfterPages": _coerce_placement_gap_after_pages(parent),
         "riskFlags": [],  # mutated entries lose the auto-detected risk
     }
     return skeleton
@@ -5150,6 +5838,7 @@ def _copy_publish_problem_layout_metadata(target: dict[str, Any], source: dict[s
         ("placementMode", "placement_mode"),
         ("forceFullPageBounds", "force_full_page_bounds"),
         ("preserveLegacyPlacementScale", "preserve_legacy_placement_scale"),
+        ("placementGapAfterPages", "placement_gap_after_pages"),
     ):
         _copy_session_metadata_aliases_overwrite(target, source, aliases)
 
@@ -7426,8 +8115,8 @@ def _mutate_enhance_image(session: dict[str, Any], payload: dict[str, Any]) -> d
         or payload.get("image_provider")
         or DEFAULT_IMAGE_RECONSTRUCTION_PROVIDER
     )
-    env_key = "GEMINI_API_KEY" if provider == "gemini" else "OPENAI_API_KEY"
-    provider_label = "Gemini" if provider == "gemini" else "OpenAI"
+    env_key = "GEMINI_API_KEY"
+    provider_label = "Gemini"
     api_key = os.environ.get(env_key, "").strip()
 
     problem_ids = _enhance_target_problem_ids(session, payload)
@@ -8369,6 +9058,9 @@ class AppHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, RequestHandlerClass)
         _recover_interrupted_session_reset()
         self._state_lock = threading.RLock()
+        self._shutdown_reason_lock = threading.Lock()
+        self._shutdown_reason: str | None = None
+        self._started_at = time.time()
         # Artifact-producing handlers write files before committing session
         # metadata. Serialize the entire handler so a stale CAS loser cannot
         # overwrite the winner's files before its commit is rejected.
@@ -8386,6 +9078,31 @@ class AppHTTPServer(ThreadingHTTPServer):
         self._session_revision = 1 if latest_session is not None else 0
         self.allowed_files: set[str] = collect_session_file_paths(latest_session) if latest_session else set()
         self.allowed_files |= collect_session_history_file_paths(history)
+
+    def note_shutdown_reason(self, reason: str) -> str:
+        normalized = str(reason or "unknown").strip() or "unknown"
+        with self._shutdown_reason_lock:
+            if self._shutdown_reason is None:
+                self._shutdown_reason = normalized
+            return self._shutdown_reason
+
+    def shutdown_reason(self) -> str | None:
+        with self._shutdown_reason_lock:
+            return self._shutdown_reason
+
+    def request_shutdown(self, reason: str) -> None:
+        recorded = self.note_shutdown_reason(reason)
+        print(f"[app-server] shutdown requested: {recorded}", file=sys.stderr, flush=True)
+        self.shutdown()
+
+    def health_payload(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "app": APP_NAME,
+            "pid": os.getpid(),
+            "sessionEpoch": self.session_epoch(),
+            "uptimeSeconds": max(0, int(time.time() - self._started_at)),
+        }
 
     def session_snapshot(self) -> dict[str, Any] | None:
         with self._state_lock:
@@ -8928,7 +9645,9 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            self._send_json({"ok": True, "app": APP_NAME})
+            health_builder = getattr(self.app_server, "health_payload", None)
+            payload = health_builder() if callable(health_builder) else {"ok": True, "app": APP_NAME}
+            self._send_json(payload)
             return
         if parsed.path == "/generated_session.js":
             self._send_text(read_generated_session_js(), content_type="application/javascript; charset=utf-8")
@@ -8997,8 +9716,14 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/bug-report":
             self._handle_bug_report()
             return
+        if parsed.path == "/api/app/update/install":
+            self._handle_app_update_install()
+            return
         if parsed.path == "/api/runtime/artifacts/cleanup":
             self._handle_runtime_artifact_cleanup()
+            return
+        if parsed.path == "/api/session/publish-plan":
+            self._run_artifact_read(self._handle_session_publish_plan)
             return
         if parsed.path == "/api/session/publish":
             self._run_artifact_job(self._handle_session_publish)
@@ -9055,6 +9780,145 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         finally:
             self._close_connection_when_body_unread()
 
+    def _handle_session_publish_plan(self) -> None:
+        session, current_revision = self._current_session_state()
+        if session is None:
+            self._send_json({"ok": False, "error": "no session available"}, status=HTTPStatus.NOT_FOUND)
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError as exc:
+            self._send_json({"ok": False, "error": f"invalid JSON: {exc}"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not self._validate_expected_session_revision(payload, current_revision):
+            return
+
+        payload_session = payload.get("session")
+        if isinstance(payload_session, dict) and isinstance(payload_session.get("problems"), list):
+            session = _denormalize_session_paths(payload_session)
+
+        raw_problem_values = session.get("problems")
+        if not isinstance(raw_problem_values, list):
+            raw_problem_values = []
+        sequence, raw_id_issues = _ordered_session_publish_sequence(session, payload)
+        if raw_id_issues:
+            raw_id_preflight = {
+                "status": "blocked",
+                "passed": False,
+                "checkedProblemCount": len(raw_problem_values),
+                "checked_problem_count": len(raw_problem_values),
+                "issueCount": len(raw_id_issues),
+                "issue_count": len(raw_id_issues),
+                "issues": [{**issue, "blocking": True} for issue in raw_id_issues],
+                "gate": "session_publish",
+                "gateLabel": "EDB publish",
+                "gate_label": "EDB publish",
+            }
+            self._send_json(
+                _session_publish_preflight_blocked_payload(raw_id_preflight, []),
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        if not sequence:
+            self._send_json(
+                {
+                    "ok": False,
+                    "code": "publish_empty_selection",
+                    "operation": "session_publish_plan",
+                    "retryable": False,
+                    "error": "제외 후 제작할 문항이 남아 있지 않습니다.",
+                    "recoverySteps": ["제작할 문항을 하나 이상 포함한 뒤 다시 시도해 주세요."],
+                },
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        blocking_preflight, duplicate_groups = _session_publish_blocking_preflight(sequence, session=session)
+        if not blocking_preflight.get("passed"):
+            self._send_json(
+                _session_publish_preflight_blocked_payload(blocking_preflight, duplicate_groups),
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+
+        template = _template_from_session(session)
+        try:
+            entries = _problems_to_entries(sequence, template=template)
+            template.board_page_count = max(50, len(entries) * 2)
+            crop_format = _normalize_crop_format(session.get("crop_format"))
+            projected_parts = plan_classin_limited_edb_parts(
+                entries,
+                template,
+                Path(session.get("output_dir") or RUNTIME_DIR / "publish_output").resolve(),
+                record_mode="image-only",
+                text_confidence_threshold=0.78,
+                dark_board=True,
+                board_theme=session.get("board_theme") or DEFAULT_BOARD_THEME,
+                crop_format=crop_format,
+            )
+        except FileNotFoundError as exc:
+            self._send_json(_publish_stage_failure_payload("build", exc), status=HTTPStatus.CONFLICT)
+            return
+        except (KeyError, ValueError) as exc:
+            self._send_json(
+                _publish_failure_payload(
+                    code="publish_plan_invalid",
+                    message="현재 작업의 EDB 분할 수를 계산하지 못했습니다",
+                    exc=exc,
+                    retryable=False,
+                    recovery_steps=[
+                        "원본 또는 자료 배치를 확인한 뒤 다시 시도해 주세요.",
+                        "반복되면 오류 정보를 복사해 신고해 주세요.",
+                    ],
+                ),
+                status=HTTPStatus.CONFLICT,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — preview failures remain non-mutating.
+            _log_operation_exception("session_publish_plan.build", exc)
+            self._send_json(
+                _publish_stage_failure_payload("build", exc),
+                status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+            return
+
+        response: dict[str, Any] = {
+            "ok": True,
+            "operation": "session_publish_plan",
+            "canStartPublish": True,
+            "can_start_publish": True,
+            "projectedPartCount": len(projected_parts),
+            "projected_part_count": len(projected_parts),
+            "projectedParts": projected_parts,
+            "projected_parts": projected_parts,
+            "projectedSplit": len(projected_parts) > 1,
+            "projected_split": len(projected_parts) > 1,
+            "totalEstimatedFlowEndPages": sum(
+                float(part.get("estimatedFlowEndPages") or 0.0)
+                for part in projected_parts
+            ),
+            "total_estimated_flow_end_pages": sum(
+                float(part.get("estimatedFlowEndPages") or 0.0)
+                for part in projected_parts
+            ),
+            "pageCountLimit": CLASSIN_MAX_BOARD_PAGE_COUNT,
+            "page_count_limit": CLASSIN_MAX_BOARD_PAGE_COUNT,
+            "blockingPreflight": blocking_preflight,
+            "blocking_preflight": blocking_preflight,
+            # The handoff/ClassIn preflight can only be authoritative after
+            # actual EDB files and their immutable publish generation exist.
+            "finalClassinPreflightStatus": "pending",
+            "final_classin_preflight_status": "pending",
+        }
+        if current_revision is not None:
+            response["sessionRevision"] = current_revision
+        epoch_getter = getattr(getattr(self, "server", None), "session_epoch", None)
+        if callable(epoch_getter):
+            epoch = str(epoch_getter() or "").strip()
+            if epoch:
+                response["sessionEpoch"] = epoch
+        self._send_json(response)
+
     def _handle_session_publish(self) -> None:
         session, current_revision = self._current_session_state()
         if session is None:
@@ -9073,17 +9937,10 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
         if isinstance(payload_session, dict) and isinstance(payload_session.get("problems"), list):
             session = _denormalize_session_paths(payload_session)
 
-        order = list(payload.get("order") or [])
-        excluded = set(payload.get("excluded") or [])
-        placement_payload = payload.get("placements")
-        if not isinstance(placement_payload, dict):
-            placement_payload = {}
-
         raw_problem_values = session.get("problems")
         if not isinstance(raw_problem_values, list):
             raw_problem_values = []
-        raw_id_issues = _session_problem_id_issues(raw_problem_values)
-        raw_problems = [problem for problem in raw_problem_values if isinstance(problem, dict)]
+        sequence, raw_id_issues = _ordered_session_publish_sequence(session, payload)
         if raw_id_issues:
             raw_id_preflight = {
                 "status": "blocked",
@@ -9103,22 +9960,6 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             )
             return
 
-        by_id = {
-            str(p.get("id") or p.get("problem_id") or "").strip(): p
-            for p in raw_problems
-        }
-        sequence: list[dict[str, Any]] = []
-        seen: set[str] = set()
-        for pid in order:
-            if pid in by_id and pid not in excluded and pid not in seen:
-                sequence.append(by_id[pid])
-                seen.add(pid)
-        for pid, problem in by_id.items():
-            if pid in excluded or pid in seen:
-                continue
-            sequence.append(problem)
-            seen.add(pid)
-
         if not sequence:
             self._send_json(
                 {
@@ -9132,38 +9973,6 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
                 status=HTTPStatus.BAD_REQUEST,
             )
             return
-
-        sequence_with_placements: list[dict[str, Any]] = []
-        for problem in sequence:
-            problem_copy = dict(problem)
-            problem_id = str(problem_copy.get("id") or "")
-            preserve_legacy_scale = (
-                _problem_preserves_legacy_placement_scale(problem_copy)
-                or _problem_has_persisted_legacy_placement_scale(problem_copy)
-            )
-            x_ratio = _coerce_placement_x_ratio(placement_payload.get(problem_id))
-            if x_ratio is None:
-                x_ratio = _coerce_placement_x_ratio(problem_copy)
-            if x_ratio is not None:
-                problem_copy["placementXRatio"] = x_ratio
-            y_ratio = _coerce_placement_y_ratio(placement_payload.get(problem_id))
-            if y_ratio is None:
-                y_ratio = _coerce_placement_y_ratio(problem_copy)
-            if y_ratio is not None:
-                problem_copy["placementYRatio"] = y_ratio
-            scale_ratio = _coerce_placement_scale_ratio(placement_payload.get(problem_id))
-            if scale_ratio is None:
-                scale_ratio = _coerce_placement_scale_ratio(problem_copy)
-            if scale_ratio is not None:
-                problem_copy["placementScaleRatio"] = scale_ratio
-            if preserve_legacy_scale:
-                # Provenance comes from the persisted session value, never from
-                # this request's placement patch. New explicit edits therefore
-                # remain subject to the regular 1.6 editor/export ceiling.
-                problem_copy["preserveLegacyPlacementScale"] = True
-                problem_copy["preserve_legacy_placement_scale"] = True
-            sequence_with_placements.append(problem_copy)
-        sequence = sequence_with_placements
 
         publish_preflight, duplicate_groups = _session_publish_blocking_preflight(sequence, session=session)
         if not publish_preflight.get("passed"):
@@ -9325,6 +10134,11 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             new_session,
             session,
             ("contentTarget", "content_target"),
+        )
+        _copy_session_metadata_aliases_overwrite(
+            new_session,
+            session,
+            ("layoutGapMode", "layout_gap_mode"),
         )
         new_session["crop_format"] = crop_format
         # publish only re-renders records; page-level review metadata
@@ -10426,12 +11240,64 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             return
         self._send_json({"ok": True, "url": url, "opened": bool(opened)})
 
+
+    def _handle_app_update_install(self) -> None:
+        if not _request_is_same_origin(self.headers):
+            self._send_json(
+                {"ok": False, "error": "cross-origin request rejected", "code": "cross_origin_rejected"},
+                status=HTTPStatus.FORBIDDEN,
+            )
+            return
+        try:
+            payload = self._read_json_body()
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                {"ok": False, "error": f"invalid JSON: {exc}", "code": "invalid_json"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        if not isinstance(payload, dict):
+            self._send_json(
+                {"ok": False, "error": "JSON object is required", "code": "invalid_update_request"},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return
+        try:
+            result = begin_app_update(payload.get("pin"))
+        except AppUpdateError as exc:
+            response = {"ok": False, "error": str(exc), "code": exc.code}
+            if exc.recovery_steps:
+                response["recoverySteps"] = exc.recovery_steps
+            self._send_json(response, status=exc.status)
+            return
+        self._send_json(result, status=HTTPStatus.ACCEPTED)
+
+        def shutdown_after_response() -> None:
+            time.sleep(0.35)
+            server = getattr(self, "server", None)
+            request_shutdown = getattr(server, "request_shutdown", None)
+            if callable(request_shutdown):
+                request_shutdown("app_update_install")
+                return
+            shutdown = getattr(server, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
+        threading.Thread(
+            target=shutdown_after_response,
+            name="app-update-shutdown",
+            daemon=True,
+        ).start()
+
     def _handle_shutdown(self) -> None:
         if not _request_is_same_origin(self.headers):
             self._send_json({"ok": False, "error": "cross-origin request rejected"}, status=HTTPStatus.FORBIDDEN)
             return
         self._send_json({"ok": True})
-        threading.Thread(target=self.app_server.shutdown, name="app-shutdown", daemon=True).start()
+        request_shutdown = getattr(self.app_server, "request_shutdown", None)
+        shutdown = request_shutdown if callable(request_shutdown) else self.app_server.shutdown
+        args = ("api_system_shutdown",) if callable(request_shutdown) else ()
+        threading.Thread(target=shutdown, args=args, name="app-shutdown", daemon=True).start()
 
     def _handle_user_settings_get(self) -> None:
         self._send_json(
@@ -10446,15 +11312,12 @@ class AppRequestHandler(SimpleHTTPRequestHandler):
             return
         has_gemini_key = "geminiApiKey" in payload or "gemini_api_key" in payload
         raw_key = payload.get("geminiApiKey") if "geminiApiKey" in payload else payload.get("gemini_api_key")
-        has_openai_key = "openAiApiKey" in payload or "openai_api_key" in payload
-        raw_openai_key = payload.get("openAiApiKey") if "openAiApiKey" in payload else payload.get("openai_api_key")
         has_ai_enabled = "aiEnabled" in payload or "ai_enabled" in payload
         raw_ai_enabled = payload.get("aiEnabled") if "aiEnabled" in payload else payload.get("ai_enabled")
         try:
             summary = update_api_keys(
                 RUNTIME_DIR,
                 gemini_api_key=(raw_key if isinstance(raw_key, str) else "") if has_gemini_key else None,
-                openai_api_key=(raw_openai_key if isinstance(raw_openai_key, str) else "") if has_openai_key else None,
                 ai_enabled=_coerce_bool(raw_ai_enabled) if has_ai_enabled else None,
             )
         except OSError as exc:
@@ -11119,12 +11982,37 @@ def run_server(*, host: str = "127.0.0.1", port: int = 8765, open_browser: bool 
     print(f"{APP_NAME} running at {url}")
     if open_browser:
         webbrowser.open(url)
+    previous_signal_handlers: dict[int, Any] = {}
+
+    def handle_termination_signal(signum, _frame) -> None:
+        signal_name = signal.Signals(signum).name
+        server.note_shutdown_reason(f"signal:{signal_name}")
+        print(f"[app-server] received {signal_name}", file=sys.stderr, flush=True)
+        raise SystemExit(128 + signum)
+
+    if threading.current_thread() is threading.main_thread():
+        for signal_name in ("SIGTERM", "SIGHUP"):
+            signum = getattr(signal, signal_name, None)
+            if signum is None:
+                continue
+            previous = signal.getsignal(signum)
+            # nohup intentionally ignores SIGHUP so a closed Terminal cannot
+            # take down the detached local server.
+            if signal_name == "SIGHUP" and previous == signal.SIG_IGN:
+                continue
+            previous_signal_handlers[signum] = previous
+            signal.signal(signum, handle_termination_signal)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        server.note_shutdown_reason("keyboard_interrupt")
         print("\nShutting down server...")
     finally:
+        reason = server.shutdown_reason() or "serve_forever_returned"
+        print(f"[app-server] stopped: reason={reason}", file=sys.stderr, flush=True)
         server.server_close()
+        for signum, previous in previous_signal_handlers.items():
+            signal.signal(signum, previous)
 
 
 def main() -> int:
@@ -11148,6 +12036,7 @@ def main() -> int:
     ensure_runtime_dirs()
     if args.log_file or is_frozen_app():
         configure_app_logging(args.log_file or None)
+    enable_fatal_error_logging()
     open_browser = is_frozen_app() if args.open_browser is None else bool(args.open_browser)
     run_server(host=args.host, port=args.port, open_browser=open_browser)
     return 0

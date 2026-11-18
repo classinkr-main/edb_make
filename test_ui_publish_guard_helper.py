@@ -170,6 +170,134 @@ class TestUiPublishGuardHelper(unittest.TestCase):
             """
         )
 
+    def test_compact_and_item_gap_flow_match_ui_and_backend(self) -> None:
+        compact_problems = [
+            ProblemLayoutInput(problem_id=f"compact-{index}", actual_content_height_pages=0.8)
+            for index in range(3)
+        ]
+        compact_placements = place_problems(
+            compact_problems,
+            template=LayoutTemplate(
+                name="compact-publish-guard-contract",
+                base_slot_height_pages=1.2,
+                metadata={"layout_gap_mode": "compact"},
+            ),
+        )
+        self.assertEqual([0.0, 0.8, 1.6], [placement.start_y_pages for placement in compact_placements])
+
+        item_gap_problems = [
+            ProblemLayoutInput(
+                problem_id="gap-0",
+                actual_content_height_pages=0.8,
+                metadata={"placement_gap_after_pages": 0},
+            ),
+            ProblemLayoutInput(problem_id="gap-1", actual_content_height_pages=0.8),
+            ProblemLayoutInput(problem_id="gap-2", actual_content_height_pages=0.8),
+        ]
+        item_gap_placements = place_problems(
+            item_gap_problems,
+            template=LayoutTemplate(name="item-gap-publish-guard-contract", base_slot_height_pages=1.2),
+        )
+        self.assertEqual([0.0, 0.8, 2.0], [placement.start_y_pages for placement in item_gap_placements])
+
+        run_node(
+            r"""
+            const fs = require('fs');
+            const vm = require('vm');
+            const { simulatedBoardPlacements } = require('./ui_prototype/publish_guard.js');
+            const source = fs.readFileSync('./ui_prototype/app.jsx', 'utf8');
+            const start = source.indexOf('const FIXED_LEFT_ZONE_RATIO =');
+            const end = source.indexOf('const INITIAL_ITEMS =');
+            if (start < 0 || end < 0) throw new Error('placement helper bounds not found');
+            const sandbox = {};
+            sandbox.globalThis = sandbox;
+            sandbox.normalizeInputIntent = value => value;
+            vm.runInNewContext(
+              source.slice(start, end) + '\n'
+                + 'globalThis.reflowItemsForBoardOrder = reflowItemsForBoardOrder;\n',
+              sandbox
+            );
+
+            const startsFor = placements => placements.map(item => Number(item.startYPages.toFixed(6)));
+            const compactItems = [0, 1, 2].map(index => ({
+              id: `compact-${index}`,
+              heightFrac: 0.8,
+              placementScaleRatio: 1,
+            }));
+            const compactUi = sandbox.reflowItemsForBoardOrder(compactItems, 1.2, 1, 'compact');
+            const compactGuard = simulatedBoardPlacements(compactItems, {
+              slotHeightPages: 1.2,
+              layoutGapMode: 'compact',
+            });
+            if (JSON.stringify(startsFor(compactUi)) !== JSON.stringify([0, 0.8, 1.6])) {
+              throw new Error(`unexpected compact UI flow: ${JSON.stringify(compactUi)}`);
+            }
+            if (JSON.stringify(startsFor(compactGuard)) !== JSON.stringify(startsFor(compactUi))) {
+              throw new Error(`compact guard mismatch: ${JSON.stringify(compactGuard)}`);
+            }
+
+            const itemGapItems = [
+              { id: 'gap-0', heightFrac: 0.8, placementScaleRatio: 1, placementGapAfterPages: 0 },
+              { id: 'gap-1', heightFrac: 0.8, placementScaleRatio: 1 },
+              { id: 'gap-2', heightFrac: 0.8, placementScaleRatio: 1 },
+            ];
+            const itemGapUi = sandbox.reflowItemsForBoardOrder(itemGapItems, 1.2, 1, 'classin-grid');
+            const itemGapGuard = simulatedBoardPlacements(itemGapItems, {
+              slotHeightPages: 1.2,
+              layoutGapMode: 'classin-grid',
+            });
+            if (JSON.stringify(startsFor(itemGapUi)) !== JSON.stringify([0, 0.8, 2])) {
+              throw new Error(`unexpected item-gap UI flow: ${JSON.stringify(itemGapUi)}`);
+            }
+            if (JSON.stringify(startsFor(itemGapGuard)) !== JSON.stringify(startsFor(itemGapUi))) {
+              throw new Error(`item-gap guard mismatch: ${JSON.stringify(itemGapGuard)}`);
+            }
+            """
+        )
+
+    def test_manual_scale_choice_disables_guard_auto_fit(self) -> None:
+        run_node(
+            r"""
+            const fs = require('fs');
+            const vm = require('vm');
+            const { simulatedBoardPlacements } = require('./ui_prototype/publish_guard.js');
+            const source = fs.readFileSync('./ui_prototype/app.jsx', 'utf8');
+            const start = source.indexOf('const FIXED_LEFT_ZONE_RATIO =');
+            const end = source.indexOf('const INITIAL_ITEMS =');
+            if (start < 0 || end < 0) throw new Error('placement helper bounds not found');
+            const sandbox = {};
+            sandbox.globalThis = sandbox;
+            sandbox.normalizeInputIntent = value => value;
+            vm.runInNewContext(
+              source.slice(start, end) + '\n'
+                + 'globalThis.reflowItemsForBoardOrder = reflowItemsForBoardOrder;\n',
+              sandbox
+            );
+
+            const items = [
+              {
+                id: 'manual-100',
+                heightFrac: 1.26,
+                placementScaleRatio: 1,
+                placementAutoFitDisabled: true,
+              },
+              { id: 'after-manual', heightFrac: 0.8, placementScaleRatio: 1 },
+            ];
+            const ui = sandbox.reflowItemsForBoardOrder(items, 1.2, 1, 'classin-grid');
+            const guard = simulatedBoardPlacements(items, { slotHeightPages: 1.2 });
+            const startsFor = placements => placements.map(item => Number(item.startYPages.toFixed(6)));
+            if (JSON.stringify(startsFor(ui)) !== JSON.stringify([0, 2.4])) {
+              throw new Error(`UI ignored manual auto-fit choice: ${JSON.stringify(ui)}`);
+            }
+            if (JSON.stringify(startsFor(guard)) !== JSON.stringify(startsFor(ui))) {
+              throw new Error(`guard ignored manual auto-fit choice: ${JSON.stringify(guard)}`);
+            }
+            if (guard[0].requestedScale !== 1) {
+              throw new Error(`guard changed manual 100% scale: ${JSON.stringify(guard[0])}`);
+            }
+            """
+        )
+
     def test_noncontinuous_flow_ignores_stale_saved_span(self) -> None:
         run_node(
             r"""
@@ -532,6 +660,61 @@ class TestUiPublishGuardHelper(unittest.TestCase):
             }
             if (placements[1].startYPages !== 2.4) {
               throw new Error(`expected next item to start at 2.4 pages, got ${placements[1].startYPages}`);
+            }
+            """
+        )
+
+    def test_detects_overlap_in_resolved_publish_placements(self) -> None:
+        run_node(
+            """
+            const { findBoardPlacementOverlaps } = require('./ui_prototype/publish_guard.js');
+            const overlaps = findBoardPlacementOverlaps([
+              {
+                id: 'resolved-1',
+                name: '물리 1번',
+                heightFrac: 1.0,
+                placementScaleRatio: 1,
+                startYPages: 0,
+                snappedNextStartYPages: 0.8,
+              },
+              {
+                id: 'resolved-2',
+                name: '물리 2번',
+                heightFrac: 0.8,
+                placementScaleRatio: 1,
+                startYPages: 0.8,
+                snappedNextStartYPages: 1.6,
+              },
+            ], { resolvedPlacements: true });
+            if (overlaps.length !== 1) {
+              throw new Error(`expected one resolved overlap, got ${JSON.stringify(overlaps)}`);
+            }
+            if (overlaps[0].problemId !== 'resolved-1' || overlaps[0].nextProblemId !== 'resolved-2') {
+              throw new Error(`unexpected resolved overlap ids: ${JSON.stringify(overlaps[0])}`);
+            }
+            if (overlaps[0].overlapPages !== 0.2) {
+              throw new Error(`unexpected resolved overlap size: ${JSON.stringify(overlaps[0])}`);
+            }
+
+            const safeCompact = findBoardPlacementOverlaps([
+              {
+                id: 'compact-safe-1',
+                heightFrac: 0.8,
+                placementScaleRatio: 1,
+                startYPages: 0,
+                snappedNextStartYPages: 0.8,
+              },
+              {
+                id: 'compact-safe-2',
+                heightFrac: 0.8,
+                placementScaleRatio: 1,
+                startYPages: 0.8,
+                snappedNextStartYPages: 1.8,
+                placementGapAfterPages: 0.2,
+              },
+            ], { resolvedPlacements: true });
+            if (safeCompact.length !== 0) {
+              throw new Error(`resolved compact placement false positive: ${JSON.stringify(safeCompact)}`);
             }
             """
         )

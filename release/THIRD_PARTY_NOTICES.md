@@ -39,6 +39,20 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## Bundled UI fonts
+
+The desktop app runs offline, so its web fonts ship inside the package at
+`ui_prototype/vendor/fonts/` instead of being fetched from a CDN. All three are
+licensed under the SIL Open Font License, Version 1.1, and their full license
+texts ship beside the font files.
+
+- **Pretendard Variable** — Copyright (c) 2021 Kil Hyung-jin, with Reserved Font
+  Name Pretendard. License text: `ui_prototype/vendor/fonts/OFL-Pretendard.txt`.
+- **JetBrains Mono Variable** — Copyright (c) 2020 The JetBrains Mono Project
+  Authors. License text: `ui_prototype/vendor/fonts/OFL-JetBrainsMono.txt`.
+- **Caveat Variable** — Copyright (c) 2015 Impallari Type, with Reserved Font
+  Name Caveat. License text: `ui_prototype/vendor/fonts/OFL-Caveat.txt`.
+
 ## Python dependencies
 
 The complete inventory and exact versions are machine-readable. Their license

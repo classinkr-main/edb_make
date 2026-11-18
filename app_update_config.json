@@ -5,5 +5,6 @@
   "updateFeedUrl": "",
   "downloadUrl": "",
   "releaseNotesUrl": "",
+  "updatePinHash": "",
   "bugReportUrl": "https://reports.classin.cloud/v1/edb-reports"
 }

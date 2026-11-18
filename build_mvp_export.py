@@ -176,7 +176,7 @@ def _build_ai_fallback_config(
     effective_enabled = resolved_mode != "off"
     if (
         not effective_enabled
-        and provider in {"openai", "gemini"}
+        and provider in {"gemini", "google"}
         and not model
         and not prompt
         and max_tokens == 4096

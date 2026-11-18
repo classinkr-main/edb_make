@@ -125,6 +125,8 @@ class TestUiPublishSummaryHelper(unittest.TestCase):
                   edb_file_uri: '/api/file?path=part2',
                   edb_file_exists: true,
                   record_count: 1,
+                  placement_count: 1,
+                  flow_end_pages: 1.2,
                   page_count_hint: 50,
                 },
               ],
@@ -139,6 +141,9 @@ class TestUiPublishSummaryHelper(unittest.TestCase):
             }
             if (summary.edbParts[1].partIndex !== 2 || summary.edbParts[1].edbFileName !== 'lesson_part02.edb') {
               throw new Error('snake_case split part payload was not normalized');
+            }
+            if (summary.edbParts[1].placementCount !== 1 || summary.edbParts[1].flowEndPages !== 1.2) {
+              throw new Error('rendered part usage was not normalized');
             }
             if (summary.edbParts.some(part => part.pageCountHint > 50)) {
               throw new Error('test fixture should model ClassIn-safe 50-page parts');

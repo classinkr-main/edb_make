@@ -1,0 +1,27 @@
+/*
+ * Self-hosted UI fonts for the offline desktop app.
+ * Packaged builds have no network, so these must never come from a CDN.
+ * License texts ship next to the files: OFL-Pretendard.txt,
+ * OFL-JetBrainsMono.txt, OFL-Caveat.txt (all SIL OFL 1.1).
+ */
+@font-face{
+  font-family: 'Pretendard Variable';
+  font-weight: 45 920;
+  font-style: normal;
+  font-display: swap;
+  src: url('PretendardVariable.woff2') format('woff2-variations');
+}
+@font-face{
+  font-family: 'JetBrains Mono';
+  font-weight: 100 800;
+  font-style: normal;
+  font-display: swap;
+  src: url('JetBrainsMonoVariable.woff2') format('woff2-variations');
+}
+@font-face{
+  font-family: 'Caveat';
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+  src: url('CaveatVariable.woff2') format('woff2-variations');
+}

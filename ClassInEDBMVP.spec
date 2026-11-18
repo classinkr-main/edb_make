@@ -85,6 +85,7 @@ generated_release_metadata = build_compliance_metadata()
 UI_DATAS = [
     ("ui_prototype/index.html", "ui_prototype"),
     ("ui_prototype/board.html", "ui_prototype"),
+    ("ui_prototype/board.css", "ui_prototype"),
     ("ui_prototype/favicon.png", "ui_prototype"),
     ("ui_prototype/reorder.js", "ui_prototype"),
     ("ui_prototype/review_filters.js", "ui_prototype"),
@@ -93,6 +94,13 @@ UI_DATAS = [
     ("ui_prototype/app.bundle.js", "ui_prototype"),
     ("ui_prototype/vendor/react.production.min.js", "ui_prototype/vendor"),
     ("ui_prototype/vendor/react-dom.production.min.js", "ui_prototype/vendor"),
+    ("ui_prototype/vendor/fonts/fonts.css", "ui_prototype/vendor/fonts"),
+    ("ui_prototype/vendor/fonts/PretendardVariable.woff2", "ui_prototype/vendor/fonts"),
+    ("ui_prototype/vendor/fonts/JetBrainsMonoVariable.woff2", "ui_prototype/vendor/fonts"),
+    ("ui_prototype/vendor/fonts/CaveatVariable.woff2", "ui_prototype/vendor/fonts"),
+    ("ui_prototype/vendor/fonts/OFL-Pretendard.txt", "ui_prototype/vendor/fonts"),
+    ("ui_prototype/vendor/fonts/OFL-JetBrainsMono.txt", "ui_prototype/vendor/fonts"),
+    ("ui_prototype/vendor/fonts/OFL-Caveat.txt", "ui_prototype/vendor/fonts"),
 ]
 
 ASSET_DATAS = [

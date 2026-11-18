@@ -14,7 +14,6 @@ import build_problem_board_edb
 import image_reconstruction_backend as image_backend
 from image_reconstruction_backend import (
     DEFAULT_GEMINI_IMAGE_MODEL,
-    DEFAULT_OPENAI_IMAGE_MODEL,
     ImageReconstructionResult,
     analyze_reconstruction_content_preservation,
     build_content_safe_upscale,
@@ -26,12 +25,10 @@ from image_reconstruction_backend import (
 class TestImageReconstructionMutation(unittest.TestCase):
     def setUp(self):
         self._prev_gemini_key = os.environ.get("GEMINI_API_KEY")
-        self._prev_openai_key = os.environ.get("OPENAI_API_KEY")
         os.environ["GEMINI_API_KEY"] = "test-gemini-key"
 
     def tearDown(self):
         self._restore_env("GEMINI_API_KEY", self._prev_gemini_key)
-        self._restore_env("OPENAI_API_KEY", self._prev_openai_key)
 
     def _restore_env(self, name: str, value: str | None) -> None:
         if value is None:
@@ -352,24 +349,17 @@ class TestImageReconstructionMutation(unittest.TestCase):
 
             self.assertEqual(original_path.resolve(), Path(reconstruct.call_args.args[0]).resolve())
 
-    def test_openai_provider_still_supported_as_fallback(self):
-        os.environ["OPENAI_API_KEY"] = "test-openai-key"
+    def test_non_gemini_provider_is_rejected(self):
         with TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
             session = self._build_session(root)
 
-            with patch.object(app_server, "reconstruct_problem_image", side_effect=self._fake_reconstruct) as mock_reconstruct:
-                updated = app_server._mutate_enhance_image(
+            with self.assertRaises(ValueError) as ctx:
+                app_server._mutate_enhance_image(
                     session,
                     {"problemIds": ["problem-1"], "provider": "openai", "mode": "ai"},
                 )
-
-            problem = updated["problems"][0]
-            self.assertEqual(problem["aiImageReconstruction"]["provider"], "openai")
-            self.assertEqual(problem["aiImageReconstruction"]["model"], DEFAULT_OPENAI_IMAGE_MODEL)
-            called_kwargs = mock_reconstruct.call_args.kwargs
-            self.assertEqual(called_kwargs["provider"], "openai")
-            self.assertEqual(called_kwargs["model"], DEFAULT_OPENAI_IMAGE_MODEL)
+            self.assertIn("unsupported image reconstruction provider", str(ctx.exception))
 
     def test_enhance_image_adds_specific_formula_loss_review_flag(self):
         with TemporaryDirectory() as raw_tmp:

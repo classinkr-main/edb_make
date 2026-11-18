@@ -7,13 +7,18 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 APP_SOURCE = PROJECT_ROOT / "ui_prototype" / "app.jsx"
 BOARD_SOURCE = PROJECT_ROOT / "ui_prototype" / "board.html"
+BOARD_STYLESHEET = PROJECT_ROOT / "ui_prototype" / "board.css"
 
 
 class BugReportUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = APP_SOURCE.read_text(encoding="utf-8")
-        cls.board = BOARD_SOURCE.read_text(encoding="utf-8")
+        cls.board = (
+            BOARD_SOURCE.read_text(encoding="utf-8")
+            + "\n"
+            + BOARD_STYLESHEET.read_text(encoding="utf-8")
+        )
 
     def test_settings_panel_has_accessible_bug_report_form(self):
         settings = self.app.split("{tab === 'board' && (", 1)[1].split(
@@ -112,6 +117,40 @@ class BugReportUiTests(unittest.TestCase):
         self.assertIn("captureRecoverableDiagnostic", self.app)
         self.assertIn("EDB_CAPTURE_RUNTIME_DIAGNOSTIC", self.board)
         self.assertIn(".operation-recovery-banner", self.board)
+
+    def test_local_server_failure_has_guided_restart_and_aligned_actions(self):
+        banner = self.app.split("function OperationRecoveryBanner", 1)[1].split(
+            "function LoadingOverlay", 1
+        )[0]
+        for label in (
+            "ClassIn EDB 앱을 다시 실행해 주세요",
+            "앱 재실행 후 연결 확인",
+            "앱 연결됨 · 작업을 다시 시작할 수 있습니다",
+            "연결이 돌아오면 자동으로 알려드립니다",
+            "로컬 앱 서버와 다시 연결됐습니다. 원본 파일과 대기열은 그대로 유지됩니다.",
+        ):
+            self.assertIn(label, banner)
+        self.assertIn("probeLocalServerHealth(1400)", banner)
+        self.assertIn("window.setTimeout(poll, 3500)", banner)
+        self.assertIn("operation-recovery-actionbar", banner)
+        self.assertIn("operation-recovery-actions-main", banner)
+        self.assertIn("operation-recovery-actions-support", banner)
+        for selector in (
+            ".operation-recovery-server-status",
+            ".operation-recovery-server-dot",
+            ".operation-recovery-actionbar",
+            ".operation-recovery-actions-main",
+            ".operation-recovery-actions-support",
+        ):
+            self.assertIn(selector, self.board)
+
+        app = self.app.split("function App()", 1)[1]
+        recovery_activation = app.split("const activateOperationRecovery", 1)[1].split(
+            "const requestViewChange", 1
+        )[0]
+        self.assertIn("const networkUnavailable = isNetworkRequestError(error)", recovery_activation)
+        self.assertIn("code: 'local_server_unavailable'", recovery_activation)
+        self.assertIn("이 화면을 닫지 말고 연결 복구 안내를 기다려 주세요", recovery_activation)
 
     def test_recovery_report_action_opens_global_dialog_with_error_snapshot(self):
         dialog = self.app.split("function BugReportDialog", 1)[1].split(

@@ -38,7 +38,7 @@ _PROBLEM_UNIT_TRIGGER_REASONS = {
     "problem_per_block",
 }
 
-_SUPPORTED_PROVIDER_ALIASES = {"gemini", "google", "claude", "anthropic", "openai"}
+_SUPPORTED_PROVIDER_ALIASES = {"gemini", "google"}
 
 
 @dataclass(slots=True)
@@ -621,7 +621,7 @@ def _request_gemini_repair(
         payload["generationConfig"]["thinkingConfig"] = {
             "thinkingLevel": thinking_level,
         }
-    if config.resolved_model in {"gemini-3.5-flash", "gemini-3.6-flash"}:
+    if config.resolved_model.startswith("gemini-3") and "flash" in config.resolved_model:
         payload["generationConfig"].pop("temperature", None)
     url = f"{GEMINI_API_BASE}/{config.resolved_model}:generateContent?key={api_key}"
     raw_response = _post_json(

@@ -49,6 +49,22 @@ def _metadata_bool(metadata: dict[str, object], *keys: str) -> bool:
     return False
 
 
+def _metadata_optional_nonnegative_float(metadata: dict[str, object], *keys: str) -> float | None:
+    for key in keys:
+        if key not in metadata or metadata.get(key) is None:
+            continue
+        try:
+            return max(0.0, float(metadata[key]))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _uses_compact_layout(template: LayoutTemplate) -> bool:
+    mode = str((template.metadata or {}).get("layout_gap_mode") or "").strip().lower()
+    return mode == "compact"
+
+
 def _is_continuous_problem(problem: ProblemLayoutInput, template: LayoutTemplate) -> bool:
     metadata = problem.metadata or {}
     input_intent = (
@@ -68,6 +84,7 @@ def _rendered_flow_height_pages(
     actual_height_pages: float,
     *,
     reserve_scaled_height: bool,
+    allow_scaled_height_reduction: bool = False,
 ) -> float:
     if not reserve_scaled_height:
         return actual_height_pages
@@ -81,6 +98,8 @@ def _rendered_flow_height_pages(
             default=1.0,
         ),
     )
+    if allow_scaled_height_reduction:
+        return actual_height_pages * scale_ratio
     return max(actual_height_pages, actual_height_pages * scale_ratio)
 
 
@@ -121,15 +140,36 @@ def place_problem(
     nominal_slot_height_pages = template.base_slot_height_pages
     actual_height_pages = max(problem.actual_content_height_pages, 0.0)
     continuous = _is_continuous_problem(problem, template)
-    reserve_scaled_height = continuous or _metadata_bool(
+    placement_gap_after_pages = _metadata_optional_nonnegative_float(
+        problem.metadata or {},
+        "placement_gap_after_pages",
+        "placementGapAfterPages",
+        "gapAfterPages",
+    )
+    compact = _uses_compact_layout(template) or placement_gap_after_pages is not None
+    placement_scale_ratio = max(
+        0.0,
+        _metadata_float(
+            problem.metadata or {},
+            "placement_scale_ratio",
+            "placementScaleRatio",
+            "scaleRatio",
+            default=1.0,
+        ),
+    )
+    scaled_height_adjusted = abs(placement_scale_ratio - 1.0) > EPSILON
+    scaled_height_reduction = placement_scale_ratio < 1.0 - EPSILON
+    reserve_scaled_height = continuous or compact or scaled_height_adjusted or _metadata_bool(
         problem.metadata or {},
         "reserve_scaled_height",
         "reserveScaledHeight",
     )
+    allow_scaled_height_reduction = compact or scaled_height_reduction
     flow_height_pages = _rendered_flow_height_pages(
         problem,
         actual_height_pages,
         reserve_scaled_height=reserve_scaled_height,
+        allow_scaled_height_reduction=allow_scaled_height_reduction,
     )
     overflow_allowed = resolve_overflow_allowed(problem, template)
 
@@ -138,9 +178,11 @@ def place_problem(
         "force_full_page_bounds",
         "forceFullPageBounds",
     )
+    # Compact layouts already pack problems by their rendered height plus an
+    # explicit gap, so only slot-based layouts need the fit-to-slot shrink.
     fit_to_slot_scale = (
         None
-        if overflow_allowed or force_full_page_bounds
+        if overflow_allowed or force_full_page_bounds or compact
         else _fit_to_slot_scale(
             flow_height_pages,
             nominal_slot_height_pages,
@@ -150,20 +192,30 @@ def place_problem(
     if fit_to_slot_scale is not None:
         flow_height_pages = nominal_slot_height_pages
 
-    actual_bottom_y_pages = round(
-        start_y_pages + min(actual_height_pages, flow_height_pages)
-        if fit_to_slot_scale is not None
-        else start_y_pages + actual_height_pages,
-        6,
-    )
-    snapped_next_start_y_pages = (
-        round(start_y_pages + flow_height_pages, 6)
-        if continuous
-        else snap_up_to_slot(
+    if fit_to_slot_scale is not None:
+        rendered_bottom_height_pages = min(actual_height_pages, flow_height_pages)
+    elif compact or scaled_height_adjusted:
+        rendered_bottom_height_pages = flow_height_pages
+    else:
+        rendered_bottom_height_pages = actual_height_pages
+    actual_bottom_y_pages = round(start_y_pages + rendered_bottom_height_pages, 6)
+    if continuous:
+        snapped_next_start_y_pages = round(start_y_pages + flow_height_pages, 6)
+    elif compact:
+        snapped_next_start_y_pages = round(
+            start_y_pages + flow_height_pages + (placement_gap_after_pages or 0.0),
+            6,
+        )
+    elif flow_height_pages <= nominal_slot_height_pages + EPSILON:
+        snapped_next_start_y_pages = round(
+            start_y_pages + snap_up_to_slot(flow_height_pages, nominal_slot_height_pages),
+            6,
+        )
+    else:
+        snapped_next_start_y_pages = snap_up_to_slot(
             start_y_pages + flow_height_pages,
             nominal_slot_height_pages,
         )
-    )
     overflow_amount_pages = max(0.0, flow_height_pages - nominal_slot_height_pages)
     overflow_violation = overflow_amount_pages > 0 and not overflow_allowed
     slot_span_count = max(
@@ -204,11 +256,10 @@ def place_problems(
     cursor_y_pages = max(start_y_pages, 0.0)
 
     for problem in problems:
-        problem_start_y_pages = (
-            round(cursor_y_pages, 6)
-            if _is_continuous_problem(problem, template)
-            else snap_up_to_slot(cursor_y_pages, template.base_slot_height_pages)
-        )
+        # The previous placement already decided whether its trailing edge is
+        # snapped, continuous, or explicitly compact. Re-snapping here would
+        # silently re-create a gap that the author removed.
+        problem_start_y_pages = round(cursor_y_pages, 6)
         placement = place_problem(
             problem,
             start_y_pages=problem_start_y_pages,

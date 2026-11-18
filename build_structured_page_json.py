@@ -369,9 +369,6 @@ def _is_ai_backend(backend_name: str | None) -> bool:
     return (backend_name or "").strip().lower() in {
         "gemini",
         "google",
-        "claude",
-        "anthropic",
-        "openai",
     }
 
 
@@ -381,7 +378,7 @@ def _lazy_cache_backend_name(ocr_mode: str | None) -> str | None:
         return "paddleocr"
     if normalized == "tesseract":
         return "tesseract"
-    if normalized in {"gemini", "google", "claude", "anthropic"}:
+    if normalized in {"gemini", "google"}:
         return "gemini"
     if normalized.startswith("gemini-"):
         return "gemini"
@@ -422,9 +419,9 @@ def resolve_block_ocr_worker_count(
     if normalized_mode in {"paddle", "paddleocr"} or normalized_backend in {"paddle", "paddleocr"}:
         return 1
     network_backend = (
-        normalized_mode in {"gemini", "google", "claude", "anthropic"}
+        normalized_mode in {"gemini", "google"}
         or normalized_mode.startswith("gemini-")
-        or normalized_backend in {"gemini", "google", "claude", "anthropic"}
+        or normalized_backend in {"gemini", "google"}
     )
     if network_backend:
         try:
@@ -458,7 +455,7 @@ def resolve_recognition_worker_count(
         return 1
 
     normalized_ocr = (ocr_mode or "auto").strip().lower()
-    gemini_primary = normalized_ocr in {"auto", "gemini", "google", "claude", "anthropic"} and bool(
+    gemini_primary = normalized_ocr in {"auto", "gemini", "google"} and bool(
         os.environ.get("GEMINI_API_KEY", "").strip()
     )
     ai_enabled = bool(ai_config and ai_config.enabled)

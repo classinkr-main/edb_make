@@ -24,6 +24,7 @@ from structured_schema import Box
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 DEFAULT_GEMINI_OCR_MODEL = "gemini-3.5-flash"
 ECONOMY_GEMINI_OCR_MODEL = "gemini-3.5-flash-lite"
+LATEST_GEMINI_OCR_MODEL = "gemini-3.8-flash"
 GEMINI_OCR_PROFILE_ENV = "EDB_GEMINI_OCR_PROFILE"
 GEMINI_OCR_MODEL_ENV = "EDB_GEMINI_OCR_MODEL"
 GEMINI_OCR_THINKING_LEVEL_ENV = "EDB_GEMINI_OCR_THINKING_LEVEL"
@@ -119,6 +120,8 @@ def resolve_gemini_ocr_model(model: str | None = None) -> str:
     profile = os.environ.get(GEMINI_OCR_PROFILE_ENV, "balanced").strip().lower()
     if profile in {"economy", "economic", "low-cost", "lite"}:
         return ECONOMY_GEMINI_OCR_MODEL
+    if profile in {"latest", "flagship", "high", "upgrade"}:
+        return LATEST_GEMINI_OCR_MODEL
     return DEFAULT_GEMINI_OCR_MODEL
 
 
@@ -134,7 +137,7 @@ def resolve_gemini_ocr_thinking_level(model: str, thinking_level: str | None = N
         return "minimal"
     if normalized_model == "gemini-3.5-flash":
         return DEFAULT_GEMINI_FLASH_OCR_THINKING_LEVEL
-    if normalized_model == "gemini-3.6-flash":
+    if normalized_model in {"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"}:
         return DEFAULT_GEMINI_FALLBACK_OCR_THINKING_LEVEL
     return ""
 
@@ -732,7 +735,7 @@ class GeminiOCRBackend(OCRBackend):
         def _body_for_model(model: str) -> bytes:
             generation_config = dict(payload["generationConfig"])
             generation_config.pop("thinkingConfig", None)
-            if model in {ECONOMY_GEMINI_OCR_MODEL, "gemini-3.6-flash"}:
+            if model in {ECONOMY_GEMINI_OCR_MODEL, "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"}:
                 # Newer Gemini models reject or ignore legacy sampling controls.
                 generation_config.pop("temperature", None)
             thinking_level = (
@@ -1146,7 +1149,7 @@ def ocr_cache_fingerprint(
     normalized = raw_backend_name.lower()
     if normalized.startswith("gemini-") and model is None:
         model = raw_backend_name
-    if normalized in {"google", "claude", "anthropic"} or normalized.startswith("gemini-"):
+    if normalized == "google" or normalized.startswith("gemini-"):
         normalized = "gemini"
     payload: dict[str, Any] = {
         "schema": OCR_CACHE_SCHEMA_VERSION,
@@ -1207,7 +1210,7 @@ def preferred_ocr_backend_name(name: str = "auto") -> str:
         return "paddleocr"
     if normalized == "tesseract":
         return "tesseract"
-    if normalized in {"gemini", "google", "claude", "anthropic"} or normalized.startswith("gemini-"):
+    if normalized in {"gemini", "google"} or normalized.startswith("gemini-"):
         return "gemini"
     if os.environ.get("GEMINI_API_KEY", "").strip():
         return "gemini"
@@ -1244,9 +1247,7 @@ def build_ocr_backend(name: str = "auto", *, refresh_capabilities: bool = False)
         return PaddleOCRBackend()
     if normalized == "tesseract":
         return TesseractOCRBackend()
-    if normalized in {"gemini", "google", "claude", "anthropic"}:
-        # 'claude'/'anthropic' kept as aliases for transitional configs; both
-        # resolve to the Gemini backend now.
+    if normalized in {"gemini", "google"}:
         return GeminiOCRBackend()
     if normalized.startswith("gemini-"):
         return GeminiOCRBackend(model=raw_name)

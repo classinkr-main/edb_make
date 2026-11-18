@@ -49,6 +49,8 @@ run_local_app.command
 
 The launcher requires Python 3.11 or newer because the current code uses `enum.StrEnum`. It checks the existing `.venv` before use; if `.venv` is missing or was created with Python older than 3.11, it recreates `.venv` with a suitable `python3` interpreter, installs `requirements-local.txt` only when needed, starts `app_server.py`, and opens the browser at `http://127.0.0.1:8765/`.
 
+By default the macOS launcher detaches the server after its health check succeeds, so the Terminal window may be closed without stopping the app. Server output and shutdown diagnostics are appended to `.app_runtime/app.log`. Developers who want the server tied to the Terminal can run `EDB_FOREGROUND=1 ./run_local_app.command`.
+
 If Python 3.11+ is not installed, the launcher shows a Korean error message and waits for Enter before closing.
 
 If the local server is already running, it only opens the browser instead of starting a duplicate server.
@@ -232,11 +234,33 @@ xcrun notarytool store-credentials "classin-edb-notary" \
 The unsigned/ad-hoc DMG is fine for internal development, but a downloaded public macOS app needs Developer ID signing, notarization, and stapling to open cleanly on other Macs.
 
 ## In-App Updates
-The app uses a semi-automatic update flow:
+The app supports both PIN-gated automatic replacement and a manual download fallback:
 1. The installed app keeps user settings and API keys under the user's app runtime folder.
 2. `칠판 설정` shows the current app version and an `업데이트 확인` button.
-3. If the configured update feed reports a newer version, the app opens the configured download page in the browser.
-4. The user installs the new `.dmg` or `Setup.exe` over the previous app. Existing API keys and session data stay in the runtime folder.
+3. If the configured update feed reports a newer version, an administrator can enter the numeric update PIN and press `업데이트 버전`.
+4. The app downloads the platform installer, verifies the exact `sizeBytes` and `sha256`, exits, replaces the existing installation, and relaunches. Existing API keys and session data stay in the runtime folder.
+5. `다운로드 열기` remains available when a manual install is needed.
+
+Automatic replacement is available only in a packaged macOS or Windows app. macOS accepts the packaged `.dmg` or `.zip`; Windows accepts the Inno Setup `.exe`. The macOS helper verifies the downloaded app bundle's code signature before replacing the current bundle. The old macOS bundle is moved to a temporary backup and restored if the replacement move fails. Five incorrect PIN attempts pause PIN checks for 60 seconds.
+
+### Configure the update PIN
+
+Do not store the plaintext PIN in `app_update_config.json`. Generate a PBKDF2 verifier interactively:
+
+```zsh
+python3 scripts/generate_update_pin_hash.py
+```
+
+Put the printed value in the release environment as `EDB_PACKAGE_UPDATE_PIN_HASH`, or in the canonical config as `updatePinHash`. The packaging scripts inherit this environment variable and embed only the verifier. CI may instead receive the plaintext secret as `EDB_PACKAGE_UPDATE_PIN`; `scripts/build_app_update_config.py` converts it to a deterministic verifier and never writes the plaintext value:
+
+```zsh
+EDB_PACKAGE_UPDATE_PIN=4826 ./package_macos_app.sh --clean --dmg --zip \
+  --version 0.2.0 \
+  --update-feed-url "https://example.com/classin-edb/update.json"
+```
+
+Use your own 4–12 digit PIN; `4826` above is only a command example. For an unpackaged local runtime test, set `EDB_UPDATE_PIN_HASH` to the generated verifier. If no verifier is configured, the UI explains that PIN automatic updates are unavailable and keeps the manual download action.
+The installer GitHub Actions workflow reads the protected repository secret `EDB_UPDATE_PIN` and fails a production release when it is missing. Configure that secret before dispatching a production installer build; the workflow passes it only to the build-scoped metadata generator.
 
 Update feed and download URLs must use HTTPS. Plain HTTP is accepted only for loopback development URLs such as `http://127.0.0.1:9999/update.json`.
 
@@ -251,6 +275,7 @@ The packaged app reads `app_update_config.json` from bundled resources, then all
 ~/Documents/ClassInEDBMVP/app_update_config.json
 ```
 Local overrides may use equivalent snake_case keys such as `download_url`; the runtime normalizes them to the canonical camelCase metadata keys before checking updates. If both alias forms are present with different values, update status becomes `invalid_config` instead of guessing between old and new release metadata.
+`update_pin_hash` is accepted as the snake_case alias of `updatePinHash`; conflicting values fail closed and the verifier is never returned by the update-status API.
 
 Prefer the packaging scripts for release builds because they generate build-scoped update metadata and run the post-build package verifier. If you run `pyinstaller ClassInEDBMVP.spec` directly, the spec resolves assets relative to the spec file location and writes generated update metadata inside PyInstaller's work path; set the same metadata through environment variables such as `EDB_PACKAGE_APP_ID`, `EDB_PACKAGE_APP_VERSION`, `EDB_PACKAGE_UPDATE_FEED_URL`, and `EDB_PACKAGE_DOWNLOAD_URL`, then run `scripts/verify_packaged_app.py` on the built app folder.
 Packaging scripts and direct `ClassInEDBMVP.spec` builds share the same metadata generator. Equivalent project `app_update_config.json` aliases are normalized into canonical camelCase keys before embedding metadata, and conflicting alias values fail the build instead of carrying old release URLs forward.
@@ -318,6 +343,7 @@ If a feed includes `appId` or `appName`, the installed app rejects it unless tho
 Packaged builds must include `appId`, `appName`, and `version` in `app_update_config.json`; `scripts/verify_packaged_app.py` fails the artifact if those required update identifiers are missing or mismatched, if multiple packaged `app_update_config.json` files disagree, if camelCase/snake_case update metadata aliases conflict, if packaged update/download/release-note URLs do not use HTTPS or loopback HTTP, or if wrapper-supplied expected URLs are not actually embedded in the package.
 The feed builder fails if `appId`, `appName`, `channel`, or release `version` is empty, so generated release metadata cannot silently lose its identity.
 `manifestSha256` and artifact `sha256` values must be 64-character lowercase SHA-256 hex strings when present, and `sizeBytes` must be a positive integer.
+Both artifact `sha256` and `sizeBytes` are mandatory for the PIN-gated automatic install action even though older/manual feeds may omit them.
 If `--manifest-sha256` is supplied while generating a manifest, the builder verifies it against the generated `manifest.json` and fails on mismatch.
 The feed builder also rejects known platform artifact mismatches, such as a `.exe` local file or download URL passed as a macOS DMG, a download URL without the expected artifact file extension, a download URL file name that disagrees with the supplied local artifact file, or the same local file reused for multiple platforms.
 
@@ -376,10 +402,10 @@ The base Python package also includes dependencies with copyleft or dual-license
 
 ## Notes
 - `assets\app_icon.ico` and `assets\app_icon.icns` are packaging icon inputs for Windows/macOS builds; runtime package resources only include `assets\app_icon.png`.
-- `ui_prototype\app.bundle.js` is generated from `art.jsx`, `tweaks-panel.jsx`, and `app.jsx` by `scripts\build_frontend_bundle.mjs`. The build-time Babel transformer lives under `scripts\vendor`, outside the browser UI asset tree. Packaging requires Node.js even when rebuilding is skipped: `scripts\build_frontend_bundle.mjs --check` reproduces the expected Babel output in memory and rejects any tracked bundle body drift. The builder also updates `board.html` to load the bundle with a source-digest cache-bust value.
-- `scripts\verify_frontend_package.py` runs the deterministic bundle check before PyInstaller packaging, including direct `ClassInEDBMVP.spec` builds, and fails if required UI/runtime input assets are missing, packaging manifests omit them, `app.bundle.js` bytes differ from the current generated output, its source digest is stale, `board.html` points at a legacy runtime, browser-side Babel returns under `ui_prototype\vendor`, or old prototype files such as `ui_prototype\app.js`/`prototype_data.js` have returned.
+- `ui_prototype\app.bundle.js` is generated from `art.jsx`, `tweaks-panel.jsx`, and `app.jsx` by `scripts\build_frontend_bundle.mjs`. The build-time Babel transformer lives under `scripts\vendor`, outside the browser UI asset tree. Packaging requires Node.js even when rebuilding is skipped: `scripts\build_frontend_bundle.mjs --check` reproduces the expected Babel output in memory and rejects any tracked bundle body drift. The builder also updates `board.html` to load the bundle with a source-digest cache-bust value, and stamps a second `board-css-<sha256>` cache bust for `ui_prototype\board.css`, which holds the editor theme that used to be an inline `<style>` block.
+- `scripts\verify_frontend_package.py` runs the deterministic bundle check before PyInstaller packaging, including direct `ClassInEDBMVP.spec` builds, and fails if required UI/runtime input assets are missing, packaging manifests omit them, `app.bundle.js` bytes differ from the current generated output, its source digest is stale, `board.html` points at a legacy runtime, browser-side Babel returns under `ui_prototype\vendor`, or old prototype files such as `ui_prototype\app.js`/`prototype_data.js`/`styles.css` have returned. It also rejects a `board.html` that inlines the theme, carries a stale `board.css` cache bust, or loads any asset from a remote host: the packaged app runs offline, so its web fonts ship under `ui_prototype\vendor\fonts` (SIL OFL 1.1, license texts alongside).
 - `scripts\verify_packaged_app.py` runs after folder-style packaging, source-package fallback builds, and Windows installer reuse of an existing app folder to confirm the final artifact contains the current prebuilt UI with bundle digest metadata, matching app/version update metadata, safe and expected packaged update URLs, matching macOS `Info.plist` bundle id/version metadata when present, HWP render helper, and the required source-package Python runtime modules when applicable, without browser-side Babel, build-time frontend tooling, legacy UI data files, or local runtime/session outputs.
-- macOS and Windows packaging wrappers pass the current checkout as `--source-root`; a stale `dist` or external output therefore fails when its frontend source digest or the actual `app.bundle.js` byte SHA-256 differs from the checkout, even if a copied digest header and board cache-bust agree with each other. The Windows source-package fallback also requires `bug_reporting.py` and runs an isolated `app_server` import smoke. Windows `-OneFile` builds reuse `scripts/smoke_packaged_app.py` to launch with an isolated temporary `EDB_APP_HOME`, verify health, served `board.html`, its cache-busted bundle content/digest, update metadata, and clean shutdown before packaging continues.
+- macOS and Windows packaging wrappers pass the current checkout as `--source-root`; a stale `dist` or external output therefore fails when its frontend source digest or the actual `app.bundle.js` byte SHA-256 differs from the checkout, even if a copied digest header and board cache-bust agree with each other. The Windows source-package fallback also requires `bug_reporting.py` and runs an isolated `app_server` import smoke. Windows `-OneFile` builds reuse `scripts/smoke_packaged_app.py` to launch with an isolated temporary `EDB_APP_HOME`, verify health, served `board.html`, its cache-busted bundle content/digest, the served `board.css` digest and design tokens, update metadata, and clean shutdown before packaging continues.
 - `scripts\build_app_update_config.py` is the single generator for packaged app update metadata across macOS, Windows, and direct PyInstaller spec builds.
 - `scripts\clean_local_artifacts.py` removes ignored root-level packaging leftovers that can look like runnable current builds. Its default set covers `dist*`, `build`, `tmp_validation_*`, and stale legacy UI bridge files under `ui_prototype`; generated EDB exports require an explicit flag, while `.app_runtime` user state and `.venv` are always protected.
 - Packaging wrappers also verify that generated distribution archives and installers are real non-empty files before reporting success or signing them. PowerShell packaging converts non-zero native command exits from Python, Node.js, PyInstaller, and Inno Setup into build failures so stale artifacts are not carried forward. Windows zip verification checks the root executable for PyInstaller one-file builds, the packaged executable under the app folder for PyInstaller folder builds, and `source-package\app_update_config.json` for source-package fallback builds. Windows signing fails if a requested package folder contains no signable `.exe`, `.dll`, or `.pyd` artifacts.

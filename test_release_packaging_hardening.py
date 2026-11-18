@@ -172,6 +172,22 @@ class TestReleaseLicensePolicy(unittest.TestCase):
 
 
 class TestPackagingSourceHardening(unittest.TestCase):
+    def test_production_installers_require_protected_update_pin(self) -> None:
+        source = (PROJECT_ROOT / ".github" / "workflows" / "build-installers.yml").read_text(encoding="utf-8")
+
+        self.assertEqual(2, source.count("EDB_PACKAGE_UPDATE_PIN: ${{ secrets.EDB_UPDATE_PIN }}"))
+        self.assertEqual(2, source.count("Production release requires EDB_UPDATE_PIN."))
+
+    def test_windows_workflow_uses_named_packaging_arguments(self) -> None:
+        source = (PROJECT_ROOT / ".github" / "workflows" / "build-installers.yml").read_text(encoding="utf-8")
+        windows_build = source.split("- name: Build Windows installer", 1)[1]
+        windows_build = windows_build.split("- name: Verify portable", 1)[0]
+
+        self.assertIn("$packageArgs = @{", windows_build)
+        self.assertIn('OutputDir = "dist"', windows_build)
+        self.assertIn("$packageArgs.Sign = $true", windows_build)
+        self.assertNotIn('$packageArgs = @(\n            "-Clean"', windows_build)
+
     def test_packaging_output_cleanup_has_protected_path_guards(self) -> None:
         macos = (PROJECT_ROOT / "package_macos_app.sh").read_text(encoding="utf-8")
         windows_app = (PROJECT_ROOT / "package_mvp.ps1").read_text(encoding="utf-8")

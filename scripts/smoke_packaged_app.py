@@ -306,6 +306,19 @@ def _bytes_request(url: str, *, timeout: float = 3.0) -> bytes:
         return response.read()
 
 
+def _validate_ui_stylesheet(board_html: str, stylesheet: str) -> str:
+    references = re.findall(r"board\.css\?v=board-css-([0-9a-f]{64})", board_html)
+    if len(references) != 1:
+        raise RuntimeError("packaged board.html must reference exactly one cache-busted board.css")
+    digest = references[0]
+    served_digest = hashlib.sha256(stylesheet.encode("utf-8")).hexdigest()
+    if served_digest != digest:
+        raise RuntimeError("packaged board.html cache bust does not match the served board.css digest")
+    if "--font-sans" not in stylesheet or ":root{" not in stylesheet:
+        raise RuntimeError("served board.css is missing the editor design tokens")
+    return digest
+
+
 def _validate_ui_assets(board_html: str, bundle: str) -> str:
     references = re.findall(
         r'app\.bundle\.js\?v=frontend-bundle-([0-9a-f]{64})',
@@ -333,7 +346,13 @@ def _validate_update_metadata(payload: dict[str, Any], *, expected_app_id: str =
     for field in ("currentVersion", "platform", "arch", "channelStatus"):
         if not isinstance(payload.get(field), str) or not payload[field].strip():
             raise RuntimeError(f"update metadata is missing non-empty {field}")
-    for field in ("configured", "updateAvailable"):
+    for field in (
+        "configured",
+        "updateAvailable",
+        "automaticUpdateEnabled",
+        "automaticUpdateSupported",
+        "automaticUpdateReady",
+    ):
         if not isinstance(payload.get(field), bool):
             raise RuntimeError(f"update metadata {field} must be boolean")
 
@@ -481,6 +500,16 @@ def smoke_packaged_executable(
                 except UnicodeDecodeError as exc:
                     raise RuntimeError("served app.bundle.js is not valid UTF-8") from exc
                 frontend_digest = _validate_ui_assets(board_html, bundle)
+
+                style_match = re.search(r"board\.css\?v=board-css-[0-9a-f]{64}", board_html)
+                if style_match is None:
+                    raise RuntimeError("packaged board.html does not contain a valid stylesheet reference")
+                style_bytes = _bytes_request(f"{base_url}/{style_match.group(0)}")
+                try:
+                    stylesheet = style_bytes.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise RuntimeError("served board.css is not valid UTF-8") from exc
+                _validate_ui_stylesheet(board_html, stylesheet)
 
                 update_metadata = _json_request(f"{base_url}/api/app/update", timeout=8.0)
                 _validate_update_metadata(update_metadata, expected_app_id=expected_app_id)

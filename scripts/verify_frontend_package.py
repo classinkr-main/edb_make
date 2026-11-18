@@ -13,6 +13,7 @@ from pathlib import Path
 REQUIRED_UI_FILES = (
     "ui_prototype/index.html",
     "ui_prototype/board.html",
+    "ui_prototype/board.css",
     "ui_prototype/favicon.png",
     "ui_prototype/reorder.js",
     "ui_prototype/review_filters.js",
@@ -21,11 +22,26 @@ REQUIRED_UI_FILES = (
     "ui_prototype/app.bundle.js",
     "ui_prototype/vendor/react.production.min.js",
     "ui_prototype/vendor/react-dom.production.min.js",
+    "ui_prototype/vendor/fonts/fonts.css",
+    "ui_prototype/vendor/fonts/PretendardVariable.woff2",
+    "ui_prototype/vendor/fonts/JetBrainsMonoVariable.woff2",
+    "ui_prototype/vendor/fonts/CaveatVariable.woff2",
+    "ui_prototype/vendor/fonts/OFL-Pretendard.txt",
+    "ui_prototype/vendor/fonts/OFL-JetBrainsMono.txt",
+    "ui_prototype/vendor/fonts/OFL-Caveat.txt",
 )
 
 REQUIRED_RUNTIME_SOURCE_FILES = (
     "scripts/render_hwp_with_rhwp_core.mjs",
     "assets/app_icon.png",
+)
+
+REMOTE_ASSET_HOSTS = (
+    "https://fonts.googleapis.com",
+    "https://fonts.gstatic.com",
+    "https://cdn.jsdelivr.net",
+    "https://unpkg.com",
+    "https://cdnjs.cloudflare.com",
 )
 
 FORBIDDEN_FRONTEND_FILES = (
@@ -35,6 +51,9 @@ FORBIDDEN_FRONTEND_FILES = (
     "ui_prototype/vendor/babel.min.js",
     "ui_prototype/vendor/babel.min.js.map",
     "build_ui_prototype_data.py",
+    # A second, unreferenced design system (warm paper palette, teal accent)
+    # that conflicted with the shipped theme. Deleted on purpose.
+    "ui_prototype/styles.css",
 )
 
 PACKAGING_MANIFESTS = (
@@ -52,6 +71,7 @@ FRONTEND_BUNDLE_SOURCE_FILES = (
 )
 SOURCE_DIGEST_RE = re.compile(r"Source SHA256:\s*([0-9a-f]{64})")
 BUNDLE_CACHE_BUST_RE = re.compile(r"^app\.bundle\.js\?v=frontend-bundle-([0-9a-f]{64})$")
+STYLE_CACHE_BUST_RE = re.compile(r"^board\.css\?v=board-css-([0-9a-f]{64})$")
 
 
 def _read(path: Path) -> str:
@@ -74,6 +94,20 @@ def frontend_bundle_source_digest(project_root: Path) -> str | None:
         digest.update(source_path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def style_source_digest(project_root: Path) -> str | None:
+    style_path = project_root.resolve() / "ui_prototype" / "board.css"
+    if not style_path.is_file():
+        return None
+    return hashlib.sha256(style_path.read_bytes()).hexdigest()
+
+
+def style_cache_bust_digest(link_href: str) -> str | None:
+    match = STYLE_CACHE_BUST_RE.fullmatch(link_href)
+    if match is None:
+        return None
+    return match.group(1)
 
 
 def bundle_cache_bust_digest(script_src: str) -> str | None:
@@ -147,6 +181,27 @@ def collect_errors(project_root: Path) -> list[str]:
         for token in forbidden_tokens:
             if token in board_html:
                 errors.append(f"board.html still references legacy runtime token: {token}")
+        style_hrefs = [
+            href
+            for href in re.findall(r"<link[^>]*href=\"([^\"]+)\"", board_html)
+            if href.startswith("board.css")
+        ]
+        expected_style_digest = style_source_digest(root)
+        if len(style_hrefs) != 1:
+            errors.append("board.html must load exactly one cache-busted board.css")
+        elif (style_digest := style_cache_bust_digest(style_hrefs[0])) is None:
+            errors.append("board.html board.css cache bust must use the 64-character source digest")
+        elif expected_style_digest is not None and style_digest != expected_style_digest:
+            errors.append("board.html board.css cache bust is stale; rebuild with scripts/build_frontend_bundle.mjs")
+        if "<style>" in board_html:
+            errors.append("board.html must keep its theme in board.css, not an inline <style> block")
+
+        for remote_host in REMOTE_ASSET_HOSTS:
+            if remote_host in board_html:
+                errors.append(
+                    "board.html must not load remote assets; the packaged app runs offline: "
+                    f"{remote_host}"
+                )
     else:
         errors.append("missing ui_prototype/board.html")
 

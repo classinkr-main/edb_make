@@ -92,15 +92,17 @@ def test_concurrent_settings_updates_do_not_drop_provider_key() -> None:
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [
                     executor.submit(user_settings.update_api_keys, runtime_dir, gemini_api_key="gemini-key"),
-                    executor.submit(user_settings.update_api_keys, runtime_dir, openai_api_key="openai-key"),
+                    executor.submit(user_settings.update_api_keys, runtime_dir, ai_enabled=False),
                 ]
                 for future in futures:
                     future.result()
 
         stored = user_settings.load_user_settings(runtime_dir)
 
+    # Each update is a read-modify-write of the same JSON file; without the
+    # settings lock one writer can drop the other's field.
     assert stored["gemini_api_key"] == "gemini-key"
-    assert stored["openai_api_key"] == "openai-key"
+    assert stored[user_settings._AI_ENABLED_KEY] is False
 
 
 def test_preprocess_discovers_standard_windows_office_and_browser_installs() -> None:

@@ -7,6 +7,12 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent
 
 
+def board_stylesheet() -> str:
+    """The editor theme lives in board.css; board.html only links it."""
+
+    return (PROJECT_ROOT / "ui_prototype" / "board.css").read_text(encoding="utf-8")
+
+
 class TestUiPerformance(unittest.TestCase):
     def setUp(self) -> None:
         self.source = (PROJECT_ROOT / "ui_prototype" / "app.jsx").read_text(encoding="utf-8")
@@ -19,6 +25,20 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn("if (scrollSyncFrameRef.current != null) return", board_stage)
         self.assertIn("scrollSyncFrameRef.current = window.requestAnimationFrame", board_stage)
         self.assertIn("window.cancelAnimationFrame(scrollSyncFrameRef.current)", board_stage)
+
+    def test_initial_session_fetch_is_not_restarted_by_column_changes(self) -> None:
+        app = self.source.split("function App(){", 1)[1]
+        apply_session = app.split("const applySession = useCallback", 1)[1]
+        apply_session = apply_session.split("// Replace state from a mutation response", 1)[0]
+        initial_fetch = app.split("// initial session fetch", 1)[1]
+        initial_fetch = initial_fetch.split("// load user settings", 1)[0]
+
+        self.assertIn("const boardColumnsRef = useRef(boardColumns)", app)
+        self.assertIn("boardColumnsRef.current = boardColumns", app)
+        self.assertIn("boardColumnsRef.current", apply_session)
+        self.assertIn("}, []);", apply_session)
+        self.assertIn("}, [applySession]);", initial_fetch)
+        self.assertNotIn("}, [boardColumns]);", apply_session)
 
     def test_elapsed_time_updates_do_not_run_twice_per_second(self) -> None:
         loading = self.source.split("function LoadingOverlay", 1)[1]
@@ -59,7 +79,7 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn("for (const { item } of visibleItemRows)", items_rail)
 
     def test_tile_images_decode_async_and_gpu_hints_are_drag_scoped(self) -> None:
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
         tile_image = self.source.split("function TileImage", 1)[1]
         tile_image = tile_image.split("function canPreviewImageFile", 1)[0]
         base_tile_css = board.split(".stage-tile{", 1)[1].split("}", 1)[0]
@@ -71,7 +91,7 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn("will-change: transform", positioning_css)
 
     def test_stage_tile_contain_image_is_top_aligned_without_changing_its_box(self) -> None:
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
         base_image_css = board.split(".tile-img{", 1)[1].split("}", 1)[0]
         stage_image_css = board.split(".stage-tile .tile-img{", 1)[1].split("}", 1)[0]
 
@@ -80,7 +100,7 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn("object-position: center top", stage_image_css)
 
     def test_board_estimate_bar_reserves_space_without_covering_the_board(self) -> None:
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
         stage_css = board.split("/* Stage (big board) */", 1)[1]
         stage_wrap_css = stage_css.split(".stage-wrap{", 1)[1].split("}", 1)[0]
         stage_board_css = stage_css.split(".stage-board{", 1)[1].split("}", 1)[0]
@@ -94,7 +114,7 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn(".stage-wrap:has(.stage-estimate-bar)", board)
 
     def test_board_estimate_contract_wraps_and_keeps_controls_touch_sized(self) -> None:
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
         estimate_track_css = board.split(".stage-estimate-track,", 1)[1].split("}", 1)[0]
         estimate_action_css = board.split(".stage-estimate-action{", 1)[1].split("}", 1)[0]
 
@@ -105,7 +125,7 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn(".stage-estimate-track", board)
 
     def test_board_grid_and_active_slot_guides_are_visible_but_noninteractive(self) -> None:
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
         grid_css = board.split(".page-divider.is-classin-grid{", 1)[1].split("}", 1)[0]
         slot_gap_css = board.split(".active-slot-gap{", 1)[1].split("}", 1)[0]
         next_boundary_css = board.split(".active-next-boundary{", 1)[1].split("}", 1)[0]
@@ -147,7 +167,7 @@ class TestUiPerformance(unittest.TestCase):
         self.assertIn("src={displayUrl}", tile_image)
 
     def test_mobile_sidebar_keeps_scrolling_and_selection_tools_compact(self) -> None:
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
 
         self.assertIn("touch-action: pan-y", board)
         self.assertIn(".item .grip{", board)
@@ -169,7 +189,7 @@ class TestUiPerformance(unittest.TestCase):
     def test_review_scroll_zoom_and_images_are_stable_for_long_documents(self) -> None:
         review_stage = self.source.split("function ReviewStage", 1)[1]
         review_stage = review_stage.split("// ─── LEFT:", 1)[0]
-        board = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        board = board_stylesheet()
 
         self.assertIn("const reviewScrollSyncFrameRef = useRef(null)", review_stage)
         self.assertIn("if (reviewScrollSyncFrameRef.current != null) return", review_stage)

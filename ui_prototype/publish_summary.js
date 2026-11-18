@@ -330,6 +330,10 @@
           edb_file_exists: exists === undefined ? true : exists !== false,
           recordCount: positiveNumber(part.recordCount ?? part.record_count),
           record_count: positiveNumber(part.recordCount ?? part.record_count),
+          placementCount: positiveNumber(part.placementCount ?? part.placement_count),
+          placement_count: positiveNumber(part.placementCount ?? part.placement_count),
+          flowEndPages: positiveNumber(part.flowEndPages ?? part.flow_end_pages),
+          flow_end_pages: positiveNumber(part.flowEndPages ?? part.flow_end_pages),
           pageCountHint: positiveNumber(part.pageCountHint ?? part.page_count_hint),
           page_count_hint: positiveNumber(part.pageCountHint ?? part.page_count_hint),
         };
@@ -352,6 +356,10 @@
         edb_file_exists: fallbackExists === undefined ? true : fallbackExists !== false,
         recordCount: positiveNumber(fallback.recordCount),
         record_count: positiveNumber(fallback.recordCount),
+        placementCount: positiveNumber(fallback.placementCount),
+        placement_count: positiveNumber(fallback.placementCount),
+        flowEndPages: positiveNumber(fallback.flowEndPages),
+        flow_end_pages: positiveNumber(fallback.flowEndPages),
         pageCountHint: positiveNumber(fallback.pageCountHint),
         page_count_hint: positiveNumber(fallback.pageCountHint),
       });

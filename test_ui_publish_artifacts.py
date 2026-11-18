@@ -6,6 +6,21 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 
+def board_document() -> str:
+    """board.html plus the stylesheet it links.
+
+    The editor theme used to be an inline <style> block; it now lives in
+    ui_prototype/board.css. These assertions cover both halves of the document.
+    """
+
+    ui_root = PROJECT_ROOT / "ui_prototype"
+    return (
+        (ui_root / "board.html").read_text(encoding="utf-8")
+        + "\n"
+        + (ui_root / "board.css").read_text(encoding="utf-8")
+    )
+
+
 
 class TestUiPublishArtifacts(unittest.TestCase):
     def test_publish_result_panel_disables_missing_artifact_actions(self) -> None:
@@ -19,6 +34,9 @@ class TestUiPublishArtifacts(unittest.TestCase):
         self.assertIn("summary.edbSplit", panel)
         self.assertIn("summary.edbPartCount", panel)
         self.assertIn("EDB files", panel)
+        self.assertIn("summary.edbParts.map", panel)
+        self.assertIn("part.flowEndPages.toFixed(1)", panel)
+        self.assertIn("실제 사용", panel)
         self.assertIn("파일 없음", panel)
         self.assertIn("폴더 없음", panel)
         self.assertIn("ClassIn 열기", panel)
@@ -126,7 +144,7 @@ class TestUiPublishArtifacts(unittest.TestCase):
         self.assertIn("async function postExportImages", source)
         self.assertIn("fetch('/api/session/export-images'", source)
         self.assertIn("const exportSessionImages = useCallback", source)
-        self.assertIn("const sessionForExport = materializeSessionForItems(session, itemsForExport, fileName, boardColumns) || session;", source)
+        self.assertIn("const sessionForExport = materializeSessionForItems(session, itemsForExport, fileName, boardColumns, layoutGapMode) || session;", source)
         self.assertIn("postExportImages({ mode: 'both', problemIds, session: sessionForExport })", source)
         self.assertIn("fetch('/api/session/problem-image'", source)
         self.assertIn("fetchProblemImageDownload(item.id, { session: sessionForDownload })", source)
@@ -185,8 +203,20 @@ class TestUiPublishArtifacts(unittest.TestCase):
         self.assertNotIn("Math.min(layout.totalPages, 50)", source)
         self.assertNotIn("최대 50", source)
 
+    def test_board_preview_requests_final_render_edb_part_plan(self) -> None:
+        source = (PROJECT_ROOT / "ui_prototype" / "app.jsx").read_text(encoding="utf-8")
+        board_stage = source.split("function BoardStage({", 1)[1].split("function downloadPublishSummary", 1)[0]
+
+        self.assertIn("fetch('/api/session/publish-plan'", source)
+        self.assertIn("prepareSessionPublishRequest", source)
+        self.assertIn("publishPlanRequestSignature", source)
+        self.assertIn("controller.abort()", source)
+        self.assertIn("publishPlan?.projectedPartCount", board_stage)
+        self.assertIn("'계산 중'", board_stage)
+        self.assertIn("'예상'", board_stage)
+
     def test_board_uses_publish_artifact_cache_bust(self) -> None:
-        html = (PROJECT_ROOT / "ui_prototype" / "board.html").read_text(encoding="utf-8")
+        html = board_document()
 
         self.assertIn("publish_summary.js?v=layout-diagnostics-edb-split-20260702", html)
         self.assertIn("app.bundle.js?v=frontend-bundle-", html)

@@ -76,6 +76,51 @@ class TestAppUpdateConfigBuilder(unittest.TestCase):
         self.assertIn("app_update_config.json downloadUrl aliases conflict", result.stderr)
         self.assertFalse(output.exists())
 
+    def test_hashes_packaging_pin_without_embedding_plaintext(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            tmpdir = Path(raw_tmp)
+            source = tmpdir / "app_update_config.json"
+            output = tmpdir / "generated" / "app_update_config.json"
+            source.write_text(
+                json.dumps({"appId": "ClassInEDBMVP", "version": "0.2.0"}),
+                encoding="utf-8",
+            )
+            env = os.environ.copy()
+            env["EDB_PACKAGE_UPDATE_PIN"] = "4826"
+
+            subprocess.run(
+                [sys.executable, str(BUILDER), str(source), str(output)],
+                cwd=PROJECT_ROOT,
+                env=env,
+                check=True,
+            )
+            config = json.loads(output.read_text(encoding="utf-8"))
+
+        verifier = config["updatePinHash"]
+        self.assertTrue(verifier.startswith("pbkdf2_sha256$210000$"))
+        self.assertNotIn("4826", verifier)
+
+    def test_rejects_non_numeric_packaging_pin(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            tmpdir = Path(raw_tmp)
+            source = tmpdir / "app_update_config.json"
+            output = tmpdir / "generated" / "app_update_config.json"
+            source.write_text("{}", encoding="utf-8")
+            env = os.environ.copy()
+            env["EDB_PACKAGE_UPDATE_PIN"] = "12ab"
+
+            result = subprocess.run(
+                [sys.executable, str(BUILDER), str(source), str(output)],
+                cwd=PROJECT_ROOT,
+                env=env,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("4-12 ASCII digits", result.stderr)
+        self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

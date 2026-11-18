@@ -4232,7 +4232,7 @@ class TestSessionPublishPreflightGuard(unittest.TestCase):
                 patch.object(app_server, "build_edb", side_effect=fake_build_edb),
                 patch.object(app_server, "write_edb", side_effect=lambda path, data: Path(path).write_bytes(data)),
             ):
-                parts = app_server.write_classin_limited_edb_files(
+                parts = app_server._write_classin_limited_edb_files_local(
                     entries,
                     template,
                     root,
@@ -4274,7 +4274,7 @@ class TestSessionPublishPreflightGuard(unittest.TestCase):
                 ),
             ):
                 with self.assertRaisesRegex(ValueError, "different page scale"):
-                    app_server.write_classin_limited_edb_files(
+                    app_server._write_classin_limited_edb_files_local(
                         entries,
                         template,
                         root,
@@ -4285,6 +4285,59 @@ class TestSessionPublishPreflightGuard(unittest.TestCase):
                         board_theme=app_server.DEFAULT_BOARD_THEME,
                         crop_format=app_server.CROP_FORMAT_V1,
                     )
+
+    def test_session_publish_plan_is_read_only_and_returns_projected_parts(self):
+        with TemporaryDirectory() as raw_tmp:
+            session = {
+                "session_name": "planned lesson",
+                "output_dir": raw_tmp,
+                "pages": [],
+                "problems": [
+                    {"id": "p1", "title": "1.", "bbox": {}, "riskFlags": []},
+                    {"id": "p2", "title": "2.", "bbox": {}, "riskFlags": []},
+                ],
+            }
+            handler, responses = self._publish(session, {"order": ["p2", "p1"]})
+            entries = [SimpleNamespace(problem_id="p2"), SimpleNamespace(problem_id="p1")]
+            projected_parts = [
+                {
+                    "partIndex": 1,
+                    "partCount": 1,
+                    "problemCount": 2,
+                    "estimatedFlowEndPages": 2.4,
+                    "problemIds": ["p2", "p1"],
+                }
+            ]
+
+            with (
+                patch.object(app_server, "_problems_to_entries", return_value=entries) as entry_builder,
+                patch.object(app_server, "plan_classin_limited_edb_parts", return_value=projected_parts) as planner,
+                patch.object(app_server, "write_classin_limited_edb_files") as writer,
+                patch.object(app_server, "write_classin_handoff_manifest") as handoff_writer,
+            ):
+                handler._handle_session_publish_plan()
+
+            entry_builder.assert_called_once()
+            planner.assert_called_once()
+            writer.assert_not_called()
+            handoff_writer.assert_not_called()
+            self.assertIsNone(handler.server.remembered_session)
+            body, _kwargs = responses[0]
+            self.assertTrue(body["ok"])
+            self.assertEqual(1, body["projectedPartCount"])
+            self.assertEqual(["p2", "p1"], body["projectedParts"][0]["problemIds"])
+            self.assertEqual("pending", body["finalClassinPreflightStatus"])
+
+    def test_publish_plan_route_uses_artifact_read_guard(self):
+        handler = object.__new__(app_server.AppRequestHandler)
+        handler.path = "/api/session/publish-plan"
+        called = []
+        handler._run_artifact_read = lambda callback: called.append(callback)
+
+        handler._dispatch_post()
+
+        self.assertEqual(1, len(called))
+        self.assertEqual(handler._handle_session_publish_plan, called[0])
 
     def test_session_publish_uses_requested_name_and_splits_over_fifty_pages(self):
         with TemporaryDirectory() as raw_tmp:

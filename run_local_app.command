@@ -7,12 +7,15 @@ cd "$PROJECT_ROOT"
 HOST="${EDB_HOST:-127.0.0.1}"
 PORT="${EDB_PORT:-8765}"
 URL="http://${HOST}:${PORT}/"
+HEALTH_URL="${URL}api/health"
 NO_BROWSER="${EDB_NO_BROWSER:-0}"
+FOREGROUND="${EDB_FOREGROUND:-0}"
 VENV_DIR="$PROJECT_ROOT/.venv"
 PYTHON_BIN="$VENV_DIR/bin/python"
 REQUIREMENTS_FILE="$PROJECT_ROOT/requirements-local.txt"
 RUNTIME_DIR="$PROJECT_ROOT/.app_runtime"
 REQUIREMENTS_STAMP="$RUNTIME_DIR/requirements-local.sha256"
+APP_LOG="$RUNTIME_DIR/app.log"
 MIN_PYTHON_MAJOR=3
 MIN_PYTHON_MINOR=11
 
@@ -94,7 +97,7 @@ echo "프로젝트: $PROJECT_ROOT"
 echo "주소: $URL"
 echo ""
 
-if /usr/bin/curl -fsS "$URL/api/health" >/dev/null 2>&1; then
+if /usr/bin/curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
   echo "이미 로컬 앱 서버가 실행 중입니다. 브라우저만 엽니다."
   if [[ "$NO_BROWSER" != "1" && "$NO_BROWSER" != "true" && "$NO_BROWSER" != "yes" ]]; then
     /usr/bin/open "$URL"
@@ -136,13 +139,46 @@ PY
 fi
 
 echo ""
-echo "브라우저를 열고 서버를 실행합니다."
-echo "이 터미널 창을 닫으면 로컬 앱 서버도 종료됩니다."
+echo "로컬 앱 서버를 실행합니다."
 echo ""
 
-APP_ARGS=("$PROJECT_ROOT/app_server.py" "--host" "$HOST" "--port" "$PORT")
-if [[ "$NO_BROWSER" != "1" && "$NO_BROWSER" != "true" && "$NO_BROWSER" != "yes" ]]; then
-  APP_ARGS+=("--open-browser")
+APP_ARGS=(
+  "$PROJECT_ROOT/app_server.py"
+  "--host" "$HOST"
+  "--port" "$PORT"
+  "--no-open-browser"
+  "--log-file" "$APP_LOG"
+)
+
+if [[ "$FOREGROUND" == "1" || "$FOREGROUND" == "true" || "$FOREGROUND" == "yes" ]]; then
+  echo "포그라운드 개발 모드입니다. 이 터미널을 닫으면 서버도 종료됩니다."
+  echo "로그: $APP_LOG"
+  exec "$PYTHON_BIN" "${APP_ARGS[@]}"
 fi
 
-exec "$PYTHON_BIN" "${APP_ARGS[@]}"
+echo "서버를 터미널과 분리해 실행합니다. 이 창은 닫아도 됩니다."
+echo "로그: $APP_LOG"
+nohup "$PYTHON_BIN" "${APP_ARGS[@]}" </dev/null >>"$APP_LOG" 2>&1 &
+SERVER_PID=$!
+
+for attempt_no in {1..150}; do
+  if /usr/bin/curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+    echo "서버 시작 완료 (PID $SERVER_PID)"
+    if [[ "$NO_BROWSER" != "1" && "$NO_BROWSER" != "true" && "$NO_BROWSER" != "yes" ]]; then
+      /usr/bin/open "$URL"
+    fi
+    exit 0
+  fi
+  if ! kill -0 "$SERVER_PID" >/dev/null 2>&1; then
+    echo "서버가 시작 중 종료되었습니다. 최근 로그:"
+    /usr/bin/tail -n 30 "$APP_LOG" 2>/dev/null || true
+    pause_before_exit
+    exit 1
+  fi
+  sleep 0.1
+done
+
+echo "서버가 제한 시간 안에 준비되지 않았습니다. 최근 로그:"
+/usr/bin/tail -n 30 "$APP_LOG" 2>/dev/null || true
+pause_before_exit
+exit 1

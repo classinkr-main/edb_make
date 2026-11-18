@@ -89,6 +89,36 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _fixture_board_html(project_root: Path, bundle_digest: str) -> str:
+        """board.html markup with both cache busts the verifier expects."""
+
+        css_path = project_root / "ui_prototype" / "board.css"
+        css_path.parent.mkdir(parents=True, exist_ok=True)
+        if not css_path.exists():
+            css_path.write_bytes(b"placeholder")
+        css_digest = hashlib.sha256(css_path.read_bytes()).hexdigest()
+        return (
+            "<!doctype html>"
+            f'<link rel="stylesheet" href="board.css?v=board-css-{css_digest}" />'
+            f'<script src="app.bundle.js?v=frontend-bundle-{bundle_digest}"></script>\n'
+        )
+
+    @staticmethod
+    def _write_missing_required_ui_files(ui_parent: Path) -> None:
+        """Materialize any REQUIRED_UI_FILES entry the fixture does not write itself.
+
+        Keeps these fixtures from needing an edit every time a new static asset
+        (fonts, stylesheets) joins the packaged frontend.
+        """
+
+        for rel_path in REQUIRED_UI_FILES:
+            target = ui_parent / rel_path
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"placeholder")
+
     def _write_frontend_project(self, project_root: Path) -> None:
         ui_root = project_root / "ui_prototype"
         vendor_root = ui_root / "vendor"
@@ -113,6 +143,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
         (ui_root / "publish_guard.js").write_text("// guard\n", encoding="utf-8")
         (vendor_root / "react.production.min.js").write_text("// react\n", encoding="utf-8")
         (vendor_root / "react-dom.production.min.js").write_text("// react-dom\n", encoding="utf-8")
+        self._write_missing_required_ui_files(project_root)
         digest = frontend_bundle_source_digest(project_root)
         self.assertIsNotNone(digest)
         (ui_root / "app.bundle.js").write_text(
@@ -124,7 +155,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             encoding="utf-8",
         )
         (ui_root / "board.html").write_text(
-            f'<!doctype html><script src="app.bundle.js?v=frontend-bundle-{digest}"></script>\n',
+            self._fixture_board_html(project_root, digest),
             encoding="utf-8",
         )
         manifest_text = "\n".join((*REQUIRED_UI_FILES, *REQUIRED_RUNTIME_SOURCE_FILES)) + "\n"
@@ -151,7 +182,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
         (ui_root / "favicon.png").write_bytes(b"png")
         digest = "0" * 64
         (ui_root / "board.html").write_text(
-            f'<!doctype html><script src="app.bundle.js?v=frontend-bundle-{digest}"></script>\n',
+            self._fixture_board_html(resource_root, digest),
             encoding="utf-8",
         )
         (ui_root / "reorder.js").write_text("// reorder\n", encoding="utf-8")
@@ -168,6 +199,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
         )
         (vendor_root / "react.production.min.js").write_text("// react\n", encoding="utf-8")
         (vendor_root / "react-dom.production.min.js").write_text("// react-dom\n", encoding="utf-8")
+        self._write_missing_required_ui_files(resource_root)
         if resource_rel == "_internal":
             (package_root / f"{package_root.name}.exe").write_bytes(b"launcher")
             (resource_root / "python312.dll").write_bytes(b"python runtime")
@@ -215,6 +247,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             "ui_prototype/app.jsx",
             "ui_prototype/app.bundle.js",
             "ui_prototype/board.html",
+            "ui_prototype/board.css",
             "scripts/build_frontend_bundle.mjs",
             "scripts/vendor/babel.min.js",
         )
@@ -281,7 +314,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             self.assertEqual([], collect_errors(project_root))
 
             (project_root / "ui_prototype" / "board.html").write_text(
-                f'<!doctype html><script src="app.bundle.js?v=frontend-bundle-{"1" * 64}"></script>\n',
+                self._fixture_board_html(project_root, "1" * 64),
                 encoding="utf-8",
             )
             errors = collect_errors(project_root)
@@ -444,6 +477,24 @@ class TestPackagingFrontendManifest(unittest.TestCase):
         self.assertTrue(any("downloadUrl must be an absolute URL" in error for error in errors))
         self.assertTrue(any("releaseNotesUrl must use https or loopback http" in error for error in errors))
 
+    def test_packaged_app_layout_rejects_invalid_update_pin_verifier(self) -> None:
+        with TemporaryDirectory() as raw_tmp:
+            package_root = Path(raw_tmp) / "ClassInEDBMVP"
+            resource_root = self._write_packaged_runtime(package_root)
+            (resource_root / "app_update_config.json").write_text(
+                json.dumps({
+                    "appId": "ClassInEDBMVP",
+                    "appName": "ClassInEDBMVP",
+                    "version": "test",
+                    "updatePinHash": "sha256:not-a-pbkdf2-verifier",
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = collect_package_errors(package_root)
+
+        self.assertTrue(any("updatePinHash is not a valid PBKDF2 verifier" in error for error in errors))
+
     def test_packaged_app_layout_allows_loopback_update_metadata_url(self) -> None:
         with TemporaryDirectory() as raw_tmp:
             package_root = Path(raw_tmp) / "ClassInEDBMVP"
@@ -507,7 +558,11 @@ class TestPackagingFrontendManifest(unittest.TestCase):
                 '"downloadUrl":"https://example.test/ClassInEDBMVP-macOS.zip",'
                 '"download_url":"https://example.test/other.zip",'
                 '"releaseNotesUrl":"https://example.test/releases/test",'
-                '"release_notes_url":"https://example.test/releases/other"'
+                '"release_notes_url":"https://example.test/releases/other",'
+                '"updatePinHash":"pbkdf2_sha256$210000$30313233343536373839616263646566$'
+                '3f3a91d162a83c703d6002b2ffbe00ed6cdab2e02d43f6547651c98e9a30be48",'
+                '"update_pin_hash":"pbkdf2_sha256$210000$30313233343536373839616263646567$'
+                'fd7116736daed4be627d84dcd834b8932c958321d9c54742ac2aebdf8b65e1bd"'
                 "}\n",
                 encoding="utf-8",
             )
@@ -519,6 +574,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
         self.assertTrue(any("updateFeedUrl aliases conflict" in error for error in errors))
         self.assertTrue(any("downloadUrl aliases conflict" in error for error in errors))
         self.assertTrue(any("releaseNotesUrl aliases conflict" in error for error in errors))
+        self.assertTrue(any("updatePinHash aliases conflict" in error for error in errors))
 
     def test_packaged_app_layout_rejects_conflicting_duplicate_update_configs(self) -> None:
         with TemporaryDirectory() as raw_tmp:
@@ -567,7 +623,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             package_root = Path(raw_tmp) / "ClassInEDBMVP"
             resource_root = self._write_packaged_runtime(package_root)
             (resource_root / "ui_prototype" / "board.html").write_text(
-                f'<!doctype html><script src="app.bundle.js?v=frontend-bundle-{"1" * 64}"></script>\n',
+                self._fixture_board_html(resource_root, "1" * 64),
                 encoding="utf-8",
             )
 
@@ -739,7 +795,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             packaged_bundle = resource_root / "ui_prototype" / "app.bundle.js"
             digest = frontend_bundle_source_digest(project_root)
             (resource_root / "ui_prototype" / "board.html").write_text(
-                f'<!doctype html><script src="app.bundle.js?v=frontend-bundle-{digest}"></script>\n',
+                self._fixture_board_html(resource_root, digest),
                 encoding="utf-8",
             )
             packaged_bundle.write_bytes(source_bundle.read_bytes())
@@ -929,6 +985,9 @@ class TestPackagingFrontendManifest(unittest.TestCase):
             "channelStatus": "up_to_date",
             "configured": True,
             "updateAvailable": False,
+            "automaticUpdateEnabled": True,
+            "automaticUpdateSupported": True,
+            "automaticUpdateReady": False,
         }
         _validate_update_metadata(update)
         _validate_update_metadata(
@@ -993,6 +1052,7 @@ class TestPackagingFrontendManifest(unittest.TestCase):
         self.assertIn("CloseApplications=yes", source)
         self.assertIn("RestartApplications=no", source)
         self.assertIn("[InstallDelete]", source)
+        self.assertIn(r'Type: filesandordirs; Name: "{app}\_internal"', source)
         for stale_path in (
             r"{app}\.app_runtime",
             r"{app}\ui_prototype\app.js",

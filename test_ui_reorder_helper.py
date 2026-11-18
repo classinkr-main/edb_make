@@ -445,6 +445,57 @@ class TestUiReorderHelper(unittest.TestCase):
             """
         )
 
+    def test_board_reflow_supports_compact_and_per_item_gap_removal(self) -> None:
+        run_node(
+            r"""
+            const fs = require('fs');
+            const vm = require('vm');
+            const source = fs.readFileSync('./ui_prototype/app.jsx', 'utf8');
+            const start = source.indexOf('const FIXED_LEFT_ZONE_RATIO =');
+            const end = source.indexOf('const INITIAL_ITEMS =');
+            const sandbox = {};
+            sandbox.globalThis = sandbox;
+            sandbox.normalizeInputIntent = value => value;
+            vm.runInNewContext(
+              source.slice(start, end) + '\n'
+                + 'globalThis.reflowItemsForBoardOrder = reflowItemsForBoardOrder;\n'
+                + 'globalThis.applyPlacementPatchToItem = applyPlacementPatchToItem;\n',
+              sandbox
+            );
+            const items = [
+              { id: 'short', heightFrac: 0.55, placementScaleRatio: 1 },
+              { id: 'next', heightFrac: 0.8, placementScaleRatio: 1 },
+            ];
+            const grid = sandbox.reflowItemsForBoardOrder(items, 1.2, 1, 'classin-grid');
+            if (grid[1].startYPages !== 1.2) {
+              throw new Error(`grid mode should keep the 1.2 boundary: ${JSON.stringify(grid)}`);
+            }
+            const compact = sandbox.reflowItemsForBoardOrder(items, 1.2, 1, 'compact');
+            if (compact[0].snappedNextStartYPages !== 0.55 || compact[1].startYPages !== 0.55) {
+              throw new Error(`compact mode should remove the reserved gap: ${JSON.stringify(compact)}`);
+            }
+            const gapRemoved = sandbox.reflowItemsForBoardOrder([
+              { ...items[0], placementGapAfterPages: 0 },
+              items[1],
+            ], 1.2, 1, 'classin-grid');
+            if (gapRemoved[1].startYPages !== 0.55) {
+              throw new Error(`per-item gap removal should pull later items up: ${JSON.stringify(gapRemoved)}`);
+            }
+            const scaled = sandbox.reflowItemsForBoardOrder([
+              { id: 'scaled', heightFrac: 0.55, placementScaleRatio: 1.4 },
+              items[1],
+            ], 1.2, 1, 'compact');
+            if (scaled[1].startYPages !== 0.77) {
+              throw new Error(`compact mode must reserve rendered scale height: ${JSON.stringify(scaled)}`);
+            }
+            const cleared = sandbox.applyPlacementPatchToItem(gapRemoved[0], { gapAfterPages: null });
+            const restored = sandbox.reflowItemsForBoardOrder([cleared, items[1]], 1.2, 1, 'classin-grid');
+            if (restored[1].startYPages !== 1.2) {
+              throw new Error(`clearing the override should restore grid spacing: ${JSON.stringify(restored)}`);
+            }
+            """
+        )
+
     def test_board_reflow_places_items_across_columns_with_shared_row_height(self) -> None:
         run_node(
             r"""
@@ -669,7 +720,8 @@ class TestUiReorderHelper(unittest.TestCase):
             sandbox.normalizeInputIntent = value => value;
             vm.runInNewContext(
               source.slice(start, end) + '\n'
-                + 'globalThis.reflowItemsForBoardOrder = reflowItemsForBoardOrder;\n',
+                + 'globalThis.reflowItemsForBoardOrder = reflowItemsForBoardOrder;\n'
+                + 'globalThis.applyPlacementPatchToItem = applyPlacementPatchToItem;\n',
               sandbox
             );
 
@@ -688,6 +740,22 @@ class TestUiReorderHelper(unittest.TestCase):
             }
             if (userReduced.renderedBottomYPages !== 1.197 || userReduced.snappedNextStartYPages !== 1.2) {
               throw new Error(`existing reduced geometry is inconsistent: ${JSON.stringify(userReduced)}`);
+            }
+
+            const userIncreased = sandbox.reflowItemsForBoardOrder([
+              { id: 'user-increased', heightFrac: 1.26, placementScaleRatio: 1.05 },
+            ])[0];
+            if (userIncreased.placementScaleRatio !== 1.05) {
+              throw new Error(`explicitly increased scale must not be auto-fitted: ${JSON.stringify(userIncreased)}`);
+            }
+
+            const resetToHundred = sandbox.applyPlacementPatchToItem(
+              { id: 'manual-hundred', heightFrac: 1.26, placementScaleRatio: 0.95 },
+              { scaleRatio: 1 }
+            );
+            const preservedHundred = sandbox.reflowItemsForBoardOrder([resetToHundred])[0];
+            if (preservedHundred.placementScaleRatio !== 1 || !preservedHundred.placementAutoFitDisabled) {
+              throw new Error(`explicit 100% scale must opt out of auto-fit: ${JSON.stringify(preservedHundred)}`);
             }
             """
         )

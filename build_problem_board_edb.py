@@ -470,6 +470,8 @@ BOTTOM_WATERMARK_TRIM_PADDING_PX = 10
 # page guide (e.g. a colored column divider swallowed by horizontal crop
 # expansion), not the horizontal copyright footer this trim targets.
 BOTTOM_WATERMARK_GUIDE_COLUMN_FILL_RATIO = 0.9
+BOTTOM_WATERMARK_MIN_HORIZONTAL_SPAN_RATIO = 0.08
+BOTTOM_WATERMARK_MIN_HORIZONTAL_SPAN_PX = 32
 CORNER_PAGE_BADGE_SCAN_RATIO = 0.18
 CORNER_PAGE_BADGE_SCAN_MAX_PX = 180
 CORNER_PAGE_BADGE_EDGE_SEED_PX = 10
@@ -678,6 +680,11 @@ def _trim_bottom_blue_watermark(image: Image.Image) -> Image.Image:
     scan_top = max(scan_top, int(round(height * BOTTOM_WATERMARK_MIN_Y_RATIO)))
     if scan_top >= height - 2:
         return image
+    min_row_blue_count = max(4, int(round(width * 0.006)))
+    min_horizontal_span = max(
+        BOTTOM_WATERMARK_MIN_HORIZONTAL_SPAN_PX,
+        int(round(width * BOTTOM_WATERMARK_MIN_HORIZONTAL_SPAN_RATIO)),
+    )
     if np is not None:
         arr = np.asarray(rgb, dtype=np.int16)
         lower = arr[scan_top:, :, :]
@@ -697,14 +704,22 @@ def _trim_bottom_blue_watermark(image: Image.Image) -> Image.Image:
             blue_mask = blue_mask & ~guide_columns[np.newaxis, :]
         if int(np.count_nonzero(blue_mask)) < max(18, int(round(width * height * 0.00035))):
             return image
-        rows = np.where(np.count_nonzero(blue_mask, axis=1) >= max(4, int(round(width * 0.006))))[0]
+        row_blue_counts = np.count_nonzero(blue_mask, axis=1)
+        # Copyright footers and their rules are horizontally distributed.
+        # A colored column divider can contribute the same few pixels to
+        # every row, so color/count alone must not make it a bottom boundary.
+        first_blue_columns = np.argmax(blue_mask, axis=1)
+        last_blue_columns = width - 1 - np.argmax(blue_mask[:, ::-1], axis=1)
+        row_blue_spans = last_blue_columns - first_blue_columns + 1
+        rows = np.where(
+            (row_blue_counts >= min_row_blue_count)
+            & (row_blue_spans >= min_horizontal_span)
+        )[0]
         if rows.size == 0:
             return image
         first_y = scan_top + int(rows.min())
     else:
         pixels = rgb.load()
-        min_row_blue_count = max(4, int(round(width * 0.006)))
-
         def is_blue(x: int, y: int) -> bool:
             red, green, blue = pixels[x, y]
             saturation = max(red, green, blue) - min(red, green, blue)
@@ -727,13 +742,27 @@ def _trim_bottom_blue_watermark(image: Image.Image) -> Image.Image:
         first_y: int | None = None
         for y in range(scan_top, height):
             row_blue_count = 0
+            first_blue_x: int | None = None
+            last_blue_x: int | None = None
             for x in range(width):
                 if x in guide_columns:
                     continue
                 if is_blue(x, y):
                     row_blue_count += 1
+                    if first_blue_x is None:
+                        first_blue_x = x
+                    last_blue_x = x
             total_blue_count += row_blue_count
-            if first_y is None and row_blue_count >= min_row_blue_count:
+            horizontal_span = (
+                last_blue_x - first_blue_x + 1
+                if first_blue_x is not None and last_blue_x is not None
+                else 0
+            )
+            if (
+                first_y is None
+                and row_blue_count >= min_row_blue_count
+                and horizontal_span >= min_horizontal_span
+            ):
                 first_y = y
         if total_blue_count < max(18, int(round(width * height * 0.00035))) or first_y is None:
             return image
@@ -1869,6 +1898,7 @@ class ProblemEntry:
     placement_x_ratio: float | None = None
     placement_y_ratio: float | None = None
     placement_scale_ratio: float | None = None
+    placement_gap_after_pages: float | None = None
     preserve_legacy_placement_scale: bool = False
     processing_step: str = PROCESSING_STEP_RAW
     input_intent: str | None = None
@@ -6487,7 +6517,7 @@ def _build_ai_fallback_config(
     effective_enabled = resolved_mode != "off"
     if (
         not effective_enabled
-        and provider in {"openai", "gemini"}
+        and provider in {"gemini", "google"}
         and not model
         and not prompt
         and max_tokens == 4096
@@ -9904,6 +9934,7 @@ def placement_inputs(
                     or _entry_preserves_legacy_placement_scale(entry)
                     else PLACEMENT_SCALE_MAX,
                 ) or 1.0,
+                "placement_gap_after_pages": entry.placement_gap_after_pages,
                 "preserve_legacy_placement_scale": _entry_preserves_legacy_placement_scale(entry),
                 "reserve_scaled_height": _entry_preserves_legacy_placement_scale(entry),
                 "input_intent": entry.input_intent,
@@ -10106,6 +10137,262 @@ def split_problem_entries_for_classin_page_limit(
     if current:
         chunks.append(current)
     return chunks
+
+
+def _classin_rendered_flow_metrics(
+    problem_entries: Sequence[ProblemEntry],
+    placements: Sequence[Mapping[str, object]],
+) -> tuple[list[float], list[float]]:
+    """Return per-entry cursor advances and rendered tails.
+
+    A part's flow is not always the sum of ``end - start`` values: a record may
+    end before its reserved next cursor, while the final record may extend past
+    it.  Keeping advance and tail separately lets the partitioner reproduce
+    ``max(prefix advance + record tail)`` for every candidate interval.
+    """
+
+    if len(problem_entries) != len(placements):
+        return [], []
+    advances: list[float] = []
+    tails: list[float] = []
+    for entry, placement in zip(problem_entries, placements):
+        raw_start = placement.get("start_y_pages")
+        raw_next = placement.get("snapped_next_start_y_pages")
+        if raw_start is None or raw_next is None:
+            return [], []
+        try:
+            start_pages = float(raw_start)
+            next_start_pages = float(raw_next)
+        except (TypeError, ValueError):
+            return [], []
+        placement_id = str(placement.get("problem_id") or placement.get("problemId") or "")
+        if placement_id and placement_id != entry.problem_id:
+            return [], []
+        end_pages = _placement_summary_end_pages(dict(placement))
+        advance = next_start_pages - start_pages
+        tail = end_pages - start_pages
+        if (
+            not math.isfinite(advance)
+            or not math.isfinite(tail)
+            or advance <= 1e-9
+            or tail <= 1e-9
+        ):
+            return [], []
+        advances.append(advance)
+        tails.append(tail)
+    return advances, tails
+
+
+def balanced_classin_part_ranges(
+    flow_weights: Sequence[float],
+    *,
+    tail_weights: Sequence[float] | None = None,
+    max_page_count: int = CLASSIN_MAX_BOARD_PAGE_COUNT,
+    part_count: int | None = None,
+    balance_min_part_count: int = 1,
+) -> list[tuple[int, int, float]]:
+    """Split ordered rendered spans into the fewest, most balanced parts.
+
+    Problem order is preserved.  A greedy pass establishes the minimum number
+    of contiguous bins under ClassIn's page limit; dynamic programming then
+    chooses boundaries that minimize squared distance from the ideal per-part
+    flow.  The optional ``part_count`` keeps an already-proven safe count while
+    moving only its boundaries.
+    """
+
+    advances = [float(value) for value in flow_weights]
+    tails = [float(value) for value in (tail_weights if tail_weights is not None else flow_weights)]
+    if not advances:
+        return []
+    if len(advances) != len(tails):
+        raise ValueError("ClassIn rendered advances and tails must have equal lengths")
+    max_pages = float(max(1, int(max_page_count)))
+    for advance, tail in zip(advances, tails):
+        if not math.isfinite(advance) or advance <= 0 or not math.isfinite(tail) or tail <= 0:
+            raise ValueError("ClassIn rendered flow weights must be positive finite values")
+        if tail > max_pages + 1e-6:
+            raise ValueError(
+                f"A rendered problem exceeds ClassIn's {int(max_pages)}-page limit "
+                f"({tail:.3f} pages)"
+            )
+
+    item_count = len(advances)
+    interval_flow = [[0.0] * (item_count + 1) for _ in range(item_count)]
+    for start in range(item_count):
+        cursor_pages = 0.0
+        flow_end_pages = 0.0
+        for end in range(start, item_count):
+            flow_end_pages = max(flow_end_pages, cursor_pages + tails[end])
+            interval_flow[start][end + 1] = flow_end_pages
+            cursor_pages += advances[end]
+
+    greedy_ranges: list[tuple[int, int, float]] = []
+    start = 0
+    while start < item_count:
+        best_end = start
+        for end in range(start + 1, item_count + 1):
+            if interval_flow[start][end] > max_pages + 1e-6:
+                break
+            best_end = end
+        if best_end <= start:
+            raise ValueError(
+                f"A rendered problem exceeds ClassIn's {int(max_pages)}-page limit"
+            )
+        greedy_ranges.append((start, best_end, interval_flow[start][best_end]))
+        start = best_end
+
+    minimum_part_count = len(greedy_ranges)
+    if part_count is None:
+        resolved_part_count = minimum_part_count
+    else:
+        resolved_part_count = min(item_count, max(1, int(part_count)))
+        if resolved_part_count < minimum_part_count:
+            raise ValueError(
+                f"{resolved_part_count} ClassIn parts cannot contain the rendered flow safely"
+            )
+    if resolved_part_count < max(1, int(balance_min_part_count)):
+        return greedy_ranges
+    target_pages = interval_flow[0][item_count] / resolved_part_count
+
+    # dp[parts_used][end] = (sum_squared_error, max_abs_error, previous_end)
+    dp: list[dict[int, tuple[float, float, int]]] = [
+        {} for _ in range(resolved_part_count + 1)
+    ]
+    dp[0][0] = (0.0, 0.0, -1)
+    for parts_used in range(1, resolved_part_count + 1):
+        min_end = parts_used
+        max_end = item_count - (resolved_part_count - parts_used)
+        for end in range(min_end, max_end + 1):
+            best: tuple[float, float, int] | None = None
+            for previous_end in range(parts_used - 1, end):
+                previous = dp[parts_used - 1].get(previous_end)
+                if previous is None:
+                    continue
+                part_pages = interval_flow[previous_end][end]
+                if part_pages > max_pages + 1e-6:
+                    continue
+                deviation = abs(part_pages - target_pages)
+                candidate = (
+                    previous[0] + deviation * deviation,
+                    max(previous[1], deviation),
+                    previous_end,
+                )
+                if best is None or candidate[:2] < best[:2]:
+                    best = candidate
+            if best is not None:
+                dp[parts_used][end] = best
+
+    if item_count not in dp[resolved_part_count]:
+        raise ValueError(
+            f"Could not balance rendered problems into {resolved_part_count} "
+            f"ClassIn parts under {int(max_pages)} pages"
+        )
+
+    ranges: list[tuple[int, int, float]] = []
+    end = item_count
+    for parts_used in range(resolved_part_count, 0, -1):
+        previous_end = dp[parts_used][end][2]
+        ranges.append((previous_end, end, interval_flow[previous_end][end]))
+        end = previous_end
+    ranges.reverse()
+    return ranges
+
+
+def plan_classin_limited_edb_parts(
+    problem_entries: list[ProblemEntry],
+    template: LayoutTemplate,
+    output_dir: Path,
+    *,
+    record_mode: str,
+    text_confidence_threshold: float,
+    dark_board: bool,
+    board_theme: str,
+    crop_format: str,
+) -> list[dict[str, Any]]:
+    """Preview final ClassIn part boundaries without writing EDB files."""
+
+    if not problem_entries:
+        return []
+    render_template = template_with_board_page_count(template, CLASSIN_MAX_BOARD_PAGE_COUNT)
+    _records, placements, _header_flag = build_records(
+        problem_entries,
+        render_template,
+        record_mode=record_mode,
+        output_dir=output_dir,
+        text_confidence_threshold=text_confidence_threshold,
+        dark_board=dark_board,
+        board_theme=board_theme,
+        crop_format=crop_format,
+        reserve_image_layout_height=True,
+        generate_records=False,
+        expand_board_capacity=False,
+    )
+    _validate_record_page_count_hints(
+        placements,
+        expected_page_count=CLASSIN_MAX_BOARD_PAGE_COUNT,
+    )
+    if not render_template.metadata.get("preserve_source_layout"):
+        _validate_sequential_record_placements(placements)
+    advances, tails = _classin_rendered_flow_metrics(problem_entries, placements)
+    if not advances:
+        raise ValueError("Final rendered ClassIn placements could not be measured")
+    ranges = balanced_classin_part_ranges(
+        advances,
+        tail_weights=tails,
+        balance_min_part_count=3,
+    )
+    part_count = len(ranges)
+    parts: list[dict[str, Any]] = []
+    for part_index, (start, end, estimated_pages) in enumerate(ranges, start=1):
+        chunk_entries = problem_entries[start:end]
+        _chunk_records, chunk_placements, _chunk_header_flag = build_records(
+            chunk_entries,
+            render_template,
+            record_mode=record_mode,
+            output_dir=output_dir,
+            text_confidence_threshold=text_confidence_threshold,
+            dark_board=dark_board,
+            board_theme=board_theme,
+            crop_format=crop_format,
+            reserve_image_layout_height=True,
+            generate_records=False,
+            expand_board_capacity=False,
+        )
+        _validate_record_page_count_hints(
+            chunk_placements,
+            expected_page_count=CLASSIN_MAX_BOARD_PAGE_COUNT,
+        )
+        if not render_template.metadata.get("preserve_source_layout"):
+            _validate_sequential_record_placements(chunk_placements)
+        verified_pages = _placement_summaries_flow_end_pages(chunk_placements)
+        if verified_pages > CLASSIN_MAX_BOARD_PAGE_COUNT + 1e-6:
+            raise ValueError(
+                f"Projected ClassIn part {part_index} exceeds the "
+                f"{CLASSIN_MAX_BOARD_PAGE_COUNT}-page limit after final rendering "
+                f"({verified_pages:.3f} pages)"
+            )
+        problem_ids = [entry.problem_id for entry in chunk_entries]
+        parts.append(
+            {
+                "partIndex": part_index,
+                "part_index": part_index,
+                "partCount": part_count,
+                "part_count": part_count,
+                "problemCount": len(chunk_entries),
+                "problem_count": len(chunk_entries),
+                "estimatedFlowEndPages": float(verified_pages or estimated_pages),
+                "estimated_flow_end_pages": float(verified_pages or estimated_pages),
+                "pageCountHint": CLASSIN_MAX_BOARD_PAGE_COUNT,
+                "page_count_hint": CLASSIN_MAX_BOARD_PAGE_COUNT,
+                "problemIds": problem_ids,
+                "problem_ids": problem_ids,
+                "firstProblemTitle": chunk_entries[0].title if chunk_entries else "",
+                "first_problem_title": chunk_entries[0].title if chunk_entries else "",
+                "lastProblemTitle": chunk_entries[-1].title if chunk_entries else "",
+                "last_problem_title": chunk_entries[-1].title if chunk_entries else "",
+            }
+        )
+    return parts
 
 
 def edb_part_file_name(edb_name: str, part_index: int, part_count: int) -> str:
@@ -10554,6 +10841,12 @@ def build_image_only_records(
             y_px = _problem_origin_y_px(entry, placement, rendered_height_px)
 
         if continuous_flow:
+            continuous_gap_px = (
+                0.0
+                if template.metadata.get("layout_gap_mode") == "compact"
+                or entry.placement_gap_after_pages is not None
+                else CONTINUOUS_RECORD_GAP_PX
+            )
             start_y_pages = continuous_cursor_pages if continuous_cursor_pages is not None else placement.start_y_pages
             actual_height_pages = rendered_height_px / max(scale_ratio, 0.001) / CANVAS_WIDTH
             rendered_height_pages = rendered_height_px / CANVAS_WIDTH
@@ -10561,7 +10854,7 @@ def build_image_only_records(
             snapped_next_start_y_pages = (
                 start_y_pages
                 + rendered_height_pages
-                + CONTINUOUS_RECORD_GAP_PX / CANVAS_WIDTH
+                + continuous_gap_px / CANVAS_WIDTH
             )
             overflow_amount_pages = max(0.0, rendered_height_pages - template.base_slot_height_pages)
             slot_span_count = max(
@@ -10615,7 +10908,7 @@ def build_image_only_records(
                 "snapped_next_start_y_pages": round(snapped_next_start_y_pages, 6),
                 "record_top_y_pages": round(y_px / CANVAS_WIDTH, 6),
                 "record_bottom_y_pages": round((y_px + rendered_height_px) / CANVAS_WIDTH, 6),
-                "record_gap_px": CONTINUOUS_RECORD_GAP_PX if continuous_flow else 0.0,
+                "record_gap_px": continuous_gap_px if continuous_flow else 0.0,
                 "rendered_height_pages": round(rendered_height_px / CANVAS_WIDTH, 6),
                 "overflow_allowed": placement.overflow_allowed,
                 "overflow_amount_pages": round(overflow_amount_pages, 6),
@@ -10996,6 +11289,47 @@ def write_classin_limited_edb_files(
                 continue
         compacted_chunks.append(rendered_chunk)
     rendered_chunks = compacted_chunks
+
+    # The safety splitter above proves every part fits, but recursive overflow
+    # recovery can leave a very small middle/tail part (for example 31/10/37).
+    # Recompute boundaries from the final rendered record spans so the minimum
+    # safe part count is retained and its page usage is distributed evenly.
+    if len(rendered_chunks) >= 3 and not template.metadata.get("preserve_source_layout"):
+        flattened_entries = [
+            entry
+            for rendered_chunk in rendered_chunks
+            for entry in list(rendered_chunk["entries"])
+        ]
+        flattened_placements = [
+            placement
+            for rendered_chunk in rendered_chunks
+            for placement in list(rendered_chunk["placements"])
+        ]
+        rendered_advances, rendered_tails = _classin_rendered_flow_metrics(
+            flattened_entries,
+            flattened_placements,
+        )
+        if rendered_advances:
+            try:
+                balanced_ranges = balanced_classin_part_ranges(
+                    rendered_advances,
+                    tail_weights=rendered_tails,
+                    part_count=len(rendered_chunks),
+                )
+                balanced_chunks = [
+                    build_rendered_chunk(flattened_entries[start:end])
+                    for start, end, _estimated_pages in balanced_ranges
+                ]
+                if all(
+                    float(chunk["flow_end_pages"]) <= CLASSIN_MAX_BOARD_PAGE_COUNT + 1e-6
+                    for chunk in balanced_chunks
+                ):
+                    rendered_chunks = balanced_chunks
+            except ValueError:
+                # The already-rendered chunks are the safety fallback. A
+                # balancing failure must never turn a valid publish into an
+                # error or increase its proven part count.
+                pass
 
     part_count = len(rendered_chunks)
     parts: list[dict[str, Any]] = []

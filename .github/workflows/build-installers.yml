@@ -333,6 +333,7 @@ jobs:
           UPDATE_FEED_URL: ${{ inputs.update_feed_url }}
           MACOS_DOWNLOAD_URL: ${{ inputs.macos_download_url }}
           RELEASE_NOTES_URL: ${{ inputs.release_notes_url }}
+          EDB_PACKAGE_UPDATE_PIN: ${{ secrets.EDB_UPDATE_PIN }}
         run: |
           NOTARY_KEY_PATH=""
           trap '[[ -n "$NOTARY_KEY_PATH" ]] && rm -f "$NOTARY_KEY_PATH"' EXIT
@@ -342,6 +343,11 @@ jobs:
             --update-feed-url "$UPDATE_FEED_URL" \
             --download-url "$MACOS_DOWNLOAD_URL" \
             --release-notes-url "$RELEASE_NOTES_URL")
+
+          if [[ "$PRODUCTION_RELEASE" == "true" && -z "$EDB_PACKAGE_UPDATE_PIN" ]]; then
+            echo "Production release requires EDB_UPDATE_PIN." >&2
+            exit 1
+          fi
 
           if [[ "${MACOS_SIGNING_ENABLED:-0}" == "1" ]]; then
             args+=(--sign-identity "${MACOS_CODESIGN_IDENTITY:-auto}")
@@ -482,7 +488,7 @@ jobs:
           # banner omits the version, so the SHA256-pinned nupkg plus choco's
           # installed-version record is the deterministic check.
           $isccPath = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path -LiteralPath $isccPath)) {
+          if (-not (Test-Path -LiteralPath $isccPath -PathType Leaf)) {
             $isccPath = (Get-Command ISCC.exe -ErrorAction Stop).Source
           }
           $installedPackage = (choco list innosetup --exact --limit-output | Select-Object -First 1)
@@ -501,7 +507,11 @@ jobs:
           UPDATE_FEED_URL: ${{ inputs.update_feed_url }}
           WINDOWS_DOWNLOAD_URL: ${{ inputs.windows_download_url }}
           RELEASE_NOTES_URL: ${{ inputs.release_notes_url }}
+          EDB_PACKAGE_UPDATE_PIN: ${{ secrets.EDB_UPDATE_PIN }}
         run: |
+          if ($env:PRODUCTION_RELEASE -eq "true" -and -not $env:EDB_PACKAGE_UPDATE_PIN) {
+            throw "Production release requires EDB_UPDATE_PIN."
+          }
           # Hashtable splatting: array splatting bound these tokens
           # positionally in this runner's pwsh, which landed the version
           # string in -OutputDir and tripped the unsafe-output guard.

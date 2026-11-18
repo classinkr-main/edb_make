@@ -1286,6 +1286,18 @@ def test_default_gemini_ocr_model_is_flash_with_minimal_thinking(monkeypatch):
     assert backend.thinking_level == "minimal"
 
 
+def test_gemini_38_flash_ocr_model_contract(monkeypatch):
+    import ocr_backend
+
+    monkeypatch.setenv(ocr_backend.GEMINI_OCR_PROFILE_ENV, "latest")
+    assert ocr_backend.resolve_gemini_ocr_model() == "gemini-3.8-flash"
+    assert ocr_backend.resolve_gemini_ocr_thinking_level("gemini-3.8-flash") == "low"
+
+    backend = ocr_backend.GeminiOCRBackend(model="gemini-3.8-flash", api_key="test-key")
+    assert backend.model == "gemini-3.8-flash"
+    assert backend.thinking_level == "low"
+
+
 def test_gemini_ocr_flash_fallback_uses_current_flash_contract(monkeypatch):
     import json
     from io import BytesIO

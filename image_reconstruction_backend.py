@@ -20,12 +20,10 @@ except ImportError:  # pragma: no cover
     np = None
 
 
-OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits"
 GEMINI_IMAGE_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 
 DEFAULT_IMAGE_RECONSTRUCTION_PROVIDER = "gemini"
 DEFAULT_GEMINI_IMAGE_MODEL = "gemini-3.1-flash-image"
-DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_IMAGE_QUALITY = "high"
 DEFAULT_IMAGE_SIZE = "auto"
 DEFAULT_RECONSTRUCTION_UPSCALE_FACTOR = 2.0
@@ -95,7 +93,7 @@ class ImageReconstructionResult:
                 usage=self.usage,
                 image_size=self.image_size,
             )
-            if self.provider in {"gemini", "openai"}
+            if self.provider == "gemini"
             else None
         )
         return {
@@ -129,10 +127,6 @@ def normalize_image_provider(provider: str | None) -> str:
         "nano-banana-2": "gemini",
         "gemini-flash-image-2": "gemini",
         "gemini flash image 2": "gemini",
-        "openai": "openai",
-        "gpt": "openai",
-        "gpt-image": "openai",
-        "gpt-image-2": "openai",
     }
     normalized = aliases.get(value)
     if not normalized:
@@ -140,28 +134,24 @@ def normalize_image_provider(provider: str | None) -> str:
     return normalized
 
 
-def default_image_model(provider: str | None) -> str:
-    normalized = normalize_image_provider(provider)
-    if normalized == "gemini":
-        return DEFAULT_GEMINI_IMAGE_MODEL
-    return DEFAULT_OPENAI_IMAGE_MODEL
+def default_image_model(provider: str | None = None) -> str:
+    normalize_image_provider(provider)
+    return DEFAULT_GEMINI_IMAGE_MODEL
 
 
 def normalize_image_model(provider: str | None, model: str | None) -> str:
-    normalized_provider = normalize_image_provider(provider)
+    normalize_image_provider(provider)
     value = (model or "").strip()
     if not value:
-        return default_image_model(normalized_provider)
+        return DEFAULT_GEMINI_IMAGE_MODEL
     lower = value.lower()
-    if normalized_provider == "gemini" and lower in {
+    if lower in {
         "nanobanana2",
         "nano-banana-2",
         "gemini-flash-image-2",
         "gemini flash image 2",
     }:
         return DEFAULT_GEMINI_IMAGE_MODEL
-    if normalized_provider == "openai" and lower in {"gpt image 2", "gpt-image"}:
-        return DEFAULT_OPENAI_IMAGE_MODEL
     return value
 
 
@@ -213,25 +203,14 @@ def reconstruct_problem_image(
 ) -> ImageReconstructionResult:
     normalized_provider = normalize_image_provider(provider)
     normalized_model = normalize_image_model(normalized_provider, model)
-    if normalized_provider == "gemini":
-        return _reconstruct_with_gemini(
-            source_path,
-            output_path,
-            api_key=api_key,
-            model=normalized_model,
-            prompt=prompt,
-            size=size,
-            timeout_ms=timeout_ms,
-            transparent_background=transparent_background,
-            sharpen=sharpen,
-        )
-    return _reconstruct_with_openai(
+    if normalized_provider != "gemini":
+        raise ValueError(f"unsupported image reconstruction provider: {provider!r}")
+    return _reconstruct_with_gemini(
         source_path,
         output_path,
         api_key=api_key,
         model=normalized_model,
         prompt=prompt,
-        quality=quality,
         size=size,
         timeout_ms=timeout_ms,
         transparent_background=transparent_background,
@@ -399,98 +378,6 @@ def _reconstruct_with_gemini(
         postprocess=postprocess,
     )
 
-
-def _reconstruct_with_openai(
-    source_path: str | Path,
-    output_path: str | Path,
-    *,
-    api_key: str,
-    model: str,
-    prompt: str,
-    quality: str,
-    size: str,
-    timeout_ms: int,
-    transparent_background: bool,
-    sharpen: bool,
-) -> ImageReconstructionResult:
-    source = Path(source_path)
-    output = Path(output_path)
-    if not source.exists():
-        raise FileNotFoundError(f"source image not found: {source}")
-    key = api_key.strip()
-    if not key:
-        raise ValueError("OPENAI_API_KEY is required for image reconstruction")
-
-    fields: list[tuple[str, str]] = [
-        ("model", model.strip() or DEFAULT_OPENAI_IMAGE_MODEL),
-        ("prompt", prompt.strip() or DEFAULT_RECONSTRUCTION_PROMPT),
-        ("size", size.strip() or DEFAULT_IMAGE_SIZE),
-        ("quality", quality.strip() or DEFAULT_IMAGE_QUALITY),
-    ]
-    content_type = mimetypes.guess_type(str(source))[0] or "image/png"
-    body, multipart_type = _encode_multipart(
-        fields=fields,
-        files=[
-            (
-                "image[]",
-                source.name or "problem.png",
-                content_type,
-                source.read_bytes(),
-            )
-        ],
-    )
-    req = request.Request(
-        OPENAI_IMAGE_EDIT_URL,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": multipart_type,
-        },
-        method="POST",
-    )
-
-    started_at = time.perf_counter()
-    try:
-        with request.urlopen(req, timeout=max(1.0, timeout_ms / 1000.0)) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"OpenAI image reconstruction failed ({exc.code}): {detail}") from exc
-    except error.URLError as exc:
-        raise RuntimeError(f"OpenAI image reconstruction failed: {exc.reason}") from exc
-
-    data = payload.get("data")
-    if not isinstance(data, list) or not data:
-        raise RuntimeError("OpenAI image reconstruction returned no image data")
-    first = data[0] if isinstance(data[0], dict) else {}
-    b64_image = first.get("b64_json")
-    if not isinstance(b64_image, str) or not b64_image:
-        raise RuntimeError("OpenAI image reconstruction response did not include b64_json")
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(base64.b64decode(b64_image))
-    postprocess = postprocess_reconstructed_problem_image(
-        output,
-        transparent_background=transparent_background,
-        sharpen=sharpen,
-        source_size=_read_image_size(source),
-    )
-    postprocess["content_preservation"] = analyze_reconstruction_content_preservation(source, output)
-    latency_ms = int(round((time.perf_counter() - started_at) * 1000.0))
-    return ImageReconstructionResult(
-        output_path=output,
-        provider="openai",
-        model=str(fields[0][1]),
-        prompt=str(fields[1][1]),
-        source_path=source,
-        latency_ms=latency_ms,
-        image_size=str(fields[2][1]),
-        revised_prompt=first.get("revised_prompt") if isinstance(first.get("revised_prompt"), str) else None,
-        usage=payload.get("usage") if isinstance(payload.get("usage"), dict) else first.get("usage"),
-        response_id=str(payload.get("id")) if payload.get("id") else None,
-        mime_type="image/png",
-        postprocess=postprocess,
-    )
 
 
 def postprocess_reconstructed_problem_image(
